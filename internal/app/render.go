@@ -1,0 +1,729 @@
+package app
+
+import (
+	"fmt"
+	"strconv"
+	"strings"
+	"unicode/utf8"
+
+	"github.com/charmbracelet/lipgloss"
+
+	"github.com/nickooan/ntee-editor/internal/filetree"
+	"github.com/nickooan/ntee-editor/internal/input"
+	"github.com/nickooan/ntee-editor/internal/lsp"
+	"github.com/nickooan/ntee-editor/internal/view"
+)
+
+func (m Model) View() string {
+	if !m.ready {
+		return "starting…"
+	}
+
+	header := headerStyle.Width(m.width).Render("ntee-editor  ·  " + m.root)
+	status := m.padStatusRows(m.renderStatusLine())
+	bodyHeight := max(3, m.height-2-strings.Count(status, "\n"))
+
+	sidebarWidth := input.Clamp(m.width/4, 16, max(16, m.width-24))
+	// Panes tile the full width — a spare column would show as a stripe of
+	// terminal-default background against the themed panes.
+	mainWidth := max(3, m.width-sidebarWidth)
+
+	sidebar := paneStyle.Width(sidebarWidth - 2).Height(bodyHeight - 2).
+		Render(m.renderSidebar(sidebarWidth-4, bodyHeight-2))
+
+	var mainBody string
+	switch {
+	case m.fuzzyOpen:
+		mainBody = m.renderFuzzyOverlay(mainWidth-4, bodyHeight-2)
+	case m.messageOverlay != "":
+		mainBody = m.renderMessageOverlay(mainWidth-4, bodyHeight-2)
+	case m.defPickOpen:
+		mainBody = m.renderDefPickOverlay(mainWidth-4, bodyHeight-2)
+	case m.grepOpen:
+		mainBody = m.renderGrepOverlay(mainWidth-4, bodyHeight-2)
+	case m.mode == modeSearch:
+		mainBody = m.renderSearch(mainWidth-4, bodyHeight-2)
+	case m.mode == modeQuery:
+		mainBody = m.renderQueryMain(mainWidth-4, bodyHeight-2)
+	case m.openFile != nil:
+		mainBody = m.renderFile(mainWidth-4, bodyHeight-2)
+	default:
+		mainBody = baseStyle.Render("Type a path or fuzzy fragment · enter opens · ctrl+p goto.")
+	}
+	mainPane := paneStyle.Width(mainWidth - 2).Height(bodyHeight - 2).Render(mainBody)
+
+	body := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, mainPane)
+	return lipgloss.JoinVertical(lipgloss.Left, header, body, status)
+}
+
+// padStatusRows extends each status row to the full terminal width so the
+// chrome background runs edge-to-edge.
+func (m Model) padStatusRows(status string) string {
+	rows := strings.Split(status, "\n")
+	for i, row := range rows {
+		if pad := m.width - lipgloss.Width(row); pad > 0 {
+			rows[i] = row + statusTextStyle.Render(strings.Repeat(" ", pad))
+		}
+	}
+	return strings.Join(rows, "\n")
+}
+
+func (m Model) renderStatusLine() string {
+	switch m.mode {
+	case modeQuery:
+		// Navigation reflects the highlighted entry as a preview in the bar;
+		// the typed command underneath stays editable (adopted on next key).
+		line := promptStyle.Render("@query >") + statusTextStyle.Render(" ")
+		if m.commandPreview != "" {
+			line += previewStyle.Render(m.commandPreview) + cursorStyle.Render(" ")
+		} else {
+			line += renderInputLine(m.command, m.qCursor)
+		}
+		return withNotice(m, line) + "\n" +
+			hintStyle.Render("Enter open+edit · Shift+↑/↓ tree · Esc parent · :w :q :g … · Ctrl+F find · Ctrl+P goto · Ctrl+Q quit")
+	case modeEdit:
+		name := ""
+		if m.openFile != nil {
+			name = m.openFile.FileName
+		}
+		state := savedStyle.Render("saved")
+		if m.edit.dirty {
+			state = editingStyle.Render("editing")
+		}
+		pos := fmt.Sprintf("Ln %d, Col %d", m.edit.cy+1, m.edit.cx+1)
+		// Transient messages come BEFORE the long hint text: the terminal
+		// truncates overlong status rows, and feedback must never be what
+		// gets cut off.
+		line := promptStyle.Render("@edit") + statusTextStyle.Render(" "+name+"   ") + state +
+			m.diagSummary() + statusTextStyle.Render("   "+pos)
+		if m.errText != "" {
+			line += statusTextStyle.Render("   ") + errStyle.Render(m.errText)
+		}
+		if m.notice != "" {
+			line += statusTextStyle.Render("   ") + noticeStyle.Render(m.notice)
+		}
+		if diag, ok := m.diagAtLine(m.edit.cy); ok {
+			style := gutterWarnStyle
+			if diag.Severity == 1 {
+				style = errStyle
+			}
+			line += statusTextStyle.Render("   ") + style.Render(truncateRunes(diag.Message, 60))
+		}
+		return line + statusTextStyle.Render("   ") +
+			hintStyle.Render("Ctrl+S save · Ctrl+F find · Ctrl+A select · Ctrl+J/Ctrl+O jump/back · Ctrl+Z/Ctrl+Y undo/redo · Esc discard")
+	case modeSearch:
+		matches := view.FindSearchMatches(m.searchContent, m.searchInput)
+		summary := fmt.Sprintf("%d matches", len(matches))
+		if len(matches) > 0 {
+			summary = fmt.Sprintf("%d/%d", min(m.searchFocused+1, len(matches)), len(matches))
+		}
+		return promptStyle.Render("@search /") + statusTextStyle.Render(m.searchInput+"/   "+summary+"   ") +
+			hintStyle.Render("↑/↓ next · Enter jump · Esc back")
+	case modeCommand:
+		return promptStyle.Render(":") + renderInputLine(m.cmdInput, m.cmdCursor) +
+			statusTextStyle.Render("   ") + hintStyle.Render("w · q · e <path> · g <line> · revert · recent")
+	}
+	return ""
+}
+
+// diagSummary renders "✗N ⚠M " counts for the open file ("" when clean).
+func (m Model) diagSummary() string {
+	errs, warns := 0, 0
+	for _, d := range m.diags[m.openRel] {
+		if d.Severity == 1 {
+			errs++
+		} else {
+			warns++
+		}
+	}
+	out := ""
+	if errs > 0 {
+		out += statusTextStyle.Render("   ") + errStyle.Render(fmt.Sprintf("✗%d", errs))
+	}
+	if warns > 0 {
+		out += statusTextStyle.Render("   ") + editingStyle.Render(fmt.Sprintf("⚠%d", warns))
+	}
+	return out
+}
+
+// diagAtLine returns the first diagnostic on a line of the open file.
+func (m Model) diagAtLine(line int) (lsp.Diagnostic, bool) {
+	for _, d := range m.diags[m.openRel] {
+		if d.Line == line {
+			return d, true
+		}
+	}
+	return lsp.Diagnostic{}, false
+}
+
+func withNotice(m Model, line string) string {
+	if m.errText != "" {
+		line += statusTextStyle.Render("   ") + errStyle.Render(m.errText)
+	}
+	if m.notice != "" {
+		line += statusTextStyle.Render("   ") + noticeStyle.Render(m.notice)
+	}
+	return line
+}
+
+func (m Model) renderSidebar(width, height int) string {
+	entries := m.treeEntries()
+	if len(entries) == 0 {
+		return baseStyle.Render("(empty)")
+	}
+	highlighted := m.highlightedEntryIndex(entries)
+	vp := filetree.BuildFileTreeViewport(entries, height, 0, highlighted)
+
+	lines := make([]string, 0, len(vp.Entries))
+	for i, entry := range vp.Entries {
+		label := filetree.FormatFileTreeEntryLabel(entry, width)
+		switch {
+		case highlighted >= 0 && vp.SafeScrollY+i == highlighted:
+			lines = append(lines, selectedEntryStyle.Render(label))
+		case entry.RelativePath == m.openRel && m.openRel != "":
+			lines = append(lines, openFileStyle.Render(label))
+		case entry.Type == "directory":
+			lines = append(lines, dirStyle.Render(label))
+		default:
+			lines = append(lines, fileStyle.Render(label))
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// renderQueryMain shows the open file (view-style) with the suggestion popup
+// pinned to the pane bottom while the bar has matches.
+func (m Model) renderQueryMain(width, height int) string {
+	popup := m.renderQuerySuggestions(width)
+	contentHeight := max(1, height-len(popup))
+
+	var body string
+	if m.openFile != nil {
+		body = m.renderFile(width, contentHeight)
+	} else {
+		body = baseStyle.Render("Type a path or fuzzy fragment · enter opens · shift+↑/↓ walks the tree.")
+	}
+	if len(popup) == 0 {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	for len(lines) < contentHeight {
+		lines = append(lines, "")
+	}
+	return strings.Join(append(lines[:contentHeight], popup...), "\n")
+}
+
+// renderQuerySuggestions renders the completion popup rows (≤6 visible,
+// windowed around the selection).
+func (m Model) renderQuerySuggestions(width int) []string {
+	entries := m.treeEntries()
+	suggestions := m.queryInputSuggestions(entries)
+	if len(suggestions) == 0 {
+		return nil
+	}
+	const maxVisible = 6
+	selected := input.Clamp(m.inputSuggestIndex, 0, len(suggestions)-1)
+	start := 0
+	if selected >= maxVisible {
+		start = selected - maxVisible + 1
+	}
+	end := min(start+maxVisible, len(suggestions))
+
+	rows := make([]string, 0, end-start)
+	for i := start; i < end; i++ {
+		s := suggestions[i]
+		label := padTo(truncateRunes(" "+s.Label, width), width)
+		switch {
+		case i == selected:
+			rows = append(rows, selectedEntryStyle.Render(label))
+		case s.Source == "directory":
+			rows = append(rows, dirStyle.Render(label))
+		default:
+			rows = append(rows, suggestionFileStyle.Render(label))
+		}
+	}
+	return rows
+}
+
+func (m Model) renderFile(width, height int) string {
+	editing := m.mode == modeEdit
+	var lines []string
+	if editing {
+		lines = m.edit.lines
+	} else {
+		lines = m.fileLines
+		if lines == nil && m.openFile != nil {
+			lines = view.NormalizeLines(m.openFile.Content)
+		}
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+
+	gutterWidth := len(strconv.Itoa(max(len(lines), height)))
+	contentWidth := max(1, width-gutterWidth-3)
+
+	// Worst diagnostic severity per line for the gutter markers.
+	lineSev := map[int]int{}
+	for _, d := range m.diags[m.openRel] {
+		if cur, ok := lineSev[d.Line]; !ok || d.Severity < cur {
+			lineSev[d.Line] = d.Severity
+		}
+	}
+
+	start := m.fileScrollY
+	if editing {
+		// Keep the cursor line in view.
+		if m.edit.cy < start {
+			start = m.edit.cy
+		}
+		if m.edit.cy >= start+height {
+			start = m.edit.cy - height + 1
+		}
+	}
+	start = input.Clamp(start, 0, max(0, len(lines)-height))
+
+	scrollX := 0
+	if !editing {
+		scrollX = max(0, m.fileScrollX)
+	}
+
+	rows := make([]string, 0, height)
+	for i := start; i < start+height; i++ {
+		if i >= len(lines) {
+			rows = append(rows, "")
+			continue
+		}
+		numText := pad(strconv.Itoa(i+1), gutterWidth)
+		var number string
+		switch lineSev[i] {
+		case 1:
+			number = gutterErrStyle.Render(numText+"●") + gutterStyle.Render("│ ")
+		case 2, 3, 4:
+			number = gutterWarnStyle.Render(numText+"●") + gutterStyle.Render("│ ")
+		default:
+			number = gutterStyle.Render(numText + " │ ")
+		}
+		var content string
+		if editing && i == m.edit.cy {
+			content = renderEditLine(lines[i], m.edit.cx, contentWidth, m.edit.sel)
+		} else {
+			content = m.renderContentLine(i, lines[i], scrollX, contentWidth)
+		}
+		rows = append(rows, number+content)
+	}
+	return strings.Join(rows, "\n")
+}
+
+// renderContentLine draws one non-cursor line: styled from the highlight cache
+// when a row is available, plain otherwise (nil rows cover un-lexed files,
+// oversized files, and lines edited since the last rescan).
+func (m Model) renderContentLine(i int, line string, off, width int) string {
+	if m.hlLines != nil && i < len(m.hlLines) && m.hlLines[i] != nil {
+		return renderSegments(m.hlLines[i], off, width)
+	}
+	return plainWindow(line, off, width)
+}
+
+func plainWindow(line string, off, width int) string {
+	runes := []rune(line)
+	start := input.Clamp(off, 0, len(runes))
+	end := input.Clamp(start+width, 0, len(runes))
+	out := string(runes[start:end])
+	if pad := width - (end - start); pad > 0 {
+		out += strings.Repeat(" ", pad)
+	}
+	return baseStyle.Render(out)
+}
+
+// renderSegments renders styled segments through a rune window [off, off+width),
+// padding the remainder.
+func renderSegments(segs []view.HighlightSegment, off, width int) string {
+	var b strings.Builder
+	skipped, rendered := 0, 0
+	for _, seg := range segs {
+		if rendered >= width {
+			break
+		}
+		runes := []rune(seg.Text)
+		i := 0
+		if skipped < off {
+			need := off - skipped
+			if len(runes) <= need {
+				skipped += len(runes)
+				continue
+			}
+			i = need
+			skipped = off
+		}
+		take := min(len(runes)-i, width-rendered)
+		b.WriteString(segStyleFor(seg).Render(string(runes[i : i+take])))
+		rendered += take
+	}
+	if pad := width - rendered; pad > 0 {
+		b.WriteString(baseStyle.Render(strings.Repeat(" ", pad)))
+	}
+	return b.String()
+}
+
+// renderEditLine draws the cursor line, scrolling horizontally so the cursor
+// stays visible when the line is longer than width: it slices a width-wide
+// window that follows the cursor and draws the cursor at its in-window column.
+// An active selection (sel, in full-line rune columns) is highlighted where it
+// intersects the window.
+func renderEditLine(line string, cx, width int, sel *selRange) string {
+	if width < 1 {
+		width = 1
+	}
+	runes := []rune(line)
+	n := len(runes)
+	at := input.Clamp(cx, 0, n)
+
+	off := 0
+	if at >= width {
+		off = at - width + 1 // keep the cursor at the right edge once past it
+	}
+	end := min(off+width, n)
+	curCol := at - off // guaranteed within [0, width-1]
+
+	selS, selE := -1, -1
+	if sel != nil {
+		s, e := sel.start, sel.end
+		if s > e {
+			s, e = e, s
+		}
+		selS = input.Clamp(s, off, end) - off
+		selE = input.Clamp(e, off, end) - off
+	}
+
+	var b strings.Builder
+	for col := 0; col < width; col++ {
+		idx := off + col
+		ch := " "
+		if idx < end {
+			ch = string(runes[idx])
+		}
+		switch {
+		case col == curCol:
+			b.WriteString(cursorStyle.Render(ch))
+		case selS >= 0 && col >= selS && col < selE:
+			b.WriteString(selectionStyle.Render(ch))
+		default:
+			// Sublime-style current-line highlight.
+			b.WriteString(cursorLineStyle.Render(ch))
+		}
+	}
+	return b.String()
+}
+
+func (m Model) renderSearch(width, height int) string {
+	matches := view.FindSearchMatches(m.searchContent, m.searchInput)
+	byLine := view.BuildMatchesByLine(matches)
+	lines := strings.Split(m.searchContent, "\n")
+
+	maxScrollY := max(0, len(lines)-height)
+	start := 0
+	off := 0
+	if len(matches) > 0 && m.searchFocused < len(matches) {
+		fm := matches[m.searchFocused]
+		start = input.Clamp(fm.LineIndex-2, 0, maxScrollY)
+		// Scroll horizontally so a focused match past the width is visible.
+		fline := lines[fm.LineIndex]
+		fcol := utf8.RuneCountInString(fline[:clampByte(fm.Start, len(fline))])
+		if fcol >= width {
+			off = max(0, fcol-width/2)
+		}
+	}
+
+	rows := make([]string, 0, height)
+	for i := start; i < start+height; i++ {
+		if i >= len(lines) {
+			rows = append(rows, "")
+			continue
+		}
+		var segs []view.HighlightSegment
+		if i < len(m.searchHl) {
+			segs = m.searchHl[i]
+		}
+		rows = append(rows, renderSearchLine(lines[i], segs, byLine[i], m.searchFocused, off, width))
+	}
+	return strings.Join(rows, "\n")
+}
+
+// renderSearchLine draws one content line for the search view, slicing a
+// width-wide window starting at rune column off. Matches (byte offsets,
+// converted to rune columns here) render with their background styles and win
+// over the line's syntax segments, which color everything else.
+func renderSearchLine(line string, segs []view.HighlightSegment, matches []view.LineMatch, focused, off, width int) string {
+	if width < 1 {
+		width = 1
+	}
+	runes := []rune(line)
+	n := len(runes)
+	end := min(off+width, n)
+
+	type mrange struct {
+		start, end int
+		focused    bool
+	}
+	mr := make([]mrange, 0, len(matches))
+	for _, lm := range matches {
+		s := utf8.RuneCountInString(line[:clampByte(lm.Start, len(line))])
+		e := utf8.RuneCountInString(line[:clampByte(lm.End, len(line))])
+		mr = append(mr, mrange{s, e, lm.MatchIndex == focused})
+	}
+
+	// Flatten segments into a per-rune segment index so syntax colors survive
+	// the rune-window slicing.
+	var segIdx []int
+	if segs != nil {
+		segIdx = make([]int, 0, n)
+		for si, seg := range segs {
+			for range []rune(seg.Text) {
+				segIdx = append(segIdx, si)
+			}
+		}
+	}
+
+	// Style key per visible column: -3 focused match, -2 match, -1 plain,
+	// >=0 index into segs. Matches win over syntax.
+	keyAt := func(idx int) int {
+		if idx < end {
+			for _, r := range mr {
+				if idx >= r.start && idx < r.end {
+					if r.focused {
+						return -3
+					}
+					return -2
+				}
+			}
+			if idx < len(segIdx) {
+				return segIdx[idx]
+			}
+		}
+		return -1
+	}
+	styleFor := func(key int) lipgloss.Style {
+		switch {
+		case key == -3:
+			return searchFocusedStyle
+		case key == -2:
+			return searchMatchStyle
+		case key >= 0:
+			return segStyleFor(segs[key])
+		default:
+			return baseStyle
+		}
+	}
+
+	// Batch consecutive same-style columns into runs — with a background on
+	// every cell, per-char Render would be ~width×height calls per frame.
+	var b strings.Builder
+	var run []rune
+	runKey := 0
+	flush := func() {
+		if len(run) > 0 {
+			b.WriteString(styleFor(runKey).Render(string(run)))
+			run = run[:0]
+		}
+	}
+	for col := 0; col < width; col++ {
+		idx := off + col
+		ch := ' '
+		if idx < end {
+			ch = runes[idx]
+		}
+		key := keyAt(idx)
+		if len(run) > 0 && key != runKey {
+			flush()
+		}
+		runKey = key
+		run = append(run, ch)
+	}
+	flush()
+	return b.String()
+}
+
+// clampByte clamps a byte offset into [0, n].
+func clampByte(i, n int) int {
+	if i < 0 {
+		return 0
+	}
+	if i > n {
+		return n
+	}
+	return i
+}
+
+func renderInputLine(text string, cursor int) string {
+	runes := []rune(text)
+	at := input.Clamp(cursor, 0, len(runes))
+	before := string(runes[:at])
+	cursorChar := " "
+	after := ""
+	if at < len(runes) {
+		cursorChar = string(runes[at])
+		after = string(runes[at+1:])
+	}
+	return statusTextStyle.Render(before) + cursorStyle.Render(cursorChar) + statusTextStyle.Render(after)
+}
+
+func padTo(s string, width int) string {
+	if n := width - len([]rune(s)); n > 0 {
+		return s + strings.Repeat(" ", n)
+	}
+	return s
+}
+
+func truncateRunes(s string, width int) string {
+	// Byte length ≤ width implies rune count ≤ width — skip the []rune alloc
+	// for the common short line.
+	if len(s) <= width {
+		return s
+	}
+	runes := []rune(s)
+	if len(runes) > width {
+		return string(runes[:width])
+	}
+	return s
+}
+
+func pad(s string, width int) string {
+	if n := width - len([]rune(s)); n > 0 {
+		return strings.Repeat(" ", n) + s
+	}
+	return s
+}
+
+// segStyles memoizes lipgloss styles per segment-style combination —
+// renderSegments runs for every visible row on every frame, and the style set
+// is tiny. The TUI render loop is single-goroutine, so a plain map is safe.
+type segStyleKey struct {
+	color     string
+	bold      bool
+	dim       bool
+	underline bool
+	italic    bool
+	strike    bool
+}
+
+var segStyles = map[segStyleKey]lipgloss.Style{}
+
+func segStyleFor(segment view.HighlightSegment) lipgloss.Style {
+	key := segStyleKey{
+		color:     segment.Color,
+		bold:      segment.Bold,
+		dim:       segment.DimColor,
+		underline: segment.Underline,
+		italic:    segment.Italic,
+		strike:    segment.Strike,
+	}
+	if style, ok := segStyles[key]; ok {
+		return style
+	}
+
+	style := lipgloss.NewStyle().Background(colBg)
+	if key.color != "" {
+		style = style.Foreground(colorFor(key.color))
+	} else {
+		style = style.Foreground(colFg)
+	}
+	if key.bold {
+		style = style.Bold(true)
+	}
+	if key.dim {
+		style = style.Faint(true)
+	}
+	if key.underline {
+		style = style.Underline(true)
+	}
+	if key.italic {
+		style = style.Italic(true)
+	}
+	if key.strike {
+		style = style.Strikethrough(true)
+	}
+	segStyles[key] = style
+	return style
+}
+
+func colorFor(name string) lipgloss.Color {
+	if strings.HasPrefix(name, "#") {
+		return lipgloss.Color(name) // chroma style hex; termenv degrades on non-truecolor terminals
+	}
+	switch name {
+	case "red":
+		return lipgloss.Color("1")
+	case "green":
+		return lipgloss.Color("2")
+	case "yellow":
+		return lipgloss.Color("3")
+	case "blue":
+		return lipgloss.Color("4")
+	case "magenta":
+		return lipgloss.Color("5")
+	case "cyan":
+		return lipgloss.Color("6")
+	case "white":
+		return lipgloss.Color("7")
+	case "gray":
+		return lipgloss.Color("8")
+	default:
+		return lipgloss.Color("")
+	}
+}
+
+// Gruvbox-dark palette (matches the default grammar style). Every emitted
+// run carries its own background — wrapping already-styled strings would
+// break on their inner ANSI resets.
+var (
+	colBg        = lipgloss.Color("#282828") // editor background
+	colBgChrome  = lipgloss.Color("#1d2021") // header / status chrome (bg0_h)
+	colFg        = lipgloss.Color("#ebdbb2") // cream foreground
+	colLineHl    = lipgloss.Color("#3c3836") // cursor-line highlight (bg1)
+	colSelection = lipgloss.Color("#504945") // bg2
+	colBorder    = lipgloss.Color("#3c3836")
+	colGutter    = lipgloss.Color("#7c6f64") // bg4
+	colComment   = lipgloss.Color("#928374") // gray
+	colAqua      = lipgloss.Color("#8ec07c")
+	colGreen     = lipgloss.Color("#b8bb26")
+	colOrange    = lipgloss.Color("#fe8019")
+	colRed       = lipgloss.Color("#fb4934")
+	colYellow    = lipgloss.Color("#fabd2f")
+	colFindBg    = lipgloss.Color("#fabd2f") // find highlight (gold)
+)
+
+var (
+	baseStyle   = lipgloss.NewStyle().Foreground(colFg).Background(colBg)
+	headerStyle = lipgloss.NewStyle().Bold(true).Foreground(colAqua).Background(colBgChrome)
+	paneStyle   = lipgloss.NewStyle().Background(colBg).BorderBackground(colBg).
+			BorderForeground(colBorder).Border(lipgloss.RoundedBorder())
+	cursorStyle = lipgloss.NewStyle().Foreground(colBg).Background(colFg)
+	gutterStyle = lipgloss.NewStyle().Foreground(colGutter).Background(colBg) // line numbers
+
+	// Status/hint chrome (darker bar, like Sublime's).
+	promptStyle     = lipgloss.NewStyle().Foreground(colAqua).Bold(true).Background(colBgChrome)
+	statusTextStyle = lipgloss.NewStyle().Foreground(colFg).Background(colBgChrome)
+	hintStyle       = lipgloss.NewStyle().Foreground(colComment).Background(colBgChrome)
+
+	gutterErrStyle  = lipgloss.NewStyle().Foreground(colRed).Background(colBg)
+	gutterWarnStyle = lipgloss.NewStyle().Foreground(colYellow).Background(colBg)
+
+	cursorLineStyle    = lipgloss.NewStyle().Foreground(colFg).Background(colLineHl)
+	selectedEntryStyle = lipgloss.NewStyle().Foreground(colFg).Background(colSelection)
+	openFileStyle      = lipgloss.NewStyle().Foreground(colGreen).Background(colBg)
+	dirStyle           = lipgloss.NewStyle().Foreground(colAqua).Bold(true).Background(colBg)
+	fileStyle          = lipgloss.NewStyle().Foreground(colFg).Background(colBg)
+
+	searchMatchStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#000000")).Background(colFindBg)
+	searchFocusedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#000000")).Background(colOrange).Bold(true)
+	selectionStyle     = lipgloss.NewStyle().Foreground(colFg).Background(colSelection)
+
+	previewStyle        = lipgloss.NewStyle().Foreground(colAqua).Background(colBgChrome)
+	suggestionFileStyle = lipgloss.NewStyle().Foreground(colYellow).Background(colBg)
+
+	noticeStyle  = lipgloss.NewStyle().Foreground(colGreen).Background(colBgChrome)
+	editingStyle = lipgloss.NewStyle().Foreground(colYellow).Bold(true).Background(colBgChrome) // unsaved edits
+	savedStyle   = lipgloss.NewStyle().Foreground(colGreen).Bold(true).Background(colBgChrome)  // in sync with disk
+	errStyle     = lipgloss.NewStyle().Foreground(colRed).Bold(true).Background(colBgChrome)
+)

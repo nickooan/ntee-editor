@@ -52,7 +52,7 @@ exact/prefix/fuzzy completions (fuzzy reaches into collapsed directories).
 | `Ctrl+Z` / `Ctrl+Y` | undo / redo (snapshot bursts, persisted in ntee-db) |
 | `Ctrl+A` | progressive select: word → line |
 | `Ctrl+F` | find in file (`Enter` jumps the cursor to the match) |
-| `Ctrl+J` | jump to the definition or file path under the cursor — multiple hits open a picker (`name.go:LINE — dir`, ↑/↓ + Enter, with a 5-line colored code preview that follows the selection); **on a definition line it finds all references instead** |
+| `Ctrl+J` | jump to the file path under the cursor, or ask the language server for the definition — multiple hits open a picker (`name.go:LINE — dir`, ↑/↓ + Enter, with a 5-line colored code preview that follows the selection); **on a definition line it finds all references instead**. File types with no configured server report "no language server" |
 | `Ctrl+O` | jump back (restores file, cursor, and scroll; 20-deep trail) |
 | `Esc` | clear selection, then discard unsaved edits and return to the query bar |
 
@@ -112,6 +112,7 @@ state with a status notice (undo works, nothing persists).
   `textDocument/definition` / `references` (UTF-16 columns bridged both
   ways). **LSP-strict**: for languages with a configured server, its answer
   is final ("still starting…" / "no definition found" rather than a guessed
-  jump); the regex heuristic only serves file types with no server at all. A
-  missing binary degrades to a one-time notice with everything else
+  jump); file types with no configured server report "no language server"
+  instead of guessing (a bare file path under the cursor still opens directly).
+  A missing binary degrades to a one-time notice with everything else
   unchanged.

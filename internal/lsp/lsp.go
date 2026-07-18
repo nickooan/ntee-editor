@@ -27,7 +27,7 @@ type NoticeMsg struct {
 
 // Client is one language server session. Doc-sync calls are fire-and-forget
 // (queued until the server finishes initializing); Definition errors while
-// the server is not ready, and callers fall back to the heuristic jump.
+// the server is not ready, and callers report that error rather than guessing.
 type Client interface {
 	DidOpen(path, content string)
 	DidChange(path, content string, rev int)

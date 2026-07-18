@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -19,10 +18,10 @@ import (
 )
 
 // Jump navigation (Ctrl+J / Ctrl+O in edit mode), ported from r1quest's jump
-// stack. The target under the cursor resolves as a file path first, then via
-// a Go/TS definition-pattern heuristic (current buffer, then same-extension
-// project files). LSP replaces the heuristic in v2 without touching the stack
-// mechanics.
+// stack. The target under the cursor resolves as a file path first (a language
+// server does not resolve bare paths), then via the server's
+// textDocument/definition. File types with no configured server report "no
+// language server" rather than guessing; the stack mechanics are shared.
 
 // jumpFrame is one origin to return to.
 type jumpFrame struct {
@@ -44,44 +43,6 @@ func (m Model) jumpToken() string {
 		token = string(m.edit.line()[r.start:r.end])
 	}
 	return strings.Trim(token, "\"'`()[]{}<>,;:")
-}
-
-// defPatterns builds the definition-line patterns for a word (Go + TS shapes).
-func defPatterns(word string) []*regexp.Regexp {
-	w := regexp.QuoteMeta(word)
-	shapes := []string{
-		`^\s*func\s+(\([^)]*\)\s*)?` + w + `\s*[([]`,                     // go func / method / generic
-		`^\s*type\s+` + w + `\b`,                                         // go type
-		`^\s*(const|var)\s+` + w + `\b`,                                  // go const/var
-		`^\s*(export\s+)?(default\s+)?(async\s+)?function\s+` + w + `\b`, // ts function
-		`^\s*(export\s+)?(abstract\s+)?class\s+` + w + `\b`,              // ts class
-		`^\s*(export\s+)?interface\s+` + w + `\b`,                        // ts interface
-		`^\s*(export\s+)?(const|let|var)\s+` + w + `\s*[=:(]`,            // ts binding
-	}
-	out := make([]*regexp.Regexp, 0, len(shapes))
-	for _, s := range shapes {
-		if re, err := regexp.Compile(s); err == nil {
-			out = append(out, re)
-		}
-	}
-	return out
-}
-
-// findDefinitionLine returns the first line matching any definition pattern,
-// skipping `skipLine` (-1 to disable) so a jump from the definition itself
-// does not land in place.
-func findDefinitionLine(lines []string, patterns []*regexp.Regexp, skipLine int) int {
-	for i, line := range lines {
-		if i == skipLine {
-			continue
-		}
-		for _, re := range patterns {
-			if re.MatchString(line) {
-				return i
-			}
-		}
-	}
-	return -1
 }
 
 // looksLikePath reports whether a token plausibly names a file.
@@ -122,46 +83,6 @@ type defCandidate struct {
 
 // maxDefCandidates caps the picker (reference lists can run long).
 const maxDefCandidates = 50
-
-// resolveJumpTargets resolves a token to jump candidates. The path branch is
-// single-hit; the definition-pattern branch collects every match in the
-// current buffer plus the first match per same-extension project file.
-func (m Model) resolveJumpTargets(token string) []defCandidate {
-	if rel, ok := m.resolveJumpPath(token); ok {
-		return []defCandidate{{rel: rel}}
-	}
-
-	patterns := defPatterns(token)
-	var out []defCandidate
-	for i, line := range m.edit.lines {
-		if i == m.edit.cy {
-			continue // a jump from the definition itself must not land in place
-		}
-		for _, re := range patterns {
-			if re.MatchString(line) {
-				out = append(out, defCandidate{rel: m.openRel, line: i})
-				break
-			}
-		}
-	}
-	ext := strings.ToLower(filepath.Ext(m.openFile.FileName))
-	for _, rel := range filetree.BuildAllEntries(m.root, m.cfg.Tree.Ignore) {
-		if len(out) >= maxDefCandidates {
-			break
-		}
-		if rel == m.openRel || strings.ToLower(filepath.Ext(rel)) != ext {
-			continue
-		}
-		f, ok := filetree.ReadViewFile(m.root, rel)
-		if !ok || f.Binary {
-			continue
-		}
-		if line := findDefinitionLine(view.NormalizeLines(f.Content), patterns, -1); line >= 0 {
-			out = append(out, defCandidate{rel: rel, line: line})
-		}
-	}
-	return out
-}
 
 // jumpToCandidates handles the 0/1/many outcome shared by the LSP and
 // heuristic paths. title labels the picker ("definitions of X" / "references
@@ -275,10 +196,10 @@ func (m Model) collectInRootCandidates(locs []lsp.Location) []defCandidate {
 	return cands
 }
 
-// jumpToReference (Ctrl+J) jumps to the definition or file under the cursor,
-// pushing the origin so Ctrl+O returns. When a language server is available
-// it is asked first (async — the answer arrives as definitionMsg); otherwise
-// the regex heuristic runs synchronously.
+// jumpToReference (Ctrl+J) jumps to the file or definition under the cursor,
+// pushing the origin so Ctrl+O returns. A path-shaped token opens that file;
+// otherwise the language server is asked (async — the answer arrives as
+// definitionMsg). Files with no configured server report "no language server".
 func (m Model) jumpToReference() (tea.Model, tea.Cmd) {
 	if m.openFile == nil {
 		return m, nil
@@ -295,6 +216,12 @@ func (m Model) jumpToReference() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// A token that names a real file jumps straight there — a language server
+	// does not resolve bare file paths.
+	if rel, ok := m.resolveJumpPath(token); ok {
+		return m.jumpToLocation(rel, 0, 0), nil
+	}
+
 	if client, ok := m.lsp.ClientFor(m.openFile.Path); ok {
 		path := m.openFile.Path
 		line := m.edit.cy
@@ -304,7 +231,8 @@ func (m Model) jumpToReference() (tea.Model, tea.Cmd) {
 			return definitionMsg{token: token, locs: locs, err: err}
 		}
 	}
-	return m.heuristicJump(token)
+	m.errText = "no language server for this file type"
+	return m, nil
 }
 
 // handleDefinition lands an LSP definition answer, falling back to the
@@ -359,8 +287,8 @@ func lspLookupError(err error) string {
 	return "lsp lookup failed: " + err.Error()
 }
 
-// requestReferences chains a references lookup for the symbol under the
-// cursor (LSP when available, heuristic otherwise).
+// requestReferences chains a references lookup for the symbol under the cursor
+// via the language server.
 func (m Model) requestReferences(token string) (tea.Model, tea.Cmd) {
 	if client, ok := m.lsp.ClientFor(m.openFile.Path); ok {
 		path := m.openFile.Path
@@ -371,7 +299,8 @@ func (m Model) requestReferences(token string) (tea.Model, tea.Cmd) {
 			return referencesMsg{token: token, locs: locs, err: err}
 		}
 	}
-	return m.heuristicReferences(token), nil
+	m.errText = "no language server for this file type"
+	return m, nil
 }
 
 // handleReferences lands an LSP references answer, excluding the definition
@@ -394,73 +323,6 @@ func (m Model) handleReferences(msg referencesMsg) (tea.Model, tea.Cmd) {
 	}
 	return m.jumpToCandidates("references of "+msg.token, msg.token,
 		"no references found: "+msg.token, cands), nil
-}
-
-// heuristicReferences finds word-boundary occurrences of token across the
-// buffer and same-extension project files, skipping definition-shaped lines.
-func (m Model) heuristicReferences(token string) Model {
-	wordRe, err := regexp.Compile(`\b` + regexp.QuoteMeta(token) + `\b`)
-	if err != nil {
-		m.errText = "no references found: " + token
-		return m
-	}
-	defs := defPatterns(token)
-	isDefLine := func(line string) bool {
-		for _, re := range defs {
-			if re.MatchString(line) {
-				return true
-			}
-		}
-		return false
-	}
-
-	var cands []defCandidate
-	for i, line := range m.edit.lines {
-		if i == m.edit.cy || isDefLine(line) {
-			continue
-		}
-		if wordRe.MatchString(line) {
-			cands = append(cands, defCandidate{rel: m.openRel, line: i})
-		}
-	}
-	ext := strings.ToLower(filepath.Ext(m.openFile.FileName))
-	for _, rel := range filetree.BuildAllEntries(m.root, m.cfg.Tree.Ignore) {
-		if len(cands) >= maxDefCandidates {
-			break
-		}
-		if rel == m.openRel || strings.ToLower(filepath.Ext(rel)) != ext {
-			continue
-		}
-		f, ok := filetree.ReadViewFile(m.root, rel)
-		if !ok || f.Binary {
-			continue
-		}
-		for i, line := range view.NormalizeLines(f.Content) {
-			if isDefLine(line) {
-				continue
-			}
-			if wordRe.MatchString(line) {
-				cands = append(cands, defCandidate{rel: rel, line: i})
-				if len(cands) >= maxDefCandidates {
-					break
-				}
-			}
-		}
-	}
-	return m.jumpToCandidates("references of "+token, token, "no references found: "+token, cands)
-}
-
-// heuristicJump is the no-LSP path: path-under-cursor, else definition
-// patterns over the buffer and same-extension project files. A cursor sitting
-// on a definition-shaped line flips to a reference search instead.
-func (m Model) heuristicJump(token string) (tea.Model, tea.Cmd) {
-	for _, re := range defPatterns(token) {
-		if re.MatchString(m.edit.lines[m.edit.cy]) {
-			return m.heuristicReferences(token), nil
-		}
-	}
-	return m.jumpToCandidates("definitions of "+token, token,
-		"no definition or path under cursor: "+token, m.resolveJumpTargets(token)), nil
 }
 
 // jumpToLocation pushes the origin frame and lands on (rel, line, utf16Col).

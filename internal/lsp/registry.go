@@ -28,6 +28,9 @@ type Manager struct {
 func NewManager(cfg config.Config, root string) *Manager {
 	extLang := map[string]string{}
 	for lang, lc := range cfg.Languages {
+		if !lc.IsEnabled() {
+			continue // disabled language: its files route to no server
+		}
 		for _, ext := range lc.Extensions {
 			extLang[strings.ToLower(ext)] = lang
 		}

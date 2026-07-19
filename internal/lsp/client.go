@@ -52,6 +52,11 @@ func (s stdioConn) Close() error {
 
 // resolveBinary finds the server executable: absolute path, then PATH, then
 // ~/go/bin (where go install puts gopls, often missing from GUI-shell PATHs).
+// ResolveBinary reports the resolved path of a server command using the same
+// rules the editor uses (absolute path, PATH, then ~/go/bin). Exposed so the
+// --prepare-lsp tooling can verify installs identically.
+func ResolveBinary(command string) (string, error) { return resolveBinary(command) }
+
 func resolveBinary(command string) (string, error) {
 	if filepath.IsAbs(command) {
 		if info, err := os.Stat(command); err == nil && info.Mode().IsRegular() {
@@ -88,11 +93,11 @@ func languageIDFor(path, fallback string) string {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".go":
 		return "go"
-	case ".ts":
+	case ".ts", ".mts", ".cts":
 		return "typescript"
 	case ".tsx":
 		return "typescriptreact"
-	case ".js":
+	case ".js", ".mjs", ".cjs":
 		return "javascript"
 	case ".jsx":
 		return "javascriptreact"

@@ -89,7 +89,21 @@ lsp: { enabled: true }    # gopls / typescript-language-server, started lazily
 
 `languages.<name>.extensions` extend (union with) the built-in defaults rather than
 replacing them, so you can add a file type to an existing server without re-listing the
-defaults; `command`/`args`/`init` overlay the default when set.
+defaults; `command`/`args`/`init` overlay the default when set. Each language also takes an
+`enable: true|false` toggle (omitted = on) — `typescript: { enable: false }` turns a server
+off without deleting its config.
+
+### Installing language servers
+
+`ntee-editor --prepare-lsp` installs the servers for the built-in recipes — **go** (gopls),
+**typescript/js** (typescript-language-server), **java** (jdtls), **kotlin**
+(kotlin-language-server), **ruby** (ruby-lsp), **python** (pyright), **vue**
+(@vue/language-server) — using the platform's native tool (`brew` / `go install` / `npm` /
+`gem`), then writes the resolved commands into `~/.config/ntee-editor/config.yaml`. It prints a
+plan and asks before running installers (`--yes` skips the prompt); it **adds only missing
+languages** (your tuned entries are kept, and the old file is backed up to `config.yaml.bak`),
+and skips servers whose runtime (Node/JDK/Ruby/Go) is absent, telling you what to install.
+Recipes can be overridden per language via an `install:` block in the config.
 
 ## Persistence
 

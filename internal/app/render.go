@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/nickooan/ntee-editor/internal/filetree"
 	"github.com/nickooan/ntee-editor/internal/input"
@@ -141,7 +142,7 @@ func (m Model) renderEditStatus() string {
 		line += statusTextStyle.Render("   ") + style.Render(truncateRunes(diag.Message, 60))
 	}
 	return line + statusTextStyle.Render("   ") +
-		hintStyle.Render("Ctrl+S save · Ctrl+F find · Ctrl+A select · Ctrl+J/Ctrl+O jump/back · Ctrl+Z/Ctrl+Y undo/redo · Esc discard")
+		hintStyle.Render("Ctrl+ S save, F find, A select, J/O jump/back, Z/Y undo/redo · Esc discard")
 }
 
 // diagSummary renders "✗N ⚠M " counts for the open file ("" when clean).
@@ -345,7 +346,74 @@ func (m Model) renderFile(width, height int) string {
 		}
 		rows = append(rows, number+content)
 	}
+	if editing && m.completionOpen {
+		rows = m.overlayCompletion(rows, start, gutterWidth, contentWidth, height)
+	}
 	return strings.Join(rows, "\n")
+}
+
+// overlayCompletion splices the autocomplete dropdown onto the rendered file
+// rows, anchored under the identifier being completed. v1 covers the code lines
+// it sits over; the gutter/height math mirrors renderFile so the box lands at
+// the cursor.
+func (m Model) overlayCompletion(rows []string, start, gutterWidth, contentWidth, height int) []string {
+	items := m.completionItems
+	if len(items) == 0 {
+		return rows
+	}
+	const maxRows = 8
+	n := min(len(items), maxRows)
+	sel := input.Clamp(m.completionIndex, 0, len(items)-1)
+	top := 0
+	if sel >= n {
+		top = sel - n + 1
+	}
+
+	// Popup width: longest visible label + padding, capped to the content area.
+	w := 12
+	for i := 0; i < n; i++ {
+		if lw := lipgloss.Width(items[top+i].Label) + 2; lw > w {
+			w = lw
+		}
+	}
+	w = min(w, contentWidth)
+
+	// Anchor at the identifier start, within renderEditLine's horizontal window.
+	line := m.edit.line()
+	at := input.Clamp(m.edit.cx, 0, len(line))
+	off := 0
+	if at >= contentWidth {
+		off = at - contentWidth + 1
+	}
+	anchor := gutterWidth + 3 + input.Clamp(identStart(line, m.edit.cx)-off, 0, max(0, contentWidth-w))
+
+	curRow := m.edit.cy - start
+	below := curRow+n < height // room beneath the cursor?
+	for i := 0; i < n; i++ {
+		idx := top + i
+		label := padTo(truncateRunes(items[idx].Label, w), w)
+		box := completionItemStyle.Render(label)
+		if idx == sel {
+			box = completionSelStyle.Render(label)
+		}
+		rowIdx := curRow + 1 + i
+		if !below {
+			rowIdx = curRow - n + i
+		}
+		if rowIdx < 0 || rowIdx >= len(rows) {
+			continue
+		}
+		// Overlay the box onto the real row, preserving the gutter and the code
+		// to the left/right (ANSI-aware slicing) rather than blanking the line.
+		orig := rows[rowIdx]
+		left := ansi.Truncate(orig, anchor, "")
+		if pad := anchor - ansi.StringWidth(left); pad > 0 {
+			left += baseStyle.Render(strings.Repeat(" ", pad))
+		}
+		right := ansi.TruncateLeft(orig, anchor+w, "")
+		rows[rowIdx] = left + box + right
+	}
+	return rows
 }
 
 // renderContentLine draws one non-cursor line: styled from the highlight cache
@@ -780,6 +848,10 @@ var (
 	dirStyle           = lipgloss.NewStyle().Foreground(colAqua).Bold(true).Background(colBg)
 	fileStyle          = lipgloss.NewStyle().Foreground(colFg).Background(colBg)
 	ignoredFileStyle   = lipgloss.NewStyle().Foreground(colComment).Background(colBg) // .gitignore'd: gray
+
+	// Autocomplete dropdown rows.
+	completionItemStyle = lipgloss.NewStyle().Foreground(colFg).Background(colBgChrome)
+	completionSelStyle  = lipgloss.NewStyle().Foreground(colBg).Background(colAqua)
 
 	searchMatchStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#000000")).Background(colFindBg)
 	searchFocusedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#000000")).Background(colOrange).Bold(true)

@@ -32,6 +32,7 @@ const maxGrepResults = 200
 // unsaved changes it asks the user to save first — Enter on a hit opens
 // another file, which would silently discard the buffer.
 func (m Model) openGrep() Model {
+	m = m.closeCompletion()
 	if m.mode == modeEdit && m.edit.dirty {
 		m.errText = "unsaved changes — save (Ctrl+S) before repo search"
 		return m

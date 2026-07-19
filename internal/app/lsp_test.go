@@ -13,9 +13,10 @@ import (
 
 // stubClient records the doc-sync calls the app makes.
 type stubClient struct {
-	calls   []string
-	locs    []lsp.Location
-	refLocs []lsp.Location
+	calls       []string
+	locs        []lsp.Location
+	refLocs     []lsp.Location
+	completions []lsp.CompletionItem
 }
 
 func (s *stubClient) DidOpen(path, _ string) { s.calls = append(s.calls, "open:"+filepath.Base(path)) }
@@ -28,6 +29,10 @@ func (s *stubClient) Definition(string, int, int) ([]lsp.Location, error) { retu
 func (s *stubClient) References(string, int, int) ([]lsp.Location, error) {
 	s.calls = append(s.calls, "references")
 	return s.refLocs, nil
+}
+func (s *stubClient) Completion(string, int, int) ([]lsp.CompletionItem, error) {
+	s.calls = append(s.calls, "completion")
+	return s.completions, nil
 }
 
 type stubRegistry struct{ client *stubClient }
@@ -50,13 +55,21 @@ func TestLifecycleCallsReachClient(t *testing.T) {
 	m = key(m, tea.KeyMsg{Type: tea.KeyCtrlS})
 	m = m.openFileAt("lib/util.ts") // close main.go, open util.ts
 
-	want := []string{"open:main.go", "change:main.go", "change:main.go", "save:main.go", "close:main.go", "open:util.ts"}
-	if len(client.calls) < len(want) {
+	// Collapse consecutive identical calls: completion syncs the buffer with
+	// extra DidChange calls, so assert the lifecycle order, not exact counts.
+	var seq []string
+	for _, c := range client.calls {
+		if len(seq) == 0 || seq[len(seq)-1] != c {
+			seq = append(seq, c)
+		}
+	}
+	want := []string{"open:main.go", "change:main.go", "save:main.go", "close:main.go", "open:util.ts"}
+	if len(seq) < len(want) {
 		t.Fatalf("calls: %v", client.calls)
 	}
 	for i, w := range want {
-		if client.calls[i] != w {
-			t.Fatalf("call %d = %q, want %q (all: %v)", i, client.calls[i], w, client.calls)
+		if seq[i] != w {
+			t.Fatalf("collapsed call %d = %q, want %q (all: %v)", i, seq[i], w, client.calls)
 		}
 	}
 }

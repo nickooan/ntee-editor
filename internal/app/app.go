@@ -132,6 +132,17 @@ type Model struct {
 	defPickPrevLines []string
 	defPickPrevHl    [][]view.HighlightSegment
 
+	// LSP autocomplete popup (edit mode). completionAll is the server's raw
+	// list; completionItems is it filtered by the identifier prefix under the
+	// cursor and sorted. completionStart is that identifier's start rune-column.
+	completionOpen      bool
+	completionAll       []lsp.CompletionItem
+	completionItems     []lsp.CompletionItem
+	completionIndex     int
+	completionStart     int
+	completionPending   bool // a request is in flight
+	completionDismissed bool // Esc'd — suppress auto-reopen until a word boundary
+
 	// Repo-wide content search overlay (Ctrl+G).
 	grepOpen    bool
 	grepQuery   string
@@ -197,6 +208,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case referencesMsg:
 		return m.handleReferences(msg)
+
+	case completionMsg:
+		return m.handleCompletion(msg)
 
 	case tea.KeyMsg:
 		if msg.Type == tea.KeyCtrlC || msg.Type == tea.KeyCtrlQ {

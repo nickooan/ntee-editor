@@ -21,6 +21,18 @@ func (m Model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// The completion popup, when open, consumes its navigation/accept/dismiss
+	// keys; any other key (except typing/backspace, which manage the popup
+	// themselves) closes it and is then processed normally.
+	if m.completionOpen {
+		if next, cmd, done := m.completionKey(msg); done {
+			return next, cmd
+		}
+		if msg.Type != tea.KeyRunes && msg.Type != tea.KeyBackspace {
+			m = m.closeCompletion()
+		}
+	}
+
 	switch msg.Type {
 	case tea.KeyEsc:
 		// First Esc clears a selection; the next discards unsaved edits and
@@ -107,7 +119,7 @@ func (m Model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m = m.hlMarkLine(m.edit.cy)
 		m.snapDirty = true
-		return m, nil
+		return m.afterEditBackspace()
 
 	case tea.KeyDelete:
 		if m.edit.deleteSelection() {
@@ -139,7 +151,7 @@ func (m Model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.edit.insert(string(msg.Runes))
 		m = m.hlMarkLine(m.edit.cy)
 		m.snapDirty = true
-		return m, nil
+		return m.afterEditType(string(msg.Runes))
 	}
 	return m, nil
 }

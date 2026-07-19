@@ -280,6 +280,27 @@ func (c *serverClient) References(path string, line, utf16Col int) ([]Location, 
 	return parseLocations(raw), nil
 }
 
+// Completion asks the server for completion candidates at the position (member
+// completions after ".", scope symbols for a bare prefix).
+func (c *serverClient) Completion(path string, line, utf16Col int) ([]CompletionItem, error) {
+	c.mu.Lock()
+	conn, ready := c.conn, c.ready && !c.dead
+	c.mu.Unlock()
+	if !ready {
+		return nil, errors.New("language server not ready")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	raw, err := conn.Request(ctx, "textDocument/completion", completionParams{
+		TextDocument: textDocumentIdentifier{URI: PathToURI(path)},
+		Position:     Position{Line: line, Character: utf16Col},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return parseCompletion(raw), nil
+}
+
 // handle answers server→client traffic: diagnostics to the sink, config
 // requests with nulls, everything else tolerated silently.
 func (c *serverClient) handle(method string, params json.RawMessage) (any, error) {

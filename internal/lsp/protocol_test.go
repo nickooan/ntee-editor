@@ -1,6 +1,26 @@
 package lsp
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
+
+func TestParseCompletion(t *testing.T) {
+	list := parseCompletion(json.RawMessage(`{"isIncomplete":false,"items":[{"label":"Println"},{"label":"Printf"}]}`))
+	if len(list) != 2 || list[0].Label != "Println" {
+		t.Fatalf("object form: %+v", list)
+	}
+	arr := parseCompletion(json.RawMessage(`[{"label":"Foo","insertText":"Foo()"}]`))
+	if len(arr) != 1 || arr[0].InsertText != "Foo()" {
+		t.Fatalf("array form: %+v", arr)
+	}
+	if parseCompletion(json.RawMessage(`null`)) != nil {
+		t.Fatal("null should parse to nil")
+	}
+	if parseCompletion(nil) != nil {
+		t.Fatal("empty should parse to nil")
+	}
+}
 
 func TestURIRoundTrip(t *testing.T) {
 	for _, path := range []string{

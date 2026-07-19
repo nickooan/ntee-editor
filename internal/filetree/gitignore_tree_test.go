@@ -45,6 +45,35 @@ func TestBuildFileTreeEntriesGitignore(t *testing.T) {
 	check("ignoredDir/inside.txt", true) // inherits from the ignored dir
 }
 
+func TestBuildAllEntriesExcludesGitignored(t *testing.T) {
+	root := t.TempDir()
+	write := func(rel string) {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("main.go")
+	write("keep.txt")
+	write("dist/bundle.js")
+	write("node_modules/pkg/index.js")
+
+	gi := CompileGitignore([]string{"dist/", "node_modules/"})
+	set := map[string]bool{}
+	for _, f := range BuildAllEntries(root, nil, gi) {
+		set[f] = true
+	}
+	if set["dist/bundle.js"] || set["node_modules/pkg/index.js"] {
+		t.Errorf("gitignored subtrees must be excluded from the corpus: %v", set)
+	}
+	if !set["main.go"] || !set["keep.txt"] {
+		t.Errorf("tracked files must remain: %v", set)
+	}
+}
+
 func TestBuildFileTreeEntriesNilGitignore(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "a.log"), []byte("x"), 0o644); err != nil {

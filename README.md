@@ -67,13 +67,18 @@ Defaults ← `~/.config/ntee-editor/config.yaml` ← `<project>/.ntee-editor.yam
 ```yaml
 version: 1
 editor: { tab_width: 4, max_snapshots: 50, max_highlight_kb: 512 }
-tree:   { ignore: [".git", "node_modules", "dist"] }
+tree:   { ignore: [".git"] }    # only .git is hidden; .gitignore'd paths show grayed
 theme:  { syntax: "gruvbox" }   # any chroma style name; default is gruvbox dark
 languages:
-  go:         { extensions: [".go"],         lsp: { command: "gopls" } }
-  typescript: { extensions: [".ts", ".tsx"], lsp: { command: "typescript-language-server", args: ["--stdio"] } }
+  go:         { extensions: [".go"], lsp: { command: "gopls" } }
+  # tsserver also handles JS; a config's `extensions` are UNIONED with these defaults.
+  typescript: { extensions: [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"], lsp: { command: "typescript-language-server", args: ["--stdio"] } }
 lsp: { enabled: true }    # gopls / typescript-language-server, started lazily
 ```
+
+`languages.<name>.extensions` extend (union with) the built-in defaults rather than
+replacing them, so you can add a file type to an existing server without re-listing the
+defaults; `command`/`args`/`init` overlay the default when set.
 
 ## Persistence
 

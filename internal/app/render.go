@@ -265,6 +265,20 @@ func (m Model) renderQuerySuggestions(width int) []string {
 	return rows
 }
 
+// fileViewportTop is the first line drawn in the file pane: fileScrollY nudged to
+// keep the cursor within a height-row window, then clamped. Shared by renderFile
+// and edit-mode paging so both agree on what is on screen.
+func fileViewportTop(cy, scrollY, height, total int) int {
+	start := scrollY
+	if cy < start {
+		start = cy
+	}
+	if cy >= start+height {
+		start = cy - height + 1
+	}
+	return input.Clamp(start, 0, max(0, total-height))
+}
+
 func (m Model) renderFile(width, height int) string {
 	// modeExec pauses the editor over the live buffer, so it renders like edit
 	// mode (cursor + selection stay visible behind the @exec bar).
@@ -293,17 +307,11 @@ func (m Model) renderFile(width, height int) string {
 		}
 	}
 
-	start := m.fileScrollY
+	start := input.Clamp(m.fileScrollY, 0, max(0, len(lines)-height))
 	if editing {
 		// Keep the cursor line in view.
-		if m.edit.cy < start {
-			start = m.edit.cy
-		}
-		if m.edit.cy >= start+height {
-			start = m.edit.cy - height + 1
-		}
+		start = fileViewportTop(m.edit.cy, m.fileScrollY, height, len(lines))
 	}
-	start = input.Clamp(start, 0, max(0, len(lines)-height))
 
 	scrollX := 0
 	if !editing {

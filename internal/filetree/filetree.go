@@ -174,7 +174,7 @@ const maxScanDepth = 16
 // returns every regular file's relative path. This is the fuzzy-search corpus:
 // matching must find entries inside collapsed directories, hence the full walk.
 // The ignore list is applied during the walk (load-bearing for big JS repos).
-func BuildAllEntries(root string, ignore []string) []string {
+func BuildAllEntries(root string, ignore []string, gi *Gitignore) []string {
 	if root == "" {
 		return nil
 	}
@@ -204,6 +204,11 @@ func BuildAllEntries(root string, ignore []string) []string {
 			rel := child.name
 			if dirPath != "" {
 				rel = dirPath + "/" + child.name
+			}
+			// Gitignored entries are kept out of the search corpus entirely; a
+			// gitignored directory is not descended, so its subtree is excluded.
+			if gi.Match(rel, child.isDir) {
+				continue
 			}
 			if child.isDir {
 				appendDir(rel, depth+1)

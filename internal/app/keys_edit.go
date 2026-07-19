@@ -6,6 +6,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/nickooan/ntee-editor/internal/filetree"
+	"github.com/nickooan/ntee-editor/internal/input"
 )
 
 // contentHeight approximates the file pane's inner height (header + borders +
@@ -76,6 +77,10 @@ func (m Model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyShiftDown:
 		m.edit.extendLineSelection(1)
 		return m, nil
+	case tea.KeyPgUp:
+		return m.pageEdit(-1), nil
+	case tea.KeyPgDown:
+		return m.pageEdit(1), nil
 	case tea.KeyHome:
 		m.edit.clearSelection()
 		m.edit.cx = 0
@@ -137,6 +142,24 @@ func (m Model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, nil
+}
+
+// pageEdit scrolls the file pane by one page with a one-line overlap (the old
+// bottom line becomes the new top on PgDown, and the old top becomes the new
+// bottom on PgUp), moving the cursor with it so it keeps its on-screen row. dir
+// is +1 (down) or -1 (up). It recomputes the current top from the cursor rather
+// than trusting m.fileScrollY, which is stale after arrow navigation.
+func (m Model) pageEdit(dir int) Model {
+	m = m.flushBurst() // a page jump is a burst boundary, like leaving a line
+	m.edit.clearSelection()
+	total := len(m.edit.lines)
+	h := m.contentHeight() + 1 // rendered file rows in edit mode (single-line status)
+	step := max(1, h-1)        // a page minus one line → one-line overlap
+	top := fileViewportTop(m.edit.cy, m.fileScrollY, h, total)
+	m.edit.cy = input.Clamp(m.edit.cy+dir*step, 0, total-1)
+	m.edit.clampCursor()
+	m.fileScrollY = input.Clamp(top+dir*step, 0, max(0, total-h))
+	return m
 }
 
 // moveEditCursor moves the cursor; leaving the line is a burst boundary.

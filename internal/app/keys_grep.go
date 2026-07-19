@@ -38,7 +38,7 @@ func (m Model) openGrep() Model {
 	}
 	sizeCap := m.cfg.Editor.MaxHighlightKB * 1024
 	var files []grepFile
-	for _, rel := range filetree.BuildAllEntries(m.root, m.cfg.Tree.Ignore) {
+	for _, rel := range filetree.BuildAllEntries(m.root, m.cfg.Tree.Ignore, m.gitignore) {
 		f, ok := filetree.ReadViewFile(m.root, rel)
 		if !ok || f.Binary {
 			continue

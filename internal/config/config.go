@@ -1,6 +1,9 @@
 // Package config loads the editor's YAML configuration. Load order:
 // built-in defaults ← ~/.config/ntee-editor/config.yaml ← <project>/.ntee-editor.yaml
-// (later files override fields they set; lists replace).
+// (later files override fields they set; most lists replace). Exception: a
+// language's `extensions` are UNIONED with the built-in defaults, so a config
+// extends (never shrinks) the set of file types routed to an LSP server; other
+// language fields (command/args/init) overlay the default when set.
 package config
 
 import (
@@ -61,7 +64,10 @@ func Default() Config {
 			MaxHighlightKB: 512,
 		},
 		Tree: TreeConfig{
-			Ignore: []string{".git", "node_modules", "dist"},
+			// Only .git is hard-hidden. Other noise (node_modules, dist, …) is
+			// handled by .gitignore: shown grayed in the tree, browsable one
+			// level at a time, and kept out of the search corpus.
+			Ignore: []string{".git"},
 		},
 		Theme: ThemeConfig{Syntax: "gruvbox"},
 		Languages: map[string]LanguageConfig{
@@ -70,7 +76,8 @@ func Default() Config {
 				LSP:        &LSPServerConfig{Command: "gopls"},
 			},
 			"typescript": {
-				Extensions: []string{".ts", ".tsx"},
+				// typescript-language-server (tsserver) also handles JavaScript.
+				Extensions: []string{".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"},
 				LSP:        &LSPServerConfig{Command: "typescript-language-server", Args: []string{"--stdio"}},
 			},
 		},
@@ -106,5 +113,70 @@ func merge(cfg *Config, path string) {
 	if err != nil {
 		return
 	}
-	_ = yaml.Unmarshal(data, cfg) // fields absent from the file keep prior values
+	// Languages need union semantics for extensions, which plain unmarshal
+	// (replace) can't do — so decode the file's languages separately, then merge.
+	prior := cfg.Languages
+	cfg.Languages = nil
+	_ = yaml.Unmarshal(data, cfg) // scalar fields absent from the file keep prior values
+	cfg.Languages = mergeLanguages(prior, cfg.Languages)
+}
+
+// mergeLanguages overlays the file's languages onto the accumulated ones: a
+// language's Extensions are unioned (so config extends the defaults), and its
+// LSP command/args/init overlay the default when set. New languages are added.
+func mergeLanguages(base, overlay map[string]LanguageConfig) map[string]LanguageConfig {
+	out := map[string]LanguageConfig{}
+	for name, lang := range base {
+		out[name] = lang
+	}
+	for name, o := range overlay {
+		b, ok := out[name]
+		if !ok {
+			out[name] = o
+			continue
+		}
+		b.Extensions = unionStrings(b.Extensions, o.Extensions)
+		if o.LSP != nil {
+			b.LSP = mergeLSP(b.LSP, o.LSP)
+		}
+		out[name] = b
+	}
+	return out
+}
+
+// mergeLSP overlays the set fields of o onto base (a nil base is replaced whole).
+func mergeLSP(base, o *LSPServerConfig) *LSPServerConfig {
+	if base == nil {
+		return o
+	}
+	res := *base
+	if o.Command != "" {
+		res.Command = o.Command
+	}
+	if o.Args != nil {
+		res.Args = o.Args
+	}
+	if o.Init != nil {
+		res.Init = o.Init
+	}
+	return &res
+}
+
+// unionStrings appends add's new members to base, preserving order, de-duped.
+func unionStrings(base, add []string) []string {
+	seen := make(map[string]bool, len(base)+len(add))
+	out := make([]string, 0, len(base)+len(add))
+	for _, s := range base {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	for _, s := range add {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
 }

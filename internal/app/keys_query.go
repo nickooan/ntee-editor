@@ -12,7 +12,7 @@ import (
 // queryInputSuggestions completes the typed bar text: exact/prefix over the
 // visible tree, fuzzy over the full corpus.
 func (m Model) queryInputSuggestions(entries []filetree.FileTreeEntry) []filetree.InputSuggestion {
-	all := filetree.BuildAllEntries(m.root, m.cfg.Tree.Ignore)
+	all := filetree.BuildAllEntries(m.root, m.cfg.Tree.Ignore, m.gitignore)
 	return filetree.BuildInputSuggestions(entries, all, m.command, filetree.MaxInputSuggestions)
 }
 

@@ -10,9 +10,19 @@ import (
 )
 
 // contentHeight approximates the file pane's inner height (header + borders +
-// status line), used for paging and match centering.
+// status line, minus the tab strip when shown), used for paging and match
+// centering.
 func (m Model) contentHeight() int {
-	return max(1, m.height-5)
+	return max(1, m.height-5-m.tabRows())
+}
+
+// tabRows is the number of rows the tab area occupies (strip + divider), 0 when
+// there are no tabs.
+func (m Model) tabRows() int {
+	if len(m.tabs) > 0 {
+		return 2
+	}
+	return 0
 }
 
 func (m Model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -43,6 +53,16 @@ func (m Model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m = m.flushBurst() // checkpoint so the discarded state stays reachable via undo history
 		if m.edit.dirty {
+			// A deliberate discard: drop the draft and make disk content the
+			// new timeline head — the tab stops being red, a later switch
+			// won't re-stash, and one Ctrl+Z recovers the discarded text.
+			_ = m.db.DeleteDraft(m.openRel)
+			delete(m.draftSet, m.openRel)
+			prevRev := m.edit.rev
+			m.edit = newEditor(m.openFile.Content)
+			m.edit.rev = prevRev + 1
+			m.snapDirty = true
+			m = m.pushSnapshot("edit")
 			m.notice = "unsaved changes discarded"
 		}
 		m.mode = modeQuery
@@ -195,6 +215,8 @@ func (m Model) saveEdit() Model {
 	m.openFile.Content = content
 	m.edit.dirty = false
 	m = m.pushSnapshot("save")
+	_ = m.db.DeleteDraft(m.openRel) // saved — the stashed draft is obsolete
+	delete(m.draftSet, m.openRel)
 	if client, ok := m.lsp.ClientFor(m.openFile.Path); ok {
 		client.DidSave(m.openFile.Path)
 	}

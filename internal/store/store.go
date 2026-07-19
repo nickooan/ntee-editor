@@ -44,6 +44,40 @@ type Session struct {
 	TreeIndex int      `json:"treeIndex,omitempty"`
 }
 
+// DraftStep is one undo checkpoint carried inside a Draft.
+type DraftStep struct {
+	Kind    string `json:"kind"` // "edit" | "save"
+	Content string `json:"content"`
+}
+
+// Draft is a file's unsaved edit state, stashed when the user switches away and
+// restored on reopen. Steps (oldest→newest, capped app-side) carry the undo
+// history inline so a draft is self-contained — versions: records can be
+// evicted by the file index's MaxPerValue, drafts must not be.
+type Draft struct {
+	Path    string      `json:"path"` // relative to the project root
+	Content string      `json:"content"`
+	Cx      int         `json:"cx"`
+	Cy      int         `json:"cy"`
+	ScrollY int         `json:"scrollY"`
+	Steps   []DraftStep `json:"steps"`
+	At      int64       `json:"at"`
+}
+
+// TabCursor is a tab's last cursor position (rune line/column).
+type TabCursor struct {
+	Cy int `json:"cy"`
+	Cx int `json:"cx"`
+}
+
+// Tabs is the persisted open-tab list. Cursors remembers each tab's last cursor
+// so revisiting a tab restores the position (keyed by root-relative path).
+type Tabs struct {
+	Paths   []string             `json:"paths"` // relative to the project root, display order
+	Active  int                  `json:"active"`
+	Cursors map[string]TabCursor `json:"cursors,omitempty"`
+}
+
 // Backend is the persistence surface the app depends on. Store (ntee-db) and
 // Memory (fallback when the store's flock is held) both satisfy it.
 type Backend interface {
@@ -55,13 +89,20 @@ type Backend interface {
 	LastSave(path string) (Snapshot, bool)
 	SaveSession(s Session) error
 	LoadSession() (Session, bool)
+	SaveDraft(d Draft) error
+	LoadDraft(path string) (Draft, bool)
+	DeleteDraft(path string) error
+	SaveTabs(t Tabs) error
+	LoadTabs() (Tabs, bool)
 	Close() error
 }
 
 const (
 	openedPrefix  = "opened:"
 	versionPrefix = "versions:"
+	draftPrefix   = "draft:"
 	sessionKey    = "session:current"
+	tabsKey       = "tabs:current"
 )
 
 func versionKey(seq int64) string { return fmt.Sprintf("%s%016d", versionPrefix, seq) }
@@ -210,4 +251,50 @@ func (s *Store) LoadSession() (Session, bool) {
 		return Session{}, false
 	}
 	return sess, true
+}
+
+// Drafts use plain (non-indexed) keys on purpose: the file index's MaxPerValue
+// eviction must never delete a stashed draft.
+func (s *Store) SaveDraft(d Draft) error {
+	data, err := json.Marshal(d)
+	if err != nil {
+		return err
+	}
+	return s.db.Put(draftPrefix+d.Path, data)
+}
+
+func (s *Store) LoadDraft(path string) (Draft, bool) {
+	data, ok, err := s.db.Get(draftPrefix + path)
+	if err != nil || !ok {
+		return Draft{}, false
+	}
+	var d Draft
+	if json.Unmarshal(data, &d) != nil {
+		return Draft{}, false
+	}
+	return d, true
+}
+
+func (s *Store) DeleteDraft(path string) error {
+	return s.db.Delete(draftPrefix + path)
+}
+
+func (s *Store) SaveTabs(t Tabs) error {
+	data, err := json.Marshal(t)
+	if err != nil {
+		return err
+	}
+	return s.db.Put(tabsKey, data)
+}
+
+func (s *Store) LoadTabs() (Tabs, bool) {
+	data, ok, err := s.db.Get(tabsKey)
+	if err != nil || !ok {
+		return Tabs{}, false
+	}
+	var t Tabs
+	if json.Unmarshal(data, &t) != nil {
+		return Tabs{}, false
+	}
+	return t, true
 }

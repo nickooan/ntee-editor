@@ -95,6 +95,11 @@ func (m Model) executeCommand(cmd string) (tea.Model, tea.Cmd) {
 		m.notice = "reverted to last save — Ctrl+S to write"
 		m = m.refreshFileHighlights()
 
+	case "tab":
+		// Name-jump lands in edit mode via openFileAt (superseding the
+		// restored cmdPrevMode); close verbs just prune the tab list.
+		m, _ = m.tabCommand(arg)
+
 	case "recent":
 		m = m.openFuzzy()
 

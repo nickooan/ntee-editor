@@ -9,12 +9,15 @@ type Memory struct {
 	opened    map[string]OpenedFile
 	snapshots map[int64]Snapshot
 	session   *Session
+	drafts    map[string]Draft
+	tabs      *Tabs
 }
 
 func NewMemory() *Memory {
 	return &Memory{
 		opened:    map[string]OpenedFile{},
 		snapshots: map[int64]Snapshot{},
+		drafts:    map[string]Draft{},
 	}
 }
 
@@ -74,4 +77,31 @@ func (m *Memory) LoadSession() (Session, bool) {
 		return Session{}, false
 	}
 	return *m.session, true
+}
+
+func (m *Memory) SaveDraft(d Draft) error {
+	m.drafts[d.Path] = d
+	return nil
+}
+
+func (m *Memory) LoadDraft(path string) (Draft, bool) {
+	d, ok := m.drafts[path]
+	return d, ok
+}
+
+func (m *Memory) DeleteDraft(path string) error {
+	delete(m.drafts, path)
+	return nil
+}
+
+func (m *Memory) SaveTabs(t Tabs) error {
+	m.tabs = &t
+	return nil
+}
+
+func (m *Memory) LoadTabs() (Tabs, bool) {
+	if m.tabs == nil {
+		return Tabs{}, false
+	}
+	return *m.tabs, true
 }

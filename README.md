@@ -48,16 +48,27 @@ exact/prefix/fuzzy completions (fuzzy reaches into collapsed directories).
 **Edit**
 | Key | Action |
 |---|---|
-| `Ctrl+S` | save |
+| `Ctrl+S` | save (also clears the file's stashed draft) |
 | `Ctrl+Z` / `Ctrl+Y` | undo / redo (snapshot bursts, persisted in ntee-db) |
-| `Ctrl+A` | progressive select: word → line |
+| `Ctrl+A` | progressive select: word → line; then `Shift+↑/↓` extends the selection by whole lines |
+| `Ctrl+E` | open the `@exec >` editor-command bar: `copy [a-b\|all\|fpath]` · `jump <line\|top\|end>` (aliases `cp`, `jp`; jump lands ~30% from the top) · `tab <name\|cl\|cr>` |
 | `Ctrl+F` | find in file (`Enter` jumps the cursor to the match) |
 | `Ctrl+J` | jump to the file path under the cursor, or ask the language server for the definition — multiple hits open a picker (`name.go:LINE — dir`, ↑/↓ + Enter, with a 5-line colored code preview that follows the selection); **on a definition line it finds all references instead**. File types with no configured server report "no language server" |
 | `Ctrl+O` | jump back (restores file, cursor, and scroll; 20-deep trail) |
-| `Esc` | clear selection, then discard unsaved edits and return to the query bar |
+| `Shift+Tab` | cycle the focused tab left→right (wraps) |
+| `PgUp` / `PgDn` | page with a one-line overlap (the old edge line carries over) |
+| `Esc` | clear selection, then discard unsaved edits (deletes the stashed draft) and return to the query bar |
+
+**Tabs & drafts** — every opened file becomes a tab at the top of the file pane
+(base filename; **red = unsaved**). Switching away from a dirty buffer stashes a
+draft in ntee-db (content + up to 15 undo steps); reopening the tab — or
+relaunching the editor — restores it, with undo stepping back to the on-disk
+version. `Ctrl+S` saves and drops the draft; `Esc` discards it. The tab list and
+active tab persist per project.
 
 **Command bar (`:`)**
-`w` save · `q` quit · `e <path>` open · `g <line>` go to line · `revert`
+`jump <line|top|end>` go to line (alias `jp`) · `tab <name|cl|cr>` switch to a
+tab / close-left / close-right (unsaved tabs refuse to close) · `revert`
 restore last saved snapshot · `recent` recent files.
 
 ## Configuration

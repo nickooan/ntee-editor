@@ -108,4 +108,73 @@ func TestMemoryBackendParity(t *testing.T) {
 	if len(recents) != 2 || recents[0].Path != "a.go" {
 		t.Fatalf("memory recents: %+v", recents)
 	}
+	exerciseDraftsAndTabs(t, b)
+}
+
+// exerciseDraftsAndTabs runs the draft/tab contract against any Backend.
+func exerciseDraftsAndTabs(t *testing.T, b Backend) {
+	t.Helper()
+	if _, ok := b.LoadDraft("a.go"); ok {
+		t.Fatal("draft should start absent")
+	}
+	d := Draft{
+		Path: "a.go", Content: "unsaved", Cx: 3, Cy: 1, ScrollY: 2,
+		Steps: []DraftStep{{Kind: "edit", Content: "un"}, {Kind: "edit", Content: "unsaved"}},
+		At:    42,
+	}
+	if err := b.SaveDraft(d); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := b.LoadDraft("a.go")
+	if !ok || got.Content != "unsaved" || got.Cx != 3 || got.Cy != 1 || len(got.Steps) != 2 ||
+		got.Steps[1].Content != "unsaved" {
+		t.Fatalf("draft round trip: %+v ok=%v", got, ok)
+	}
+	if err := b.DeleteDraft("a.go"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := b.LoadDraft("a.go"); ok {
+		t.Fatal("draft survived delete")
+	}
+
+	if _, ok := b.LoadTabs(); ok {
+		t.Fatal("tabs should start absent")
+	}
+	if err := b.SaveTabs(Tabs{
+		Paths:   []string{"a.go", "lib/b.ts"},
+		Active:  1,
+		Cursors: map[string]TabCursor{"a.go": {Cy: 40, Cx: 3}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tabs, ok := b.LoadTabs()
+	if !ok || len(tabs.Paths) != 2 || tabs.Active != 1 || tabs.Paths[1] != "lib/b.ts" {
+		t.Fatalf("tabs round trip: %+v ok=%v", tabs, ok)
+	}
+	if c := tabs.Cursors["a.go"]; c.Cy != 40 || c.Cx != 3 {
+		t.Fatalf("tab cursors round trip: %+v", tabs.Cursors)
+	}
+	// Overwrite wins.
+	_ = b.SaveTabs(Tabs{Paths: []string{"a.go"}, Active: 0})
+	tabs, _ = b.LoadTabs()
+	if len(tabs.Paths) != 1 || tabs.Active != 0 {
+		t.Fatalf("tabs overwrite: %+v", tabs)
+	}
+}
+
+func TestStoreDraftsAndTabs(t *testing.T) {
+	exerciseDraftsAndTabs(t, openTestStore(t))
+}
+
+// TestDraftSurvivesSnapshotEviction proves drafts use plain keys: flooding a
+// file's versions past MaxPerValue must never evict its draft.
+func TestDraftSurvivesSnapshotEviction(t *testing.T) {
+	s := openTestStore(t) // MaxPerValue: 50
+	_ = s.SaveDraft(Draft{Path: "a.go", Content: "precious"})
+	for i := int64(1); i <= 60; i++ {
+		_ = s.SnapshotPut("a.go", i, "edit", "v")
+	}
+	if d, ok := s.LoadDraft("a.go"); !ok || d.Content != "precious" {
+		t.Fatalf("draft lost to snapshot eviction: %+v ok=%v", d, ok)
+	}
 }

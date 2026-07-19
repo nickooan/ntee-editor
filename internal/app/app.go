@@ -4,6 +4,7 @@
 package app
 
 import (
+	"os"
 	"path/filepath"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/nickooan/ntee-editor/internal/config"
 	"github.com/nickooan/ntee-editor/internal/filetree"
 	"github.com/nickooan/ntee-editor/internal/fuzzy"
+	"github.com/nickooan/ntee-editor/internal/input"
 	"github.com/nickooan/ntee-editor/internal/lsp"
 	"github.com/nickooan/ntee-editor/internal/store"
 	"github.com/nickooan/ntee-editor/internal/syntax"
@@ -71,6 +73,14 @@ type Model struct {
 	fileScrollX int
 	fileScrollY int
 	fileLines   []string // view-mode line cache (rebuilt by refreshFileHighlights)
+
+	// Open tabs (persisted): rels in display order, plus which is active.
+	// draftSet caches which rels have a stashed unsaved draft (inactive tabs
+	// render red from it; the active tab's redness comes from edit.dirty).
+	tabs      []string
+	tabActive int
+	draftSet  map[string]bool
+	cursorMem map[string]store.TabCursor // per-tab last cursor, restored on revisit
 
 	edit editor
 
@@ -132,6 +142,17 @@ type Model struct {
 	defPickPrevLines []string
 	defPickPrevHl    [][]view.HighlightSegment
 
+	// LSP autocomplete popup (edit mode). completionAll is the server's raw
+	// list; completionItems is it filtered by the identifier prefix under the
+	// cursor and sorted. completionStart is that identifier's start rune-column.
+	completionOpen      bool
+	completionAll       []lsp.CompletionItem
+	completionItems     []lsp.CompletionItem
+	completionIndex     int
+	completionStart     int
+	completionPending   bool // a request is in flight
+	completionDismissed bool // Esc'd — suppress auto-reopen until a word boundary
+
 	// Repo-wide content search overlay (Ctrl+G).
 	grepOpen    bool
 	grepQuery   string
@@ -157,13 +178,31 @@ func New(cfg config.Config, db store.Backend, root, notice string, reg lsp.Regis
 		diags:         map[string][]lsp.Diagnostic{},
 		copyClipboard: clipboard.Copy,
 		gitignore:     filetree.LoadGitignore(root),
+		draftSet:      map[string]bool{},
+		cursorMem:     map[string]store.TabCursor{},
 	}
+	lastFile := ""
 	if sess, ok := db.LoadSession(); ok {
 		m.selectedCommand = sess.Command
-		if sess.LastFile != "" {
-			m = m.openFileAt(sess.LastFile)
-			m.mode = modeQuery // start on the query bar, last file visible
+		lastFile = sess.LastFile
+	}
+	if t, ok := db.LoadTabs(); ok && len(t.Paths) > 0 {
+		// Tabs win over the legacy single LastFile. Activating the tab opens it
+		// and restores its draft, so unsaved work survives a relaunch.
+		m.tabs = t.Paths
+		for rel, c := range t.Cursors {
+			m.cursorMem[rel] = c
 		}
+		for _, rel := range m.tabs {
+			if _, ok := db.LoadDraft(rel); ok {
+				m.draftSet[rel] = true
+			}
+		}
+		m = m.activateTab(input.Clamp(t.Active, 0, len(m.tabs)-1))
+		m.mode = modeQuery // start on the query bar, active file visible
+	} else if lastFile != "" {
+		m = m.openFileAt(lastFile)
+		m.mode = modeQuery
 	}
 	return m
 }
@@ -173,8 +212,14 @@ func (m Model) Init() tea.Cmd { return nil }
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		wasReady := m.ready
 		m.width, m.height = msg.Width, msg.Height
 		m.ready = true
+		if !wasReady && m.openFile != nil {
+			// The startup-restored cursor was anchored with height 0; redo it
+			// now that the real pane size is known.
+			m = m.anchorCursorLine()
+		}
 		return m, nil
 
 	case lsp.DiagnosticsMsg:
@@ -197,6 +242,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case referencesMsg:
 		return m.handleReferences(msg)
+
+	case completionMsg:
+		return m.handleCompletion(msg)
 
 	case tea.KeyMsg:
 		if msg.Type == tea.KeyCtrlC || msg.Type == tea.KeyCtrlQ {
@@ -226,6 +274,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Type == tea.KeyCtrlG && m.mode != modeCommand && m.mode != modeSearch && m.mode != modeExec {
 			return m.openGrep(), nil
 		}
+		if msg.Type == tea.KeyShiftTab && m.mode != modeCommand && m.mode != modeSearch && m.mode != modeExec {
+			return m.cycleTab(), nil
+		}
 
 		switch m.mode {
 		case modeQuery:
@@ -244,6 +295,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) quit() (tea.Model, tea.Cmd) {
+	m = m.recordCursor()      // persist the active file's cursor for next launch
+	m = m.stashDraftIfDirty() // unsaved edits survive a relaunch
 	m.saveSession()
 	m.lsp.ShutdownAll()
 	return m, tea.Quit
@@ -292,10 +345,18 @@ func (m Model) openFileAt(rel string) Model {
 		m.errText = "cannot open " + rel
 		return m
 	}
+	// Stat-first (like openJumpFile): a missing target errors cleanly instead
+	// of opening an error buffer — and must never become a tab.
+	if _, err := os.Stat(f.Path); err != nil {
+		m.errText = "cannot open " + rel
+		return m
+	}
 	if f.Binary {
 		m.messageOverlay = f.FileName + " looks like a binary file."
 		return m
 	}
+	m = m.recordCursor()      // remember where we were in the file being left
+	m = m.stashDraftIfDirty() // the old buffer's unsaved edits become a draft
 	if m.openFile != nil && m.openFile.Path != f.Path {
 		if client, ok := m.lsp.ClientFor(m.openFile.Path); ok {
 			client.DidClose(m.openFile.Path)
@@ -311,6 +372,17 @@ func (m Model) openFileAt(rel string) Model {
 		client.DidOpen(f.Path, f.Content)
 	}
 	m = m.beginEditSession(f.Content)
+	if d, ok := m.db.LoadDraft(rel); ok {
+		m = m.restoreDraft(d)
+	}
+	m = m.addTab(rel)
+	// Restore the remembered cursor and anchor its line ~30% from the top.
+	if p, ok := m.cursorMem[rel]; ok {
+		m.edit.cy = input.Clamp(p.Cy, 0, len(m.edit.lines)-1)
+		m.edit.cx = p.Cx
+		m.edit.clampCursor()
+		m = m.anchorCursorLine()
+	}
 	m.mode = modeEdit
 	return m
 }

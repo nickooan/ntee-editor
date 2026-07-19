@@ -49,10 +49,7 @@ func (m Model) pushSnapshot(kind string) Model {
 		m.db.SnapshotDelete(dropped)
 	}
 
-	seq := time.Now().UnixMilli()
-	if seq <= m.nextSeq {
-		seq = m.nextSeq + 1 // keep seqs strictly increasing (= save order)
-	}
+	seq := nextSeqAfter(m.nextSeq)
 	m.nextSeq = seq
 
 	content := m.edit.content()
@@ -68,6 +65,16 @@ func (m Model) pushSnapshot(kind string) Model {
 		client.DidChange(m.openFile.Path, content, m.edit.rev)
 	}
 	return m
+}
+
+// nextSeqAfter returns a fresh snapshot seq: the current time, bumped past the
+// last issued seq so seqs stay strictly increasing (= save order).
+func nextSeqAfter(last int64) int64 {
+	seq := time.Now().UnixMilli()
+	if seq <= last {
+		seq = last + 1
+	}
+	return seq
 }
 
 // flushBurst checkpoints the current content if edits are pending since the last

@@ -191,3 +191,41 @@ func TestReferencesRequest(t *testing.T) {
 		t.Fatalf("params: saw=%v includeDecl=%v", server.sawRefParams, server.refIncludeDecl)
 	}
 }
+
+func TestNewManagerHonorsEnable(t *testing.T) {
+	off := false
+	cfg := config.Config{Languages: map[string]config.LanguageConfig{
+		"go":         {Extensions: []string{".go"}, LSP: &config.LSPServerConfig{Command: "gopls"}},
+		"typescript": {Enabled: &off, Extensions: []string{".ts"}, LSP: &config.LSPServerConfig{Command: "tsls"}},
+	}}
+	m := NewManager(cfg, "/tmp")
+	if m.extLang[".go"] != "go" {
+		t.Fatalf("enabled language should route: %v", m.extLang)
+	}
+	if _, ok := m.extLang[".ts"]; ok {
+		t.Fatal("disabled language must not be in extLang")
+	}
+}
+
+func TestLanguageIDFor(t *testing.T) {
+	cases := map[string]string{
+		"a.go":  "go",
+		"a.ts":  "typescript",
+		"a.mts": "typescript",
+		"a.cts": "typescript",
+		"a.tsx": "typescriptreact",
+		"a.js":  "javascript",
+		"a.mjs": "javascript",
+		"a.cjs": "javascript",
+		"a.jsx": "javascriptreact",
+		"a.rb":  "ruby",   // via fallback (config key)
+		"a.vue": "vue",    // via fallback
+		"a.py":  "python", // via fallback
+	}
+	for path, want := range cases {
+		fallback := want // the caller passes the config language key
+		if got := languageIDFor(path, fallback); got != want {
+			t.Errorf("languageIDFor(%q) = %q, want %q", path, got, want)
+		}
+	}
+}

@@ -1,0 +1,34 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# The locally-built ntee binary (go build ./cmd/ntee)
+/ntee
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.*
+*.cover
+
+# Go CPU/memory profiles
+*.prof
+
+# Go workspace files
+go.work
+go.work.sum
+
+# Vendored dependencies (this repo builds from the module cache)
+/vendor/
+
+# Local env
+.env
+.env.*
+
+# macOS
+.DS_Store

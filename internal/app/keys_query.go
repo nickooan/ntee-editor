@@ -76,11 +76,6 @@ func (m Model) handleQueryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.mode = modeEdit
 		}
 
-	case tea.KeyCtrlF:
-		if m.openFile != nil {
-			return m.enterSearch(modeQuery, m.openFile.Content), nil
-		}
-
 	case tea.KeyBackspace:
 		m = m.adoptPreview()
 		m.command, m.qCursor, _ = input.RemoveBeforeCursor(m.command, m.qCursor)

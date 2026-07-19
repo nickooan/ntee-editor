@@ -394,6 +394,7 @@ func (m Model) openJumpFile(rel string, cy, cx, scrollY int) (Model, bool) {
 	m.openRel = rel
 	m.selectedCommand = rel
 	m = m.beginEditSession(f.Content) // does not touch the jump stack
+	m = m.addTab(rel)
 	m.mode = modeEdit
 	m.edit.cy, m.edit.cx = cy, cx
 	m.edit.clampCursor()

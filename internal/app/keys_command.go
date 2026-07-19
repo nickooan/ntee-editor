@@ -95,6 +95,11 @@ func (m Model) executeCommand(cmd string) (tea.Model, tea.Cmd) {
 		m.notice = "reverted to last save — Ctrl+S to write"
 		m = m.refreshFileHighlights()
 
+	case "tab":
+		// Name-jump lands in edit mode via openFileAt (superseding the
+		// restored cmdPrevMode); close verbs just prune the tab list.
+		m, _ = m.tabCommand(arg)
+
 	case "recent":
 		m = m.openFuzzy()
 
@@ -107,6 +112,7 @@ func (m Model) executeCommand(cmd string) (tea.Model, tea.Cmd) {
 // openFuzzy opens the Ctrl+P finder. The corpus is the full project walk with
 // recents moved to the front, so an empty query lists recently opened files.
 func (m Model) openFuzzy() Model {
+	m = m.closeCompletion()
 	corpus := filetree.BuildAllEntries(m.root, m.cfg.Tree.Ignore, m.gitignore)
 	inCorpus := make(map[string]int, len(corpus))
 	for i, rel := range corpus {

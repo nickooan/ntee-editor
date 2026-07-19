@@ -66,6 +66,27 @@ type definitionParams struct {
 	Position     Position               `json:"position"`
 }
 
+type completionParams struct {
+	TextDocument textDocumentIdentifier `json:"textDocument"`
+	Position     Position               `json:"position"`
+}
+
+// CompletionItem is the subset of an LSP completion candidate the editor uses.
+// InsertText falls back to Label when empty; FilterText falls back to Label.
+type CompletionItem struct {
+	Label      string `json:"label"`
+	Kind       int    `json:"kind"`
+	Detail     string `json:"detail"`
+	InsertText string `json:"insertText"`
+	SortText   string `json:"sortText"`
+	FilterText string `json:"filterText"`
+}
+
+type completionList struct {
+	IsIncomplete bool             `json:"isIncomplete"`
+	Items        []CompletionItem `json:"items"`
+}
+
 type referenceContext struct {
 	IncludeDeclaration bool `json:"includeDeclaration"`
 }
@@ -102,6 +123,7 @@ var clientCapabilities = map[string]any{
 		"publishDiagnostics": map[string]any{},
 		"definition":         map[string]any{},
 		"references":         map[string]any{},
+		"completion":         map[string]any{},
 	},
 	"workspace": map[string]any{
 		"configuration": true,
@@ -156,6 +178,23 @@ func RuneCol(line string, utf16Col int) int {
 		i++
 	}
 	return i
+}
+
+// parseCompletion accepts either a CompletionList ({isIncomplete, items}) or a
+// bare []CompletionItem, or null.
+func parseCompletion(raw json.RawMessage) []CompletionItem {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var list completionList
+	if err := json.Unmarshal(raw, &list); err == nil && list.Items != nil {
+		return list.Items
+	}
+	var items []CompletionItem
+	if err := json.Unmarshal(raw, &items); err == nil {
+		return items
+	}
+	return nil
 }
 
 // parseLocations accepts the three shapes a definition response can take:

@@ -9,6 +9,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"sort"
 
 	"gopkg.in/yaml.v3"
 )
@@ -38,8 +39,28 @@ type ThemeConfig struct {
 }
 
 type LanguageConfig struct {
-	Extensions []string         `yaml:"extensions"`
-	LSP        *LSPServerConfig `yaml:"lsp"`
+	// Enabled toggles the language: nil (omitted) means enabled; false turns it
+	// off (its extensions route to no server, and --prepare-lsp skips it).
+	Enabled    *bool             `yaml:"enable,omitempty"`
+	Extensions []string          `yaml:"extensions"`
+	LSP        *LSPServerConfig  `yaml:"lsp"`
+	Install    []InstallStrategy `yaml:"install,omitempty"` // consumed only by --prepare-lsp
+}
+
+// IsEnabled reports whether the language is active (default when unset).
+func (l LanguageConfig) IsEnabled() bool { return l.Enabled == nil || *l.Enabled }
+
+// InstallStrategy is one way --prepare-lsp can obtain a language's server. The
+// first strategy whose platform + required tools are available is used.
+type InstallStrategy struct {
+	Kind      string   `yaml:"kind"`                // "brew" | "go" | "npm" | "gem"
+	Platforms []string `yaml:"platforms,omitempty"` // "darwin","linux"; empty = all
+	Requires  string   `yaml:"requires,omitempty"`  // runtime that must be present: go|node|java|ruby
+	Formula   string   `yaml:"formula,omitempty"`   // brew formula
+	Package   string   `yaml:"package,omitempty"`   // go install / gem install target
+	Packages  []string `yaml:"packages,omitempty"`  // npm i -g targets
+	Command   string   `yaml:"command,omitempty"`   // resulting server invocation
+	Args      []string `yaml:"args,omitempty"`
 }
 
 type LSPServerConfig struct {
@@ -91,12 +112,8 @@ func Default() Config {
 // a malformed file is skipped (the editor should still start).
 func Load(projectRoot string) Config {
 	cfg := Default()
-	if home, err := os.UserHomeDir(); err == nil {
-		dir := os.Getenv("XDG_CONFIG_HOME")
-		if dir == "" {
-			dir = filepath.Join(home, ".config")
-		}
-		merge(&cfg, filepath.Join(dir, "ntee-editor", "config.yaml"))
+	if path, err := ConfigPath(); err == nil {
+		merge(&cfg, path)
 	}
 	merge(&cfg, filepath.Join(projectRoot, ".ntee-editor.yaml"))
 	if cfg.Editor.TabWidth < 1 {
@@ -106,6 +123,67 @@ func Load(projectRoot string) Config {
 		cfg.Editor.MaxSnapshots = 50
 	}
 	return cfg
+}
+
+// ConfigPath returns the user config file path: $XDG_CONFIG_HOME (else
+// ~/.config) + ntee-editor/config.yaml.
+func ConfigPath() (string, error) {
+	dir := os.Getenv("XDG_CONFIG_HOME")
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		dir = filepath.Join(home, ".config")
+	}
+	return filepath.Join(dir, "ntee-editor", "config.yaml"), nil
+}
+
+// MergeUserLanguages adds languages to the user config file, keeping existing
+// entries (and their tuning) untouched — a language already present is skipped.
+// The prior file is backed up to config.yaml.bak. Returns the languages added.
+// Note: comments in the existing file are lost on rewrite (hence the backup).
+func MergeUserLanguages(langs map[string]LanguageConfig) (added []string, err error) {
+	path, err := ConfigPath()
+	if err != nil {
+		return nil, err
+	}
+
+	var file Config
+	existing, readErr := os.ReadFile(path)
+	if readErr == nil {
+		_ = yaml.Unmarshal(existing, &file) // best-effort; malformed → treated as empty
+	}
+	if file.Languages == nil {
+		file.Languages = map[string]LanguageConfig{}
+	}
+
+	for name, lang := range langs {
+		if _, present := file.Languages[name]; present {
+			continue // respect the user's existing entry
+		}
+		file.Languages[name] = lang
+		added = append(added, name)
+	}
+	sort.Strings(added)
+	if len(added) == 0 {
+		return nil, nil
+	}
+
+	out, err := yaml.Marshal(&file)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, err
+	}
+	if readErr == nil {
+		_ = os.WriteFile(path+".bak", existing, 0o644) // best-effort backup
+	}
+	if err := os.WriteFile(path, out, 0o644); err != nil {
+		return nil, err
+	}
+	return added, nil
 }
 
 func merge(cfg *Config, path string) {
@@ -138,6 +216,12 @@ func mergeLanguages(base, overlay map[string]LanguageConfig) map[string]Language
 		b.Extensions = unionStrings(b.Extensions, o.Extensions)
 		if o.LSP != nil {
 			b.LSP = mergeLSP(b.LSP, o.LSP)
+		}
+		if o.Enabled != nil {
+			b.Enabled = o.Enabled
+		}
+		if o.Install != nil {
+			b.Install = o.Install
 		}
 		out[name] = b
 	}

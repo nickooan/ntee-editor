@@ -57,6 +57,14 @@ func (m Model) runExecCommand(cmd string) (tea.Model, tea.Cmd) {
 		m = m.execCopy(arg)
 	case "jump", "jp":
 		m = m.execJump(arg)
+	case "tab":
+		next, ok := m.tabCommand(arg)
+		if ok && next.mode == modeExec {
+			// Close verbs don't change mode; a name-jump already landed in
+			// edit via openFileAt. Restore edit mode for the close verbs.
+			next.mode = next.execPrevMode
+		}
+		m = next // on error: stays in exec with errText set
 	default:
 		m.errText = "unknown command: " + name
 	}

@@ -16,6 +16,7 @@ import (
 	"github.com/nickooan/ntee-editor/internal/app"
 	"github.com/nickooan/ntee-editor/internal/config"
 	"github.com/nickooan/ntee-editor/internal/lsp"
+	"github.com/nickooan/ntee-editor/internal/lspsetup"
 	"github.com/nickooan/ntee-editor/internal/store"
 )
 
@@ -23,9 +24,26 @@ const version = "0.1.0"
 
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
+	prepareLSP := flag.Bool("prepare-lsp", false, "install language servers and write config, then exit")
+	assumeYes := flag.Bool("yes", false, "skip the confirmation prompt for --prepare-lsp")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println("ntee-editor " + version)
+		return
+	}
+	if *prepareLSP {
+		confirm := func() bool {
+			if *assumeYes {
+				return true
+			}
+			var answer string
+			_, _ = fmt.Scanln(&answer)
+			return answer == "y" || answer == "Y" || answer == "yes"
+		}
+		if err := lspsetup.Prepare(os.Stdout, confirm); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 		return
 	}
 

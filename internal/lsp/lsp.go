@@ -35,6 +35,7 @@ type Client interface {
 	DidClose(path string)
 	Definition(path string, line, utf16Col int) ([]Location, error)
 	References(path string, line, utf16Col int) ([]Location, error)
+	Completion(path string, line, utf16Col int) ([]CompletionItem, error)
 }
 
 // Registry resolves the client responsible for a file path, if any.

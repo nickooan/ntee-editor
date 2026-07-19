@@ -2,11 +2,13 @@ package app
 
 import (
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/nickooan/ntee-editor/internal/filetree"
 	"github.com/nickooan/ntee-editor/internal/input"
@@ -31,6 +33,14 @@ func (m Model) View() string {
 	sidebar := paneStyle.Width(sidebarWidth - 2).Height(bodyHeight - 2).
 		Render(m.renderSidebar(sidebarWidth-4, bodyHeight-2))
 
+	// Overlays own the whole pane; otherwise the tab strip steals the top row.
+	overlayOpen := m.fuzzyOpen || m.messageOverlay != "" || m.defPickOpen || m.grepOpen
+	showTabs := len(m.tabs) > 0 && !overlayOpen
+	innerH := bodyHeight - 2
+	if showTabs {
+		innerH -= 2 // tab strip + divider row
+	}
+
 	var mainBody string
 	switch {
 	case m.fuzzyOpen:
@@ -42,13 +52,17 @@ func (m Model) View() string {
 	case m.grepOpen:
 		mainBody = m.renderGrepOverlay(mainWidth-4, bodyHeight-2)
 	case m.mode == modeSearch:
-		mainBody = m.renderSearch(mainWidth-4, bodyHeight-2)
+		mainBody = m.renderSearch(mainWidth-4, innerH)
 	case m.mode == modeQuery:
-		mainBody = m.renderQueryMain(mainWidth-4, bodyHeight-2)
+		mainBody = m.renderQueryMain(mainWidth-4, innerH)
 	case m.openFile != nil:
-		mainBody = m.renderFile(mainWidth-4, bodyHeight-2)
+		mainBody = m.renderFile(mainWidth-4, innerH)
 	default:
 		mainBody = baseStyle.Render("Type a path or fuzzy fragment · enter opens · ctrl+p goto.")
+	}
+	if showTabs {
+		divider := tabDividerStyle.Render(strings.Repeat("─", max(0, mainWidth-4)))
+		mainBody = m.renderTabStrip(mainWidth-4) + "\n" + divider + "\n" + mainBody
 	}
 	mainPane := paneStyle.Width(mainWidth - 2).Height(bodyHeight - 2).Render(mainBody)
 
@@ -80,14 +94,14 @@ func (m Model) renderStatusLine() string {
 			line += renderInputLine(m.command, m.qCursor)
 		}
 		return withNotice(m, line) + "\n" +
-			hintStyle.Render("Enter open+edit · Shift+↑/↓ tree · Esc parent · :jump :revert :recent · Ctrl+F find · Ctrl+P goto · Ctrl+Q quit")
+			hintStyle.Render("Enter open+edit · Shift+↑/↓ tree · Esc parent · :recent · Ctrl + P goto / Q quit")
 	case modeEdit:
 		return m.renderEditStatus()
 	case modeExec:
 		// The @exec bar replaces the @edit status line while active (the @edit
 		// line returns on exit); its lighter dark background signals the mode.
 		bar := execPromptStyle.Render("@exec >") + renderInputLineStyled(m.execInput, m.execCursor, execTextStyle) +
-			execHintStyle.Render("   copy [a-b|all|fpath] · jump <line|top|end> · Esc cancel")
+			execHintStyle.Render("   copy [a-b|all|fpath] · jump <line|top|end> · tab <name|cl|cr> · Esc cancel")
 		// Pre-pad to full width in the exec background so padStatusRows (which
 		// pads with the chrome style) leaves this row's color intact.
 		if pad := m.width - lipgloss.Width(bar); pad > 0 {
@@ -104,7 +118,7 @@ func (m Model) renderStatusLine() string {
 			hintStyle.Render("↑/↓ next · Enter jump · Esc back")
 	case modeCommand:
 		return promptStyle.Render(":") + renderInputLine(m.cmdInput, m.cmdCursor) +
-			statusTextStyle.Render("   ") + hintStyle.Render("jump <line|top|end> · revert · recent")
+			statusTextStyle.Render("   ") + hintStyle.Render("jump <line|top|end> · tab <name|cl|cr> · revert · recent")
 	}
 	return ""
 }
@@ -141,7 +155,7 @@ func (m Model) renderEditStatus() string {
 		line += statusTextStyle.Render("   ") + style.Render(truncateRunes(diag.Message, 60))
 	}
 	return line + statusTextStyle.Render("   ") +
-		hintStyle.Render("Ctrl+S save · Ctrl+F find · Ctrl+A select · Ctrl+J/Ctrl+O jump/back · Ctrl+Z/Ctrl+Y undo/redo · Esc discard")
+		hintStyle.Render("Ctrl+ S save, F find, A select, J/O jump/back, Z/Y undo/redo · Esc discard")
 }
 
 // diagSummary renders "✗N ⚠M " counts for the open file ("" when clean).
@@ -265,6 +279,55 @@ func (m Model) renderQuerySuggestions(width int) []string {
 	return rows
 }
 
+// renderTabStrip draws the open-file tabs across the top of the main pane: one
+// cell per tab (base filename), the active tab highlighted, unsaved names red.
+// A sliding window keeps the active tab visible when the strip overflows.
+func (m Model) renderTabStrip(width int) string {
+	cells := make([]string, len(m.tabs))
+	widths := make([]int, len(m.tabs))
+	for i, rel := range m.tabs {
+		label := " " + truncateRunes(filepath.Base(rel), max(1, width-2)) + " "
+		style := tabInactiveStyle
+		switch {
+		case i == m.tabActive && m.tabDirty(i):
+			style = tabDirtyActiveStyle
+		case i == m.tabActive:
+			style = tabActiveStyle
+		case m.tabDirty(i):
+			style = tabDirtyInactiveStyle
+		}
+		cells[i] = style.Render(label)
+		widths[i] = lipgloss.Width(label)
+	}
+
+	// Slide the window start right until [start..active] fits.
+	start := 0
+	for {
+		used := 0
+		for i := start; i <= m.tabActive; i++ {
+			used += widths[i]
+		}
+		if used <= width || start >= m.tabActive {
+			break
+		}
+		start++
+	}
+
+	var b strings.Builder
+	used := 0
+	for i := start; i < len(cells); i++ {
+		if used+widths[i] > width {
+			break
+		}
+		b.WriteString(cells[i])
+		used += widths[i]
+	}
+	if pad := width - used; pad > 0 {
+		b.WriteString(tabFillStyle.Render(strings.Repeat(" ", pad)))
+	}
+	return b.String()
+}
+
 // fileViewportTop is the first line drawn in the file pane: fileScrollY nudged to
 // keep the cursor within a height-row window, then clamped. Shared by renderFile
 // and edit-mode paging so both agree on what is on screen.
@@ -345,7 +408,74 @@ func (m Model) renderFile(width, height int) string {
 		}
 		rows = append(rows, number+content)
 	}
+	if editing && m.completionOpen {
+		rows = m.overlayCompletion(rows, start, gutterWidth, contentWidth, height)
+	}
 	return strings.Join(rows, "\n")
+}
+
+// overlayCompletion splices the autocomplete dropdown onto the rendered file
+// rows, anchored under the identifier being completed. v1 covers the code lines
+// it sits over; the gutter/height math mirrors renderFile so the box lands at
+// the cursor.
+func (m Model) overlayCompletion(rows []string, start, gutterWidth, contentWidth, height int) []string {
+	items := m.completionItems
+	if len(items) == 0 {
+		return rows
+	}
+	const maxRows = 8
+	n := min(len(items), maxRows)
+	sel := input.Clamp(m.completionIndex, 0, len(items)-1)
+	top := 0
+	if sel >= n {
+		top = sel - n + 1
+	}
+
+	// Popup width: longest visible label + padding, capped to the content area.
+	w := 12
+	for i := 0; i < n; i++ {
+		if lw := lipgloss.Width(items[top+i].Label) + 2; lw > w {
+			w = lw
+		}
+	}
+	w = min(w, contentWidth)
+
+	// Anchor at the identifier start, within renderEditLine's horizontal window.
+	line := m.edit.line()
+	at := input.Clamp(m.edit.cx, 0, len(line))
+	off := 0
+	if at >= contentWidth {
+		off = at - contentWidth + 1
+	}
+	anchor := gutterWidth + 3 + input.Clamp(identStart(line, m.edit.cx)-off, 0, max(0, contentWidth-w))
+
+	curRow := m.edit.cy - start
+	below := curRow+n < height // room beneath the cursor?
+	for i := 0; i < n; i++ {
+		idx := top + i
+		label := padTo(truncateRunes(items[idx].Label, w), w)
+		box := completionItemStyle.Render(label)
+		if idx == sel {
+			box = completionSelStyle.Render(label)
+		}
+		rowIdx := curRow + 1 + i
+		if !below {
+			rowIdx = curRow - n + i
+		}
+		if rowIdx < 0 || rowIdx >= len(rows) {
+			continue
+		}
+		// Overlay the box onto the real row, preserving the gutter and the code
+		// to the left/right (ANSI-aware slicing) rather than blanking the line.
+		orig := rows[rowIdx]
+		left := ansi.Truncate(orig, anchor, "")
+		if pad := anchor - ansi.StringWidth(left); pad > 0 {
+			left += baseStyle.Render(strings.Repeat(" ", pad))
+		}
+		right := ansi.TruncateLeft(orig, anchor+w, "")
+		rows[rowIdx] = left + box + right
+	}
+	return rows
 }
 
 // renderContentLine draws one non-cursor line: styled from the highlight cache
@@ -780,6 +910,18 @@ var (
 	dirStyle           = lipgloss.NewStyle().Foreground(colAqua).Bold(true).Background(colBg)
 	fileStyle          = lipgloss.NewStyle().Foreground(colFg).Background(colBg)
 	ignoredFileStyle   = lipgloss.NewStyle().Foreground(colComment).Background(colBg) // .gitignore'd: gray
+
+	// Autocomplete dropdown rows.
+	completionItemStyle = lipgloss.NewStyle().Foreground(colFg).Background(colBgChrome)
+	completionSelStyle  = lipgloss.NewStyle().Foreground(colBg).Background(colAqua)
+
+	// Tab strip (top of the main pane). Red name = unsaved.
+	tabActiveStyle        = lipgloss.NewStyle().Foreground(colFg).Background(colSelection).Bold(true)
+	tabInactiveStyle      = lipgloss.NewStyle().Foreground(colComment).Background(colBg)
+	tabDirtyActiveStyle   = lipgloss.NewStyle().Foreground(colRed).Background(colSelection).Bold(true)
+	tabDirtyInactiveStyle = lipgloss.NewStyle().Foreground(colRed).Background(colBg)
+	tabFillStyle          = lipgloss.NewStyle().Background(colBg)
+	tabDividerStyle       = lipgloss.NewStyle().Foreground(colBorder).Background(colBg)
 
 	searchMatchStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#000000")).Background(colFindBg)
 	searchFocusedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#000000")).Background(colOrange).Bold(true)

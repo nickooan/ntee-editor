@@ -39,6 +39,10 @@ type Model struct {
 	// observe copies without touching the real clipboard.
 	copyClipboard func(string) error
 
+	// gitignore matches the project's .gitignore; matched sidebar entries render
+	// gray. nil when the project has no .gitignore.
+	gitignore *filetree.Gitignore
+
 	width, height int
 	ready         bool
 	mode          mode
@@ -152,6 +156,7 @@ func New(cfg config.Config, db store.Backend, root, notice string, reg lsp.Regis
 		mode:          modeQuery,
 		diags:         map[string][]lsp.Diagnostic{},
 		copyClipboard: clipboard.Copy,
+		gitignore:     filetree.LoadGitignore(root),
 	}
 	if sess, ok := db.LoadSession(); ok {
 		m.selectedCommand = sess.Command
@@ -258,6 +263,7 @@ func (m Model) treeEntries() []filetree.FileTreeEntry {
 		m.root,
 		filetree.BuildExpandedDirectoryPaths(m.sidebarCommand()),
 		m.cfg.Tree.Ignore,
+		m.gitignore,
 	)
 }
 

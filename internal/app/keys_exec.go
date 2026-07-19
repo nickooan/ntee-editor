@@ -102,27 +102,34 @@ func (m Model) execCopy(arg string) Model {
 // mode. The target is a 1-based line number, "top" (first line), or "end" (last
 // line). Anything else stays in exec mode with an error.
 func (m Model) execJump(arg string) Model {
-	var line int
-	switch arg {
-	case "top":
-		line = 1
-	case "end":
-		line = len(m.edit.lines)
-	default:
-		n, err := strconv.Atoi(arg)
-		if err != nil || n < 1 {
-			m.errText = "jump needs a line number, top, or end"
-			return m
-		}
-		line = n
+	idx, ok := parseJumpTarget(arg, len(m.edit.lines))
+	if !ok {
+		m.errText = "jump needs a line number, top, or end"
+		return m
 	}
 	m.edit.clearSelection()
-	m.edit.cy = input.Clamp(line-1, 0, len(m.edit.lines)-1)
+	m.edit.cy = idx
 	m.edit.cx = 0
 	m.edit.clampCursor()
 	m = m.anchorCursorLine()
 	m.mode = m.execPrevMode
 	return m
+}
+
+// parseJumpTarget resolves a jump argument to a 0-based line index: a 1-based
+// number, "top" (first line), or "end" (last line). ok is false otherwise.
+func parseJumpTarget(arg string, total int) (int, bool) {
+	switch arg {
+	case "top":
+		return 0, true
+	case "end":
+		return max(0, total-1), true
+	}
+	n, err := strconv.Atoi(arg)
+	if err != nil || n < 1 {
+		return 0, false
+	}
+	return input.Clamp(n-1, 0, max(0, total-1)), true
 }
 
 // parseLineRange parses "a" or "a-b" (1-based, inclusive) into 0-based [lo,hi]

@@ -1,8 +1,6 @@
 package app
 
 import (
-	"path/filepath"
-	"strconv"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -50,35 +48,26 @@ func (m Model) executeCommand(cmd string) (tea.Model, tea.Cmd) {
 	arg = strings.TrimSpace(arg)
 
 	switch name {
-	case "q", "quit":
-		return m.quit()
-
-	case "w", "write":
+	// Save / quit / open have dedicated keys (Ctrl+S, Ctrl+Q, Ctrl+P and the
+	// query bar), so they are intentionally not command-bar verbs.
+	case "jump", "jp":
 		if m.cmdPrevMode == modeEdit {
-			m = m.saveEdit()
-		} else {
-			m.notice = "nothing to write (not editing)"
-		}
-
-	case "e", "edit", "open":
-		if arg == "" {
-			m.errText = ":e needs a path"
-			break
-		}
-		m = m.openFileAt(filepath.ToSlash(arg))
-
-	case "g", "goto":
-		n, err := strconv.Atoi(arg)
-		if err != nil || n < 1 {
-			m.errText = ":g needs a line number"
-			break
-		}
-		if m.cmdPrevMode == modeEdit {
+			idx, ok := parseJumpTarget(arg, len(m.edit.lines))
+			if !ok {
+				m.errText = "jump needs a line number, top, or end"
+				break
+			}
 			m.edit.clearSelection()
-			m.edit.cy = input.Clamp(n-1, 0, len(m.edit.lines)-1)
+			m.edit.cy = idx
 			m.edit.cx = 0
+			m = m.anchorCursorLine()
 		} else if m.openFile != nil {
-			m.fileScrollY = input.Clamp(n-1, 0, max(0, len(m.fileLines)-1))
+			idx, ok := parseJumpTarget(arg, len(m.fileLines))
+			if !ok {
+				m.errText = "jump needs a line number, top, or end"
+				break
+			}
+			m.fileScrollY = input.Clamp(idx, 0, max(0, len(m.fileLines)-1))
 		} else {
 			m.errText = "no open file"
 		}

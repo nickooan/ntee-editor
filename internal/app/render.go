@@ -80,7 +80,7 @@ func (m Model) renderStatusLine() string {
 			line += renderInputLine(m.command, m.qCursor)
 		}
 		return withNotice(m, line) + "\n" +
-			hintStyle.Render("Enter open+edit · Shift+↑/↓ tree · Esc parent · :w :q :g … · Ctrl+F find · Ctrl+P goto · Ctrl+Q quit")
+			hintStyle.Render("Enter open+edit · Shift+↑/↓ tree · Esc parent · :jump :revert :recent · Ctrl+F find · Ctrl+P goto · Ctrl+Q quit")
 	case modeEdit:
 		return m.renderEditStatus()
 	case modeExec:
@@ -104,7 +104,7 @@ func (m Model) renderStatusLine() string {
 			hintStyle.Render("↑/↓ next · Enter jump · Esc back")
 	case modeCommand:
 		return promptStyle.Render(":") + renderInputLine(m.cmdInput, m.cmdCursor) +
-			statusTextStyle.Render("   ") + hintStyle.Render("w · q · e <path> · g <line> · revert · recent")
+			statusTextStyle.Render("   ") + hintStyle.Render("jump <line|top|end> · revert · recent")
 	}
 	return ""
 }
@@ -200,6 +200,8 @@ func (m Model) renderSidebar(width, height int) string {
 			lines = append(lines, selectedEntryStyle.Render(label))
 		case entry.RelativePath == m.openRel && m.openRel != "":
 			lines = append(lines, openFileStyle.Render(label))
+		case entry.Gitignored:
+			lines = append(lines, ignoredFileStyle.Render(label))
 		case entry.Type == "directory":
 			lines = append(lines, dirStyle.Render(label))
 		default:
@@ -769,6 +771,7 @@ var (
 	openFileStyle      = lipgloss.NewStyle().Foreground(colGreen).Background(colBg)
 	dirStyle           = lipgloss.NewStyle().Foreground(colAqua).Bold(true).Background(colBg)
 	fileStyle          = lipgloss.NewStyle().Foreground(colFg).Background(colBg)
+	ignoredFileStyle   = lipgloss.NewStyle().Foreground(colComment).Background(colBg) // .gitignore'd: gray
 
 	searchMatchStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#000000")).Background(colFindBg)
 	searchFocusedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#000000")).Background(colOrange).Bold(true)

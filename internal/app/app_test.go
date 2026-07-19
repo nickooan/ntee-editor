@@ -232,10 +232,10 @@ func TestQueryColonCommand(t *testing.T) {
 	m, _ := newTestModel(t, nil)
 	m = m.openFileAt("main.go")
 	m.mode = modeQuery
-	m = runes(m, ":g 3")
+	m = runes(m, ":jump 3")
 	m = key(m, tea.KeyMsg{Type: tea.KeyEnter})
 	if m.mode != modeQuery || m.fileScrollY != 2 {
-		t.Fatalf(":g 3 from query bar: mode=%d scrollY=%d", m.mode, m.fileScrollY)
+		t.Fatalf(":jump 3 from query bar: mode=%d scrollY=%d", m.mode, m.fileScrollY)
 	}
 }
 

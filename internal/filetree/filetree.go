@@ -21,6 +21,7 @@ type FileTreeEntry struct {
 	Depth        int
 	Type         string // "directory" | "file"
 	IsExpanded   bool
+	Gitignored   bool // matched by .gitignore (or under an ignored dir) — rendered gray
 }
 
 type dirChild struct {
@@ -97,8 +98,10 @@ func ignored(name string, ignore []string) bool {
 }
 
 // BuildFileTreeEntries walks the root, descending only into directories whose
-// relative paths are in expanded. Names in ignore are skipped entirely.
-func BuildFileTreeEntries(root string, expanded map[string]bool, ignore []string) []FileTreeEntry {
+// relative paths are in expanded. Names in ignore are skipped entirely. Entries
+// matched by gi (or nested under an ignored directory) are flagged Gitignored;
+// gi may be nil to disable that.
+func BuildFileTreeEntries(root string, expanded map[string]bool, ignore []string, gi *Gitignore) []FileTreeEntry {
 	if root == "" {
 		return nil
 	}
@@ -108,8 +111,8 @@ func BuildFileTreeEntries(root string, expanded map[string]bool, ignore []string
 	}
 
 	var entries []FileTreeEntry
-	var appendDir func(dirPath string, depth int)
-	appendDir = func(dirPath string, depth int) {
+	var appendDir func(dirPath string, depth int, parentIgnored bool)
+	appendDir = func(dirPath string, depth int, parentIgnored bool) {
 		resolvedDir := filepath.Join(resolvedRoot, dirPath)
 		if !isInsideRoot(resolvedRoot, resolvedDir) {
 			return
@@ -127,6 +130,8 @@ func BuildFileTreeEntries(root string, expanded map[string]bool, ignore []string
 			if dirPath != "" {
 				rel = dirPath + "/" + child.name
 			}
+			// Once a directory is gitignored, everything under it inherits it.
+			ign := parentIgnored || gi.Match(rel, child.isDir)
 
 			if child.isDir {
 				isExpanded := expanded[rel]
@@ -137,9 +142,10 @@ func BuildFileTreeEntries(root string, expanded map[string]bool, ignore []string
 					Depth:        depth,
 					Type:         "directory",
 					IsExpanded:   isExpanded,
+					Gitignored:   ign,
 				})
 				if isExpanded {
-					appendDir(rel, depth+1)
+					appendDir(rel, depth+1, ign)
 				}
 				continue
 			}
@@ -152,11 +158,12 @@ func BuildFileTreeEntries(root string, expanded map[string]bool, ignore []string
 				CommandValue: rel,
 				Depth:        depth,
 				Type:         "file",
+				Gitignored:   ign,
 			})
 		}
 	}
 
-	appendDir("", 0)
+	appendDir("", 0, false)
 	return entries
 }
 

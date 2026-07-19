@@ -7,6 +7,7 @@
 
 # The locally-built ntee binary (go build ./cmd/ntee)
 /ntee
+/ntee-*
 
 # Test binary, built with `go test -c`
 *.test
@@ -32,3 +33,6 @@ go.work.sum
 
 # macOS
 .DS_Store
+
+# Release build output
+/dist/

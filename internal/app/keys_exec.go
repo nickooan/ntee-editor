@@ -1,6 +1,7 @@
 package app
 
 import (
+	"strconv"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -46,27 +47,102 @@ func (m Model) handleExecKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // On success it returns to the previous mode; on error it stays so the user can
 // correct the input.
 func (m Model) runExecCommand(cmd string) (tea.Model, tea.Cmd) {
-	name, _, _ := strings.Cut(cmd, " ")
+	name, arg, _ := strings.Cut(cmd, " ")
+	arg = strings.TrimSpace(arg)
 
 	switch name {
 	case "":
 		m.mode = m.execPrevMode
-
-	case "copy":
-		text := m.edit.selectionText()
-		if text == "" {
-			m.errText = "nothing selected"
-			return m, nil
-		}
-		if err := m.copyClipboard(text); err != nil {
-			m.errText = "copy failed: " + err.Error()
-			return m, nil
-		}
-		m.notice = "copied"
-		m.mode = m.execPrevMode
-
+	case "copy", "cp":
+		m = m.execCopy(arg)
+	case "jump", "jp":
+		m = m.execJump(arg)
 	default:
 		m.errText = "unknown command: " + name
 	}
 	return m, nil
+}
+
+// execCopy copies to the clipboard by argument: the selection (no arg), a line
+// range ("a" / "a-b", 1-based inclusive), "all" (whole buffer), or "fpath" (the
+// file's root-relative path). On success it flashes "copied" and returns to edit
+// mode; on error it stays in exec mode so the user can correct the input.
+func (m Model) execCopy(arg string) Model {
+	var text string
+	switch {
+	case arg == "":
+		text = m.edit.selectionText()
+		if text == "" {
+			m.errText = "nothing selected"
+			return m
+		}
+	case arg == "all":
+		text = m.edit.content() + "\n"
+	case arg == "fpath":
+		text = m.openRel
+	default:
+		lo, hi, ok := parseLineRange(arg, len(m.edit.lines))
+		if !ok {
+			m.errText = "copy: bad range: " + arg
+			return m
+		}
+		text = strings.Join(m.edit.lines[lo:hi+1], "\n") + "\n"
+	}
+	if err := m.copyClipboard(text); err != nil {
+		m.errText = "copy failed: " + err.Error()
+		return m
+	}
+	m.notice = "copied"
+	m.mode = m.execPrevMode
+	return m
+}
+
+// execJump moves the cursor to a target line and scrolls it ~30% from the top
+// (via anchorCursorLine, shared with search/jump/grep), then returns to edit
+// mode. The target is a 1-based line number, "top" (first line), or "end" (last
+// line). Anything else stays in exec mode with an error.
+func (m Model) execJump(arg string) Model {
+	var line int
+	switch arg {
+	case "top":
+		line = 1
+	case "end":
+		line = len(m.edit.lines)
+	default:
+		n, err := strconv.Atoi(arg)
+		if err != nil || n < 1 {
+			m.errText = "jump needs a line number, top, or end"
+			return m
+		}
+		line = n
+	}
+	m.edit.clearSelection()
+	m.edit.cy = input.Clamp(line-1, 0, len(m.edit.lines)-1)
+	m.edit.cx = 0
+	m.edit.clampCursor()
+	m = m.anchorCursorLine()
+	m.mode = m.execPrevMode
+	return m
+}
+
+// parseLineRange parses "a" or "a-b" (1-based, inclusive) into 0-based [lo,hi]
+// clamped to the buffer, swapping a reversed range. ok is false on malformed
+// input.
+func parseLineRange(arg string, total int) (lo, hi int, ok bool) {
+	a, b, hasDash := strings.Cut(arg, "-")
+	start, err := strconv.Atoi(strings.TrimSpace(a))
+	if err != nil || start < 1 {
+		return 0, 0, false
+	}
+	end := start
+	if hasDash {
+		end, err = strconv.Atoi(strings.TrimSpace(b))
+		if err != nil || end < 1 {
+			return 0, 0, false
+		}
+	}
+	if start > end {
+		start, end = end, start
+	}
+	return input.Clamp(start-1, 0, total-1), input.Clamp(end-1, 0, total-1), true
 }

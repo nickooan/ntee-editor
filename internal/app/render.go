@@ -87,7 +87,7 @@ func (m Model) renderStatusLine() string {
 		// The @exec bar replaces the @edit status line while active (the @edit
 		// line returns on exit); its lighter dark background signals the mode.
 		bar := execPromptStyle.Render("@exec >") + renderInputLineStyled(m.execInput, m.execCursor, execTextStyle) +
-			execHintStyle.Render("   Enter run · Esc cancel")
+			execHintStyle.Render("   copy [a-b|all|fpath] · jump <line|top|end> · Esc cancel")
 		// Pre-pad to full width in the exec background so padStatusRows (which
 		// pads with the chrome style) leaves this row's color intact.
 		if pad := m.width - lipgloss.Width(bar); pad > 0 {

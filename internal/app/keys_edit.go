@@ -59,6 +59,9 @@ func (m Model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.edit.expandSelection()
 		return m, nil
 
+	case tea.KeyCtrlE:
+		return m.enterExec(), nil
+
 	case tea.KeyUp:
 		return m.moveEditCursor(0, -1), nil
 	case tea.KeyDown:
@@ -67,6 +70,12 @@ func (m Model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.moveEditCursor(-1, 0), nil
 	case tea.KeyRight:
 		return m.moveEditCursor(1, 0), nil
+	case tea.KeyShiftUp:
+		m.edit.extendLineSelection(-1)
+		return m, nil
+	case tea.KeyShiftDown:
+		m.edit.extendLineSelection(1)
+		return m, nil
 	case tea.KeyHome:
 		m.edit.clearSelection()
 		m.edit.cx = 0

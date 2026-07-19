@@ -9,6 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/nickooan/ntee-editor/internal/clipboard"
 	"github.com/nickooan/ntee-editor/internal/config"
 	"github.com/nickooan/ntee-editor/internal/filetree"
 	"github.com/nickooan/ntee-editor/internal/fuzzy"
@@ -25,6 +26,7 @@ const (
 	modeEdit
 	modeSearch
 	modeCommand
+	modeExec // "@exec >" editor-command bar (Ctrl+E from edit mode)
 )
 
 type Model struct {
@@ -32,6 +34,10 @@ type Model struct {
 	db   store.Backend
 	lsp  lsp.Registry
 	root string // absolute project root
+
+	// copyClipboard writes to the system clipboard; injectable so tests can
+	// observe copies without touching the real clipboard.
+	copyClipboard func(string) error
 
 	width, height int
 	ready         bool
@@ -88,6 +94,13 @@ type Model struct {
 	cmdCursor   int
 	cmdPrevMode mode
 
+	// Bottom "@exec >" editor-command bar (Ctrl+E). Only entered from edit
+	// mode; the editor is paused (m.edit untouched) so its selection stays
+	// visible behind the bar.
+	execInput    string
+	execCursor   int
+	execPrevMode mode
+
 	// Fuzzy file finder overlay (Ctrl+P).
 	fuzzyOpen    bool
 	fuzzyQuery   string
@@ -131,13 +144,14 @@ func New(cfg config.Config, db store.Backend, root, notice string, reg lsp.Regis
 		reg = lsp.NewNoopRegistry()
 	}
 	m := Model{
-		cfg:    cfg,
-		db:     db,
-		lsp:    reg,
-		root:   root,
-		notice: notice,
-		mode:   modeQuery,
-		diags:  map[string][]lsp.Diagnostic{},
+		cfg:           cfg,
+		db:            db,
+		lsp:           reg,
+		root:          root,
+		notice:        notice,
+		mode:          modeQuery,
+		diags:         map[string][]lsp.Diagnostic{},
+		copyClipboard: clipboard.Copy,
 	}
 	if sess, ok := db.LoadSession(); ok {
 		m.selectedCommand = sess.Command
@@ -201,10 +215,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.grepOpen {
 			return m.handleGrepKey(msg)
 		}
-		if msg.Type == tea.KeyCtrlP && m.mode != modeCommand && m.mode != modeSearch {
+		if msg.Type == tea.KeyCtrlP && m.mode != modeCommand && m.mode != modeSearch && m.mode != modeExec {
 			return m.openFuzzy(), nil
 		}
-		if msg.Type == tea.KeyCtrlG && m.mode != modeCommand && m.mode != modeSearch {
+		if msg.Type == tea.KeyCtrlG && m.mode != modeCommand && m.mode != modeSearch && m.mode != modeExec {
 			return m.openGrep(), nil
 		}
 
@@ -217,6 +231,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleSearchKey(msg)
 		case modeCommand:
 			return m.handleCommandKey(msg)
+		case modeExec:
+			return m.handleExecKey(msg)
 		}
 	}
 	return m, nil

@@ -29,6 +29,14 @@ type editor struct {
 	sel       *selRange
 	selLevel  int
 	selAnchor int
+
+	// selLineMode marks a whole-line (line-wise) selection: the selected lines
+	// are [min(selLineAnchor, cy), max(selLineAnchor, cy)] inclusive. It is
+	// entered by the whole-line level of the progressive Ctrl+A select and
+	// extended by Shift+↑/↓. sel still tracks the cursor line's span so the
+	// cursor-line highlight keeps drawing.
+	selLineMode   bool
+	selLineAnchor int
 }
 
 // selRange is a half-open [start,end) span of rune columns on the cursor line.
@@ -56,6 +64,8 @@ func (e *editor) clampCursor() {
 func (e *editor) clearSelection() {
 	e.sel = nil
 	e.selLevel = 0
+	e.selLineMode = false
+	e.selLineAnchor = 0
 }
 
 func (e *editor) insert(text string) {
@@ -134,6 +144,23 @@ func (e *editor) selectedText() string {
 // selection empties the line), moves the cursor to its start, and clears the
 // selection. Reports whether anything was selected.
 func (e *editor) deleteSelection() bool {
+	if e.selLineMode {
+		lo, hi := e.selLineAnchor, e.cy
+		if lo > hi {
+			lo, hi = hi, lo
+		}
+		lo = input.Clamp(lo, 0, len(e.lines)-1)
+		hi = input.Clamp(hi, 0, len(e.lines)-1)
+		// Replace the whole-line range with a single empty line.
+		rest := append([]string{""}, e.lines[hi+1:]...)
+		e.lines = append(e.lines[:lo], rest...)
+		e.cy = lo
+		e.cx = 0
+		e.clearSelection()
+		e.dirty = true
+		e.rev++
+		return true
+	}
 	if e.sel == nil {
 		return false
 	}
@@ -181,6 +208,56 @@ func (e *editor) expandSelection() {
 	sel := cands[e.selLevel]
 	e.sel = &sel
 	e.cx = sel.end // cursor rides the end of the selection
+	// Reaching the whole-line span latches line-wise mode so Shift+↑/↓ can
+	// extend it across lines.
+	if sel.start == 0 && sel.end == len(line) {
+		e.selLineMode = true
+		e.selLineAnchor = e.cy
+	} else {
+		e.selLineMode = false
+	}
+}
+
+// extendLineSelection grows or shrinks a whole-line selection by dy lines, the
+// cursor riding the moving end. It is a no-op unless a line-wise selection is
+// already active (entered via the whole-line level of Ctrl+A).
+func (e *editor) extendLineSelection(dy int) {
+	if !e.selLineMode {
+		return
+	}
+	e.cy = input.Clamp(e.cy+dy, 0, len(e.lines)-1)
+	line := e.line()
+	e.sel = &selRange{0, len(line)}
+	e.cx = len(line)
+}
+
+// inLineSelection reports whether line i falls within an active line-wise
+// selection (used by rendering to highlight the whole range).
+func (e *editor) inLineSelection(i int) bool {
+	if !e.selLineMode {
+		return false
+	}
+	lo, hi := e.selLineAnchor, e.cy
+	if lo > hi {
+		lo, hi = hi, lo
+	}
+	return i >= lo && i <= hi
+}
+
+// selectionText returns the text to copy: the whole selected lines
+// (newline-joined with a trailing newline) in line-wise mode, else the
+// single-line selection.
+func (e *editor) selectionText() string {
+	if e.selLineMode {
+		lo, hi := e.selLineAnchor, e.cy
+		if lo > hi {
+			lo, hi = hi, lo
+		}
+		lo = input.Clamp(lo, 0, len(e.lines)-1)
+		hi = input.Clamp(hi, 0, len(e.lines)-1)
+		return strings.Join(e.lines[lo:hi+1], "\n") + "\n"
+	}
+	return e.selectedText()
 }
 
 func isEditSpace(r rune) bool { return r == ' ' || r == '\t' }

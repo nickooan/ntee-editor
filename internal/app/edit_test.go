@@ -64,6 +64,85 @@ func TestSelectionDeleteAndReplace(t *testing.T) {
 	}
 }
 
+func TestWordSelectionIsNotLineMode(t *testing.T) {
+	e := newEditor("foo bar baz")
+	e.cx = 5
+	e.expandSelection() // "bar" — a word, not the whole line
+	if e.selLineMode {
+		t.Fatal("word selection must not be line mode")
+	}
+	e.expandSelection() // whole line
+	if !e.selLineMode {
+		t.Fatal("whole-line selection must be line mode")
+	}
+}
+
+func TestLineSelectionExtendAndText(t *testing.T) {
+	e := newEditor("one\ntwo\nthree\nfour")
+	e.cy, e.cx = 1, 0
+	e.expandSelection() // "two" fills its line → line mode
+	e.expandSelection() // idempotent at line level
+	if !e.selLineMode || e.selLineAnchor != 1 {
+		t.Fatalf("line mode should latch: mode=%v anchor=%d", e.selLineMode, e.selLineAnchor)
+	}
+	if e.selectionText() != "two\n" {
+		t.Fatalf("single-line line selection: %q", e.selectionText())
+	}
+
+	e.extendLineSelection(1)
+	e.extendLineSelection(1)
+	if e.cy != 3 || e.selectionText() != "two\nthree\nfour\n" {
+		t.Fatalf("extend down: cy=%d text=%q", e.cy, e.selectionText())
+	}
+	e.extendLineSelection(1) // clamp at last line
+	if e.cy != 3 {
+		t.Fatalf("should clamp at last line: cy=%d", e.cy)
+	}
+
+	e.extendLineSelection(-1)
+	if e.selectionText() != "two\nthree\n" {
+		t.Fatalf("shrink: %q", e.selectionText())
+	}
+	if !e.inLineSelection(1) || !e.inLineSelection(2) || e.inLineSelection(0) || e.inLineSelection(3) {
+		t.Fatal("inLineSelection range wrong")
+	}
+}
+
+func TestLineSelectionUpwardAnchor(t *testing.T) {
+	e := newEditor("one\ntwo\nthree")
+	e.cy = 2
+	e.expandSelection() // "three" fills its line
+	e.extendLineSelection(-1)
+	if e.selectionText() != "two\nthree\n" {
+		t.Fatalf("upward selection: %q", e.selectionText())
+	}
+}
+
+func TestExtendLineSelectionNoopWithoutLineMode(t *testing.T) {
+	e := newEditor("foo bar baz")
+	e.cx = 5
+	e.expandSelection() // word only
+	before := e.cy
+	e.extendLineSelection(1)
+	if e.cy != before {
+		t.Fatal("extendLineSelection must be a no-op outside line mode")
+	}
+}
+
+func TestLineSelectionDelete(t *testing.T) {
+	e := newEditor("one\ntwo\nthree\nfour")
+	e.cy = 1
+	e.expandSelection() // line mode on "two"
+	e.extendLineSelection(1)
+	e.deleteSelection()
+	if e.content() != "one\n\nfour" {
+		t.Fatalf("line delete: %q", e.content())
+	}
+	if e.cy != 1 || e.cx != 0 || e.selLineMode {
+		t.Fatalf("after delete cy=%d cx=%d lineMode=%v", e.cy, e.cx, e.selLineMode)
+	}
+}
+
 func TestRevBumpsOnEveryMutation(t *testing.T) {
 	e := newEditor("a")
 	start := e.rev

@@ -82,35 +82,18 @@ func (m Model) renderStatusLine() string {
 		return withNotice(m, line) + "\n" +
 			hintStyle.Render("Enter open+edit · Shift+↑/↓ tree · Esc parent · :w :q :g … · Ctrl+F find · Ctrl+P goto · Ctrl+Q quit")
 	case modeEdit:
-		name := ""
-		if m.openFile != nil {
-			name = m.openFile.FileName
+		return m.renderEditStatus()
+	case modeExec:
+		// The @exec bar replaces the @edit status line while active (the @edit
+		// line returns on exit); its lighter dark background signals the mode.
+		bar := execPromptStyle.Render("@exec >") + renderInputLineStyled(m.execInput, m.execCursor, execTextStyle) +
+			execHintStyle.Render("   Enter run · Esc cancel")
+		// Pre-pad to full width in the exec background so padStatusRows (which
+		// pads with the chrome style) leaves this row's color intact.
+		if pad := m.width - lipgloss.Width(bar); pad > 0 {
+			bar += execTextStyle.Render(strings.Repeat(" ", pad))
 		}
-		state := savedStyle.Render("saved")
-		if m.edit.dirty {
-			state = editingStyle.Render("editing")
-		}
-		pos := fmt.Sprintf("Ln %d, Col %d", m.edit.cy+1, m.edit.cx+1)
-		// Transient messages come BEFORE the long hint text: the terminal
-		// truncates overlong status rows, and feedback must never be what
-		// gets cut off.
-		line := promptStyle.Render("@edit") + statusTextStyle.Render(" "+name+"   ") + state +
-			m.diagSummary() + statusTextStyle.Render("   "+pos)
-		if m.errText != "" {
-			line += statusTextStyle.Render("   ") + errStyle.Render(m.errText)
-		}
-		if m.notice != "" {
-			line += statusTextStyle.Render("   ") + noticeStyle.Render(m.notice)
-		}
-		if diag, ok := m.diagAtLine(m.edit.cy); ok {
-			style := gutterWarnStyle
-			if diag.Severity == 1 {
-				style = errStyle
-			}
-			line += statusTextStyle.Render("   ") + style.Render(truncateRunes(diag.Message, 60))
-		}
-		return line + statusTextStyle.Render("   ") +
-			hintStyle.Render("Ctrl+S save · Ctrl+F find · Ctrl+A select · Ctrl+J/Ctrl+O jump/back · Ctrl+Z/Ctrl+Y undo/redo · Esc discard")
+		return bar
 	case modeSearch:
 		matches := view.FindSearchMatches(m.searchContent, m.searchInput)
 		summary := fmt.Sprintf("%d matches", len(matches))
@@ -124,6 +107,41 @@ func (m Model) renderStatusLine() string {
 			statusTextStyle.Render("   ") + hintStyle.Render("w · q · e <path> · g <line> · revert · recent")
 	}
 	return ""
+}
+
+// renderEditStatus builds the single-line @edit status row: filename, saved/
+// editing state, transient feedback, diagnostics, position, and key hints.
+// Shared by modeEdit and modeExec (which stacks the @exec bar beneath it).
+func (m Model) renderEditStatus() string {
+	name := ""
+	if m.openFile != nil {
+		name = m.openFile.FileName
+	}
+	state := savedStyle.Render("saved")
+	if m.edit.dirty {
+		state = editingStyle.Render("editing")
+	}
+	pos := fmt.Sprintf("Ln %d, Col %d", m.edit.cy+1, m.edit.cx+1)
+	line := promptStyle.Render("@edit") + statusTextStyle.Render(" "+name+"   ") + state
+	// Transient feedback sits right after the saved/editing indicator — near the
+	// front so the terminal never truncates it, and where the user expects the
+	// "copied" note.
+	if m.notice != "" {
+		line += statusTextStyle.Render("   ") + noticeStyle.Render(m.notice)
+	}
+	if m.errText != "" {
+		line += statusTextStyle.Render("   ") + errStyle.Render(m.errText)
+	}
+	line += m.diagSummary() + statusTextStyle.Render("   "+pos)
+	if diag, ok := m.diagAtLine(m.edit.cy); ok {
+		style := gutterWarnStyle
+		if diag.Severity == 1 {
+			style = errStyle
+		}
+		line += statusTextStyle.Render("   ") + style.Render(truncateRunes(diag.Message, 60))
+	}
+	return line + statusTextStyle.Render("   ") +
+		hintStyle.Render("Ctrl+S save · Ctrl+F find · Ctrl+A select · Ctrl+J/Ctrl+O jump/back · Ctrl+Z/Ctrl+Y undo/redo · Esc discard")
 }
 
 // diagSummary renders "✗N ⚠M " counts for the open file ("" when clean).
@@ -246,7 +264,9 @@ func (m Model) renderQuerySuggestions(width int) []string {
 }
 
 func (m Model) renderFile(width, height int) string {
-	editing := m.mode == modeEdit
+	// modeExec pauses the editor over the live buffer, so it renders like edit
+	// mode (cursor + selection stay visible behind the @exec bar).
+	editing := m.mode == modeEdit || m.mode == modeExec
 	var lines []string
 	if editing {
 		lines = m.edit.lines
@@ -305,9 +325,12 @@ func (m Model) renderFile(width, height int) string {
 			number = gutterStyle.Render(numText + " │ ")
 		}
 		var content string
-		if editing && i == m.edit.cy {
+		switch {
+		case editing && i == m.edit.cy:
 			content = renderEditLine(lines[i], m.edit.cx, contentWidth, m.edit.sel)
-		} else {
+		case editing && m.edit.inLineSelection(i):
+			content = renderSelectedLine(lines[i], contentWidth)
+		default:
 			content = m.renderContentLine(i, lines[i], scrollX, contentWidth)
 		}
 		rows = append(rows, number+content)
@@ -412,6 +435,25 @@ func renderEditLine(line string, cx, width int, sel *selRange) string {
 			// Sublime-style current-line highlight.
 			b.WriteString(cursorLineStyle.Render(ch))
 		}
+	}
+	return b.String()
+}
+
+// renderSelectedLine draws a whole line covered by a line-wise selection: its
+// runes on the selection background, padded to width. No cursor, no horizontal
+// scroll (line-wise selections start at column 0).
+func renderSelectedLine(line string, width int) string {
+	if width < 1 {
+		width = 1
+	}
+	runes := []rune(line)
+	var b strings.Builder
+	for col := 0; col < width; col++ {
+		ch := " "
+		if col < len(runes) {
+			ch = string(runes[col])
+		}
+		b.WriteString(selectionStyle.Render(ch))
 	}
 	return b.String()
 }
@@ -556,6 +598,13 @@ func clampByte(i, n int) int {
 }
 
 func renderInputLine(text string, cursor int) string {
+	return renderInputLineStyled(text, cursor, statusTextStyle)
+}
+
+// renderInputLineStyled draws an editable input line (before/cursor/after) using
+// textStyle for the non-cursor text, so bars with a non-chrome background (e.g.
+// the @exec bar) stay a single color.
+func renderInputLineStyled(text string, cursor int, textStyle lipgloss.Style) string {
 	runes := []rune(text)
 	at := input.Clamp(cursor, 0, len(runes))
 	before := string(runes[:at])
@@ -565,7 +614,7 @@ func renderInputLine(text string, cursor int) string {
 		cursorChar = string(runes[at])
 		after = string(runes[at+1:])
 	}
-	return statusTextStyle.Render(before) + cursorStyle.Render(cursorChar) + statusTextStyle.Render(after)
+	return textStyle.Render(before) + cursorStyle.Render(cursorChar) + textStyle.Render(after)
 }
 
 func padTo(s string, width int) string {
@@ -705,6 +754,12 @@ var (
 	promptStyle     = lipgloss.NewStyle().Foreground(colAqua).Bold(true).Background(colBgChrome)
 	statusTextStyle = lipgloss.NewStyle().Foreground(colFg).Background(colBgChrome)
 	hintStyle       = lipgloss.NewStyle().Foreground(colComment).Background(colBgChrome)
+
+	// @exec bar — a distinct, lighter dark band (bg1) sitting directly under the
+	// @edit status line so the two rows read as separate without a gap.
+	execPromptStyle = lipgloss.NewStyle().Foreground(colAqua).Bold(true).Background(colLineHl)
+	execTextStyle   = lipgloss.NewStyle().Foreground(colFg).Background(colLineHl)
+	execHintStyle   = lipgloss.NewStyle().Foreground(colComment).Background(colLineHl)
 
 	gutterErrStyle  = lipgloss.NewStyle().Foreground(colRed).Background(colBg)
 	gutterWarnStyle = lipgloss.NewStyle().Foreground(colYellow).Background(colBg)

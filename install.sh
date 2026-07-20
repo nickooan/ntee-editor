@@ -82,12 +82,12 @@ info "building ntee → $BIN_DIR/ntee"
 mkdir -p "$BIN_DIR"
 (cd "$src" && go build -trimpath -o "$BIN_DIR/ntee" ./cmd/ntee)
 
+# PATH status is reported in the final summary (path_hint) so the
+# instructions are the last thing the user sees.
+on_path=true
 case ":$PATH:" in
 *":$BIN_DIR:"*) ;;
-*)
-    info "note: $BIN_DIR is not on your PATH — add this to your shell profile:"
-    printf '    export PATH="%s:$PATH"\n' "$BIN_DIR"
-    ;;
+*) on_path=false ;;
 esac
 
 # --- language servers -------------------------------------------------------
@@ -98,7 +98,30 @@ else
     "$BIN_DIR/ntee" --prepare-lsp --yes
 fi
 
+# path_hint prints copy-paste instructions for putting the binary on PATH,
+# tailored to the user's login shell.
+path_hint() {
+    local profile
+    case "$(basename "${SHELL:-}")" in
+    zsh) profile="$HOME/.zshrc" ;;
+    bash)
+        if [[ "$OS" == "Darwin" ]]; then profile="$HOME/.bash_profile"; else profile="$HOME/.bashrc"; fi
+        ;;
+    *)
+        echo "  ntee is not on your PATH — add this line to your shell profile:"
+        printf '      export PATH="%s:$PATH"\n' "$BIN_DIR"
+        return
+        ;;
+    esac
+    echo "  ntee is not on your PATH yet. To use it globally, run:"
+    printf '      echo '\''export PATH="$HOME/go/bin:$PATH"'\'' >> %s && source %s\n' "$profile" "$profile"
+}
+
 info "done"
 echo "  binary:  $BIN_DIR/ntee"
 echo "  config:  ${XDG_CONFIG_HOME:-$HOME/.config}/ntee-editor/config.yaml"
 echo "  run:     ntee <project-dir>"
+if ! $on_path; then
+    echo
+    path_hint
+fi

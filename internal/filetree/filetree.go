@@ -149,6 +149,57 @@ func FindRepoRoot(editorRoot, filePath string) string {
 	}
 }
 
+// projectMarkers name a language project's root. FindProjectRoot returns the
+// deepest ancestor containing one — for a monorepo that is the sub-project
+// (e.g. a frontend's tsconfig/package.json), not the outer .git, so a language
+// server scopes to hundreds of files instead of the whole repo.
+var projectMarkers = []string{
+	"tsconfig.json", "jsconfig.json", "package.json", // JS/TS
+	"go.mod",                                 // Go
+	"Cargo.toml",                             // Rust
+	"pyproject.toml", "setup.py", "setup.cfg", // Python
+	"pom.xml", "build.gradle", "build.gradle.kts", // JVM
+	"Gemfile", // Ruby
+	".git",    // repo boundary — the fallback marker
+}
+
+// FindProjectRoot returns the nearest ancestor of filePath (up to and including
+// editorRoot) that holds a project marker, else editorRoot. Preferred over
+// FindRepoRoot for scoping language servers: in a monorepo it lands on the
+// sub-project rather than the outer repo.
+func FindProjectRoot(editorRoot, filePath string) string {
+	er, err := filepath.Abs(editorRoot)
+	if err != nil {
+		return editorRoot
+	}
+	abs, err := filepath.Abs(filePath)
+	if err != nil {
+		return er
+	}
+	dir := abs
+	if info, statErr := os.Stat(abs); statErr != nil || !info.IsDir() {
+		dir = filepath.Dir(abs)
+	}
+	if !isInsideRoot(er, dir) {
+		return er
+	}
+	for {
+		for _, m := range projectMarkers {
+			if _, err := os.Stat(filepath.Join(dir, m)); err == nil {
+				return dir
+			}
+		}
+		if dir == er {
+			return er
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return er
+		}
+		dir = parent
+	}
+}
+
 func ignored(name string, ignore []string) bool {
 	if alwaysIgnore[name] {
 		return true

@@ -1,6 +1,8 @@
 package lsp
 
 import (
+	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -78,15 +80,33 @@ func (m *Manager) ClientFor(path string) (Client, bool) {
 	if !ok {
 		return nil, false
 	}
-
-	// Scope the server to the file's own git repo (not the whole opened tree),
-	// so a multi-repo root like ~/workspace does not make the server index all
-	// of it. One server per language: the first file visited roots it; later
-	// repos are added as workspace folders.
-	repoRoot := filetree.FindRepoRoot(m.root, path)
-
+	// Scope the server to the file's nearest project (tsconfig/package.json/
+	// go.mod/…), not the whole opened tree — so a monorepo frontend loads its
+	// ~300 files, not the repo's ~15k. One server per language: the first file
+	// visited roots it; later projects are added as workspace folders.
+	repoRoot := filetree.FindProjectRoot(m.root, path)
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	c, ok := m.getOrStartLocked(lang, repoRoot)
+	if !ok {
+		return nil, false
+	}
+	return c, true
+}
+
+// clientForLang returns the server for an explicit language (lazily starting
+// it) with the file's repo as a workspace folder. Used by the hybrid bridge to
+// reach the companion (e.g. typescript) server.
+func (m *Manager) clientForLang(lang, file string) (*serverClient, bool) {
+	repoRoot := filetree.FindProjectRoot(m.root, file)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.getOrStartLocked(lang, repoRoot)
+}
+
+// getOrStartLocked returns the (single) server for lang, starting it lazily and
+// ensuring repoRoot is one of its workspace folders. Caller must hold m.mu.
+func (m *Manager) getOrStartLocked(lang, repoRoot string) (*serverClient, bool) {
 	if m.disabled[lang] {
 		return nil, false
 	}
@@ -94,8 +114,8 @@ func (m *Manager) ClientFor(path string) (Client, bool) {
 		c.EnsureFolder(repoRoot)
 		return c, true
 	}
-	lc := m.cfg.Languages[lang]
-	if lc.LSP == nil || lc.LSP.Command == "" {
+	lc, ok := m.cfg.Languages[lang]
+	if !ok || !lc.IsEnabled() || lc.LSP == nil || lc.LSP.Command == "" {
 		m.disabled[lang] = true
 		return nil, false
 	}
@@ -105,9 +125,95 @@ func (m *Manager) ClientFor(path string) (Client, bool) {
 		return nil, false
 	}
 	c := newServerClient(lang, *lc.LSP, repoRoot, m.emit)
+	if lc.LSP.Bridge != nil {
+		to := lc.LSP.Bridge.To
+		c.tsBridge = m.makeBridge(*lc.LSP.Bridge)
+		c.mirror = m.makeMirror(*lc.LSP.Bridge)
+		c.companionFor = func(file string) (*serverClient, bool) { return m.clientForLang(to, file) }
+	}
 	m.clients[lang] = c
 	go c.start()
+	if lc.LSP.Bridge != nil {
+		// Warm the companion (e.g. typescript) now so it is loading its project
+		// in parallel — otherwise the first bridged request starts it cold and
+		// times out. Best-effort; safe under m.mu (getOrStartLocked doesn't lock).
+		m.getOrStartLocked(lc.LSP.Bridge.To, repoRoot)
+	}
 	return c, true
+}
+
+// makeBridge builds the relay for a hybrid server: forward its tsserver/request
+// command to the companion server (bridge.To) via bridge.Command
+// (workspace/executeCommand), returning the unwrapped tsserver body.
+func (m *Manager) makeBridge(bridge config.BridgeConfig) tsBridgeFunc {
+	return func(command string, args json.RawMessage) (json.RawMessage, error) {
+		file := fileFromArgs(args)
+		if file == "" {
+			file = m.root
+		}
+		ts, ok := m.clientForLang(bridge.To, file)
+		if !ok {
+			return nil, fmt.Errorf("lsp bridge: %q server unavailable", bridge.To)
+		}
+		raw, err := ts.ExecuteCommand(bridge.Command, []any{command, args})
+		if err != nil {
+			return nil, err
+		}
+		return unwrapBody(raw), nil
+	}
+}
+
+// makeMirror forwards a hybrid server's document sync to its companion so
+// tsserver (with @vue/typescript-plugin) has the .vue file in a project and can
+// answer _vue:* commands like projectInfo. Without this, the bridge relays but
+// tsserver errors "file not in project" and Volar falls back to a limited
+// inferred-project service (no cross-file/type-aware results).
+func (m *Manager) makeMirror(bridge config.BridgeConfig) docMirrorFunc {
+	return func(kind, path, content string) {
+		ts, ok := m.clientForLang(bridge.To, path)
+		if !ok {
+			return
+		}
+		switch kind {
+		case "open":
+			ts.DidOpen(path, content)
+		case "change":
+			ts.DidChange(path, content, 0)
+		case "save":
+			ts.DidSave(path)
+		case "close":
+			ts.DidClose(path)
+		}
+	}
+}
+
+// fileFromArgs extracts the tsserver command's target file (if any) so the
+// companion server can scope to that file's repo.
+func fileFromArgs(args json.RawMessage) string {
+	if len(args) == 0 {
+		return ""
+	}
+	var probe struct {
+		File string `json:"file"`
+	}
+	_ = json.Unmarshal(args, &probe)
+	return probe.File
+}
+
+// unwrapBody returns the tsserver response body: executeCommand yields the
+// tsserver envelope `{..., body}`, but Volar's tsserver/response handler
+// consumes the body directly. Passes the value through if there is no body.
+func unwrapBody(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return raw
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err == nil {
+		if body, ok := obj["body"]; ok {
+			return body
+		}
+	}
+	return raw
 }
 
 func (m *Manager) ShutdownAll() {

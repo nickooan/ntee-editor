@@ -3,6 +3,9 @@ package lsp
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"os/exec"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -24,7 +27,8 @@ type fakeServer struct {
 	initDone       bool
 	sawRefParams   bool
 	refIncludeDecl bool
-	addedFolders   []string // workspace/didChangeWorkspaceFolders added URIs
+	addedFolders   []string          // workspace/didChangeWorkspaceFolders added URIs
+	tsResponse     []json.RawMessage // last tsserver/response [id, result]
 }
 
 func newFakeServer(end pipeEnd) *fakeServer {
@@ -58,6 +62,19 @@ func (s *fakeServer) handle(method string, params json.RawMessage) (any, error) 
 		for _, f := range p.Event.Added {
 			s.addedFolders = append(s.addedFolders, f.URI)
 		}
+	case "tsserver/response":
+		// Mimic vscode-jsonrpc: array params are spread into the handler, so the
+		// editor wraps the payload ([[id,result]]) and the handler sees [id,result].
+		var outer []json.RawMessage
+		_ = json.Unmarshal(params, &outer)
+		if len(outer) == 1 {
+			var inner []json.RawMessage
+			if json.Unmarshal(outer[0], &inner) == nil && len(inner) >= 2 {
+				s.tsResponse = inner
+				break
+			}
+		}
+		s.tsResponse = outer
 	case "textDocument/definition":
 		return s.deflocs, nil
 	case "textDocument/references":
@@ -217,6 +234,143 @@ func TestEnsureFolderAddsOncePerRepo(t *testing.T) {
 	defer server.mu.Unlock()
 	if server.addedFolders[0] != PathToURI("/other") {
 		t.Fatalf("added folder uri: %q", server.addedFolders[0])
+	}
+}
+
+// A server that exits unexpectedly surfaces a notice carrying the stderr crash
+// reason — the fix for silent "connection is closed" failures.
+func TestWatchExitReportsCrashWithStderr(t *testing.T) {
+	msgs := make(chan any, 4)
+	c := newServerClient("go", config.LSPServerConfig{}, "/proj", func(m any) { msgs <- m })
+	c.stderr = &tailBuffer{max: stderrTailBytes}
+	cmd := exec.Command("sh", "-c", "echo 'TypeError: cannot read protocol' >&2; exit 1")
+	cmd.Stderr = c.stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	c.exited = make(chan struct{})
+	go c.watchExit(cmd)
+	<-c.exited
+
+	c.mu.Lock()
+	dead := c.dead
+	c.mu.Unlock()
+	if !dead {
+		t.Fatal("client should be marked dead after the process exits")
+	}
+	select {
+	case raw := <-msgs:
+		m, ok := raw.(NoticeMsg)
+		if !ok {
+			t.Fatalf("want NoticeMsg, got %T", raw)
+		}
+		if !strings.Contains(m.Text, "go lsp exited") || !strings.Contains(m.Text, "TypeError: cannot read protocol") {
+			t.Fatalf("crash notice missing status/reason: %q", m.Text)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no crash notice emitted")
+	}
+}
+
+// A deliberate stop (stopping=true) must not emit a crash notice.
+func TestWatchExitSilentOnDeliberateStop(t *testing.T) {
+	msgs := make(chan any, 4)
+	c := newServerClient("go", config.LSPServerConfig{}, "/proj", func(m any) { msgs <- m })
+	c.stderr = &tailBuffer{max: stderrTailBytes}
+	c.stopping = true
+	cmd := exec.Command("sh", "-c", "exit 0")
+	cmd.Stderr = c.stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	c.exited = make(chan struct{})
+	go c.watchExit(cmd)
+	<-c.exited
+
+	select {
+	case raw := <-msgs:
+		t.Fatalf("deliberate stop must not notify, got %T %v", raw, raw)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+func TestCrashReason(t *testing.T) {
+	node := "/x/server.js:40\n\tprojectInfoPromise = ...\n\t^\nTypeError: Cannot read properties of undefined (reading 'protocol')\n    at getLanguageService\nNode.js v24.15.0\n"
+	if got := crashReason(node); !strings.HasPrefix(got, "TypeError: Cannot read properties") {
+		t.Fatalf("node crash: %q", got)
+	}
+	if got := crashReason("panic: runtime error\n\ngoroutine 1:\n"); !strings.HasPrefix(got, "panic: runtime error") {
+		t.Fatalf("go panic: %q", got)
+	}
+	if got := crashReason("   \n\n  "); got != "" {
+		t.Fatalf("blank stderr should yield empty, got %q", got)
+	}
+}
+
+// The hybrid relay: a tsserver/request from the (Vue) server is forwarded via
+// tsBridge and answered with a tsserver/response carrying the same id + result.
+func TestTsserverRequestRelay(t *testing.T) {
+	c, server := startTestClient(t, nil)
+	var gotCommand string
+	c.tsBridge = func(command string, args json.RawMessage) (json.RawMessage, error) {
+		gotCommand = command
+		return json.RawMessage(`{"configFileName":"/proj/tsconfig.json"}`), nil
+	}
+
+	// The (fake) Vue server asks the editor to run a tsserver command. vscode-
+	// jsonrpc wraps a single array param, so the wire payload is [[id,cmd,args]].
+	_ = server.conn.Notify("tsserver/request", []any{[]any{7, "_vue:projectInfo", map[string]any{"file": "/proj/a.vue"}}})
+
+	waitFor(t, func() bool {
+		server.mu.Lock()
+		defer server.mu.Unlock()
+		return server.tsResponse != nil
+	})
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if gotCommand != "_vue:projectInfo" {
+		t.Fatalf("bridge got command %q", gotCommand)
+	}
+	if len(server.tsResponse) != 2 {
+		t.Fatalf("response arity: %v", server.tsResponse)
+	}
+	var id int
+	_ = json.Unmarshal(server.tsResponse[0], &id)
+	if id != 7 {
+		t.Fatalf("response id = %d, want 7", id)
+	}
+	var body struct {
+		ConfigFileName string `json:"configFileName"`
+	}
+	_ = json.Unmarshal(server.tsResponse[1], &body)
+	if body.ConfigFileName != "/proj/tsconfig.json" {
+		t.Fatalf("response body = %s", server.tsResponse[1])
+	}
+}
+
+// A bridge failure must still answer (null), so the Vue server's promise never
+// hangs.
+func TestTsserverRequestNullOnBridgeError(t *testing.T) {
+	c, server := startTestClient(t, nil)
+	c.tsBridge = func(string, json.RawMessage) (json.RawMessage, error) {
+		return nil, errors.New("companion unavailable")
+	}
+	_ = server.conn.Notify("tsserver/request", []any{[]any{9, "_vue:quickinfo", map[string]any{}}})
+
+	waitFor(t, func() bool {
+		server.mu.Lock()
+		defer server.mu.Unlock()
+		return server.tsResponse != nil
+	})
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	var id int
+	_ = json.Unmarshal(server.tsResponse[0], &id)
+	if id != 9 {
+		t.Fatalf("id = %d", id)
+	}
+	if string(server.tsResponse[1]) != "null" {
+		t.Fatalf("result should be null on error, got %s", server.tsResponse[1])
 	}
 }
 

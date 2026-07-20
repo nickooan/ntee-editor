@@ -133,6 +133,13 @@ type didChangeWorkspaceFoldersParams struct {
 	Event workspaceFoldersChangeEvent `json:"event"`
 }
 
+// executeCommandParams is a workspace/executeCommand request — used by the
+// hybrid bridge to relay a Vue tsserver command to the TypeScript server.
+type executeCommandParams struct {
+	Command   string `json:"command"`
+	Arguments []any  `json:"arguments,omitempty"`
+}
+
 // clientCapabilities: full-content sync, plain publishDiagnostics, plain
 // Location definition responses (no linkSupport → servers send []Location).
 var clientCapabilities = map[string]any{

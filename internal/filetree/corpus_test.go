@@ -87,6 +87,26 @@ func TestFindRepoRoot(t *testing.T) {
 	}
 }
 
+// In a monorepo, LSP rooting must land on the file's sub-project, not the outer
+// .git — otherwise the language server loads the whole repo.
+func TestFindProjectRoot(t *testing.T) {
+	root := t.TempDir()
+	mkfile(t, root, ".git/config")                                 // monorepo root
+	mkfile(t, root, "frontends/app/package.json")                  // sub-project
+	mkfile(t, root, "frontends/app/tsconfig.json")                 // sub-project
+	mkfile(t, root, "frontends/app/src/pages/x/component.vue")     // deep file
+	mkfile(t, root, "loose/notes.txt")                             // no marker above it
+
+	sub := filepath.Join(root, "frontends", "app")
+	if got := FindProjectRoot(root, filepath.Join(root, "frontends/app/src/pages/x/component.vue")); got != sub {
+		t.Fatalf("deep file should resolve to the sub-project: got %q want %q", got, sub)
+	}
+	// A file whose only marker up the tree is the repo .git resolves to the root.
+	if got := FindProjectRoot(root, filepath.Join(root, "loose/notes.txt")); got != root {
+		t.Fatalf("file with no nearer marker should resolve to the repo root: got %q want %q", got, root)
+	}
+}
+
 func TestBuildAllEntriesReturnsDirSignature(t *testing.T) {
 	root := t.TempDir()
 	mkfile(t, root, "sub/a.go")

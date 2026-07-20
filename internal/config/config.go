@@ -73,6 +73,17 @@ type LSPServerConfig struct {
 	// Init is passed through as LSP initializationOptions (e.g.
 	// typescript-language-server's tsserver.path).
 	Init map[string]any `yaml:"init"`
+	// Bridge declares a hybrid-mode companion: this server's tsserver/request
+	// notifications are relayed to the To language's server via the Command
+	// executeCommand. Used by Volar/Vue (To: typescript, Command:
+	// typescript.tsserverRequest). nil = standalone server.
+	Bridge *BridgeConfig `yaml:"bridge,omitempty"`
+}
+
+// BridgeConfig wires a hybrid language server to a companion server.
+type BridgeConfig struct {
+	To      string `yaml:"to"`      // companion language whose server answers
+	Command string `yaml:"command"` // executeCommand used to relay (tsserver passthrough)
 }
 
 type LSPConfig struct {
@@ -169,6 +180,17 @@ func MergeUserLanguages(langs map[string]LanguageConfig) (added []string, err er
 	existing, readErr := os.ReadFile(path)
 	if readErr == nil {
 		_ = yaml.Unmarshal(existing, &file) // best-effort; malformed → treated as empty
+	} else {
+		// No config yet: seed the non-language sections from defaults. Otherwise
+		// we'd marshal bool/int zero values — notably lsp.enabled:false, which
+		// DISABLES all LSP on load — into the fresh file. Languages stay empty so
+		// only the prepared servers are written (not the default recipes).
+		d := Default()
+		file.Version = d.Version
+		file.Editor = d.Editor
+		file.Tree = d.Tree
+		file.Theme = d.Theme
+		file.LSP = d.LSP
 	}
 	if file.Languages == nil {
 		file.Languages = map[string]LanguageConfig{}
@@ -258,6 +280,9 @@ func mergeLSP(base, o *LSPServerConfig) *LSPServerConfig {
 	}
 	if o.Init != nil {
 		res.Init = o.Init
+	}
+	if o.Bridge != nil {
+		res.Bridge = o.Bridge
 	}
 	return &res
 }

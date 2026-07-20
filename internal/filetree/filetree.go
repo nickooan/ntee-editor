@@ -40,6 +40,15 @@ var (
 	dirCache   = map[string]cachedDir{}
 )
 
+// ClearDirCache drops all cached directory listings so the next walk re-reads
+// from disk. Used by the manual :refresh to pick up changes that mtime
+// comparison would miss (e.g. a same-second external edit).
+func ClearDirCache() {
+	dirCacheMu.Lock()
+	dirCache = map[string]cachedDir{}
+	dirCacheMu.Unlock()
+}
+
 func readDirectorySorted(path string) ([]dirChild, error) {
 	info, err := os.Stat(path)
 	if err != nil {

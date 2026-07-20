@@ -122,6 +122,15 @@ type Model struct {
 	fuzzyCorpus  []string
 	fuzzyMatches []fuzzy.Match
 
+	// Search corpus: the full project file walk (BuildAllEntries), shared by the
+	// query bar, the Ctrl+P finder, and Ctrl+G grep. Built once and reused —
+	// walking it per keystroke is what made large repos lag. Kept fresh against
+	// external changes by a background rebuild (see ensureCorpus/rebuildCorpusCmd).
+	// corpusBuiltAt zero means "never built" (cold cache).
+	corpus           []string
+	corpusBuiltAt    time.Time
+	corpusRebuilding bool
+
 	// Per-line highlight cache. A nil row renders plain; rows are spliced on
 	// line insert/join so indices stay aligned between full rescans.
 	hlLines [][]view.HighlightSegment
@@ -207,7 +216,56 @@ func New(cfg config.Config, db store.Backend, root, notice string, reg lsp.Regis
 	return m
 }
 
-func (m Model) Init() tea.Cmd { return nil }
+// Init warms the search corpus in the background so it is ready before the
+// user's first query/fuzzy interaction, without blocking startup.
+func (m Model) Init() tea.Cmd { return m.rebuildCorpusCmd() }
+
+// corpusTTL bounds how stale the cached corpus may be before a use triggers a
+// background rebuild. External file/dir changes surface within this window.
+const corpusTTL = 2 * time.Second
+
+// corpusMsg delivers a freshly walked corpus (and reloaded .gitignore) from the
+// background rebuild goroutine.
+type corpusMsg struct {
+	files   []string
+	gi      *filetree.Gitignore
+	builtAt time.Time
+}
+
+// ensureCorpus guarantees m.corpus is populated. On a cold cache it builds once
+// synchronously so the first query/fuzzy has data; on a warm cache it is an
+// O(1) read. When the cache is older than corpusTTL it fires a background
+// rebuild (off the UI goroutine) and returns its Cmd, so keystrokes are never
+// blocked on a walk while the list refreshes.
+func (m Model) ensureCorpus() (Model, tea.Cmd) {
+	if m.corpusBuiltAt.IsZero() {
+		m.corpus = filetree.BuildAllEntries(m.root, m.cfg.Tree.Ignore, m.gitignore)
+		m.corpusBuiltAt = time.Now()
+		return m, nil
+	}
+	if !m.corpusRebuilding && time.Since(m.corpusBuiltAt) > corpusTTL {
+		m.corpusRebuilding = true
+		return m, m.rebuildCorpusCmd()
+	}
+	return m, nil
+}
+
+// rebuildCorpusCmd walks the project off the UI goroutine and delivers a fresh
+// corpus via corpusMsg. .gitignore is reloaded so external edits to it re-filter
+// the corpus. Safe to run concurrently: dirCache is mutex-guarded and the
+// captured root/ignore are read-only.
+func (m Model) rebuildCorpusCmd() tea.Cmd {
+	root := m.root
+	ignore := m.cfg.Tree.Ignore
+	return func() tea.Msg {
+		gi := filetree.LoadGitignore(root)
+		return corpusMsg{
+			files:   filetree.BuildAllEntries(root, ignore, gi),
+			gi:      gi,
+			builtAt: time.Now(),
+		}
+	}
+}
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -235,6 +293,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case lsp.NoticeMsg:
 		m.notice = msg.Text
+		return m, nil
+
+	case corpusMsg:
+		// A background rebuild landed: swap in the fresh corpus and the reloaded
+		// .gitignore (keeps the sidebar's graying consistent with the corpus).
+		m.corpus = msg.files
+		m.gitignore = msg.gi
+		m.corpusBuiltAt = msg.builtAt
+		m.corpusRebuilding = false
 		return m, nil
 
 	case definitionMsg:
@@ -269,10 +336,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleGrepKey(msg)
 		}
 		if msg.Type == tea.KeyCtrlP && m.mode != modeCommand && m.mode != modeSearch && m.mode != modeExec {
-			return m.openFuzzy(), nil
+			return m.openFuzzy()
 		}
 		if msg.Type == tea.KeyCtrlG && m.mode != modeCommand && m.mode != modeSearch && m.mode != modeExec {
-			return m.openGrep(), nil
+			return m.openGrep()
 		}
 		if msg.Type == tea.KeyShiftTab && m.mode != modeCommand && m.mode != modeSearch && m.mode != modeExec {
 			return m.cycleTab(), nil

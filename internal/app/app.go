@@ -4,6 +4,7 @@
 package app
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -130,6 +131,7 @@ type Model struct {
 	corpus           []string
 	corpusBuiltAt    time.Time
 	corpusRebuilding bool
+	corpusTruncated  bool // the walk hit Tree.MaxIndexFiles — index is partial
 
 	// Per-line highlight cache. A nil row renders plain; rows are spliced on
 	// line insert/join so indices stay aligned between full rescans.
@@ -213,34 +215,73 @@ func New(cfg config.Config, db store.Backend, root, notice string, reg lsp.Regis
 		m = m.openFileAt(lastFile)
 		m.mode = modeQuery
 	}
+
+	// Warm start: reuse the persisted corpus if its directory signature still
+	// matches the tree (a cheap stat-sweep), skipping the full walk entirely.
+	if idx, ok := db.LoadCorpus(); ok && idx.Version == store.CorpusVersion && m.signatureValid(idx) {
+		m.corpus = idx.Files
+		m.corpusTruncated = idx.Truncated
+		m.corpusBuiltAt = time.Now()
+	}
 	return m
 }
 
-// Init warms the search corpus in the background so it is ready before the
-// user's first query/fuzzy interaction, without blocking startup.
-func (m Model) Init() tea.Cmd { return m.rebuildCorpusCmd() }
+// Init warms the search corpus in the background when there is no valid
+// persisted index; a warm start (New loaded one) skips the walk.
+func (m Model) Init() tea.Cmd {
+	if m.corpusBuiltAt.IsZero() {
+		return m.rebuildCorpusCmd()
+	}
+	return nil
+}
+
+// signatureValid stat-sweeps a persisted index's directory-mtime map against
+// the current tree. It returns false on the first missing or changed directory
+// — any external add/remove/rename bumps the containing directory's mtime — so a
+// true result means the cached file list is still accurate. O(#dirs) stats,
+// far cheaper than the full walk's per-entry gitignore regex.
+func (m Model) signatureValid(idx store.CorpusIndex) bool {
+	if len(idx.DirMtimes) == 0 {
+		return false
+	}
+	for dir, mtime := range idx.DirMtimes {
+		info, err := os.Stat(filepath.Join(m.root, dir))
+		if err != nil || !info.IsDir() || info.ModTime().UnixNano() != mtime {
+			return false
+		}
+	}
+	return true
+}
 
 // corpusTTL bounds how stale the cached corpus may be before a use triggers a
 // background rebuild. External file/dir changes surface within this window.
 const corpusTTL = 2 * time.Second
 
-// corpusMsg delivers a freshly walked corpus (and reloaded .gitignore) from the
-// background rebuild goroutine.
+// corpusMsg delivers a freshly walked corpus (reloaded .gitignore, directory
+// signature, and truncation flag) from the background rebuild goroutine.
 type corpusMsg struct {
-	files   []string
-	gi      *filetree.Gitignore
-	builtAt time.Time
+	files     []string
+	gi        *filetree.Gitignore
+	dirMtimes map[string]int64
+	truncated bool
+	builtAt   time.Time
 }
 
 // ensureCorpus guarantees m.corpus is populated. On a cold cache it builds once
 // synchronously so the first query/fuzzy has data; on a warm cache it is an
 // O(1) read. When the cache is older than corpusTTL it fires a background
 // rebuild (off the UI goroutine) and returns its Cmd, so keystrokes are never
-// blocked on a walk while the list refreshes.
+// blocked on a walk while the list refreshes. (Persistence happens only in the
+// corpusMsg handler — the in-flight Init/TTL rebuild reconciles and stores.)
 func (m Model) ensureCorpus() (Model, tea.Cmd) {
 	if m.corpusBuiltAt.IsZero() {
-		m.corpus = filetree.BuildAllEntries(m.root, m.cfg.Tree.Ignore, m.gitignore)
+		files, _, truncated := filetree.BuildAllEntries(m.root, m.cfg.Tree.Ignore, m.gitignore, m.cfg.Tree.MaxIndexFiles)
+		m.corpus = files
+		m.corpusTruncated = truncated
 		m.corpusBuiltAt = time.Now()
+		if truncated {
+			m.notice = truncatedNotice(m.cfg.Tree.MaxIndexFiles)
+		}
 		return m, nil
 	}
 	if !m.corpusRebuilding && time.Since(m.corpusBuiltAt) > corpusTTL {
@@ -257,14 +298,23 @@ func (m Model) ensureCorpus() (Model, tea.Cmd) {
 func (m Model) rebuildCorpusCmd() tea.Cmd {
 	root := m.root
 	ignore := m.cfg.Tree.Ignore
+	maxFiles := m.cfg.Tree.MaxIndexFiles
 	return func() tea.Msg {
 		gi := filetree.LoadGitignore(root)
+		files, dirMtimes, truncated := filetree.BuildAllEntries(root, ignore, gi, maxFiles)
 		return corpusMsg{
-			files:   filetree.BuildAllEntries(root, ignore, gi),
-			gi:      gi,
-			builtAt: time.Now(),
+			files:     files,
+			gi:        gi,
+			dirMtimes: dirMtimes,
+			truncated: truncated,
+			builtAt:   time.Now(),
 		}
 	}
+}
+
+// truncatedNotice tells the user the index is partial and how to widen it.
+func truncatedNotice(cap int) string {
+	return fmt.Sprintf("search index capped at %d files — add ignores (tree.ignore) or open a subdirectory", cap)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -297,11 +347,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case corpusMsg:
 		// A background rebuild landed: swap in the fresh corpus and the reloaded
-		// .gitignore (keeps the sidebar's graying consistent with the corpus).
+		// .gitignore (keeps the sidebar's graying consistent with the corpus),
+		// then persist it so the next launch is a warm start. Persisting here (on
+		// the main goroutine) keeps all DB writes off the rebuild goroutine.
 		m.corpus = msg.files
 		m.gitignore = msg.gi
 		m.corpusBuiltAt = msg.builtAt
 		m.corpusRebuilding = false
+		m.corpusTruncated = msg.truncated
+		_ = m.db.SaveCorpus(store.CorpusIndex{
+			Version:   store.CorpusVersion,
+			Files:     msg.files,
+			DirMtimes: msg.dirMtimes,
+			Truncated: msg.truncated,
+		})
+		if msg.truncated {
+			m.notice = truncatedNotice(m.cfg.Tree.MaxIndexFiles)
+		}
 		return m, nil
 
 	case definitionMsg:

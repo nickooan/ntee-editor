@@ -11,6 +11,7 @@ type Memory struct {
 	session   *Session
 	drafts    map[string]Draft
 	tabs      *Tabs
+	corpus    *CorpusIndex
 }
 
 func NewMemory() *Memory {
@@ -104,4 +105,16 @@ func (m *Memory) LoadTabs() (Tabs, bool) {
 		return Tabs{}, false
 	}
 	return *m.tabs, true
+}
+
+func (m *Memory) SaveCorpus(c CorpusIndex) error {
+	m.corpus = &c
+	return nil
+}
+
+func (m *Memory) LoadCorpus() (CorpusIndex, bool) {
+	if m.corpus == nil {
+		return CorpusIndex{}, false
+	}
+	return *m.corpus, true
 }

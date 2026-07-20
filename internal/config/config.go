@@ -32,6 +32,10 @@ type EditorConfig struct {
 
 type TreeConfig struct {
 	Ignore []string `yaml:"ignore"`
+	// MaxIndexFiles caps the search corpus (BuildAllEntries). When the walk hits
+	// it, indexing stops and the UI flags a truncated index. Bounds memory/CPU on
+	// huge roots. <1 is clamped to the default in Load.
+	MaxIndexFiles int `yaml:"max_index_files"`
 }
 
 type ThemeConfig struct {
@@ -85,10 +89,19 @@ func Default() Config {
 			MaxHighlightKB: 512,
 		},
 		Tree: TreeConfig{
-			// Only .git is hard-hidden. Other noise (node_modules, dist, …) is
-			// handled by .gitignore: shown grayed in the tree, browsable one
-			// level at a time, and kept out of the search corpus.
-			Ignore: []string{".git"},
+			// node_modules and .git are ALWAYS skipped (filetree.alwaysIgnore),
+			// regardless of this list. These are additional, user-overridable
+			// build/dependency dirs kept out of the tree and search corpus so a
+			// repo without a covering .gitignore (or a multi-repo root) does not
+			// index vendored/output trees. Overriding tree.ignore in config
+			// replaces this list.
+			Ignore: []string{
+				"dist", "build", "target", "vendor",
+				".next", ".nuxt", ".svelte-kit",
+				".venv", "venv", "__pycache__",
+				".gradle", "coverage", ".turbo", ".cache",
+			},
+			MaxIndexFiles: 50000,
 		},
 		Theme: ThemeConfig{Syntax: "gruvbox"},
 		Languages: map[string]LanguageConfig{
@@ -121,6 +134,9 @@ func Load(projectRoot string) Config {
 	}
 	if cfg.Editor.MaxSnapshots < 1 {
 		cfg.Editor.MaxSnapshots = 50
+	}
+	if cfg.Tree.MaxIndexFiles < 1 {
+		cfg.Tree.MaxIndexFiles = 50000
 	}
 	return cfg
 }

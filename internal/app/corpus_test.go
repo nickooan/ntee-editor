@@ -74,8 +74,8 @@ func TestCorpusMsgSwapsCorpus(t *testing.T) {
 
 	// Simulate the background rebuild landing.
 	gi := filetree.LoadGitignore(root)
-	fresh := filetree.BuildAllEntries(root, config.Default().Tree.Ignore, gi)
-	next, _ := m.Update(corpusMsg{files: fresh, gi: gi, builtAt: time.Now()})
+	fresh, dirMtimes, truncated := filetree.BuildAllEntries(root, config.Default().Tree.Ignore, gi, config.Default().Tree.MaxIndexFiles)
+	next, _ := m.Update(corpusMsg{files: fresh, gi: gi, dirMtimes: dirMtimes, truncated: truncated, builtAt: time.Now()})
 	m = next.(Model)
 
 	if !containsStr(m.corpus, "added.go") {
@@ -101,5 +101,55 @@ func TestCorpusBuiltOncePerSession(t *testing.T) {
 	m = runes(m, "ain.go") // more keystrokes, all within corpusTTL
 	if !m.corpusBuiltAt.Equal(first) {
 		t.Fatalf("corpus rebuilt during typing: first=%v now=%v", first, m.corpusBuiltAt)
+	}
+}
+
+// TestSignatureValidDetectsChange guards against the root-mtime-only bug: the
+// stat-sweep must invalidate when anything in the tree changes.
+func TestSignatureValidDetectsChange(t *testing.T) {
+	m, root := corpusModel(t)
+	gi := filetree.LoadGitignore(root)
+	files, dirMtimes, _ := filetree.BuildAllEntries(root, config.Default().Tree.Ignore, gi, 50000)
+	idx := store.CorpusIndex{Version: store.CorpusVersion, Files: files, DirMtimes: dirMtimes}
+
+	if !m.signatureValid(idx) {
+		t.Fatal("a freshly built signature should be valid")
+	}
+	// Adding a file bumps its containing directory's mtime.
+	must(t, os.WriteFile(filepath.Join(root, "newfile.go"), []byte("x\n"), 0o644))
+	if m.signatureValid(idx) {
+		t.Fatal("signature should be invalid after an external add")
+	}
+	// A missing directory and an empty signature are both invalid.
+	if m.signatureValid(store.CorpusIndex{Version: store.CorpusVersion, DirMtimes: map[string]int64{"ghost": 1}}) {
+		t.Fatal("removed dir should invalidate")
+	}
+	if m.signatureValid(store.CorpusIndex{Version: store.CorpusVersion}) {
+		t.Fatal("empty signature should be invalid")
+	}
+}
+
+// TestWarmStartLoadsPersistedCorpus: after a rebuild persists to the DB, a fresh
+// model over the same DB+root reuses the corpus and skips the walk in Init.
+func TestWarmStartLoadsPersistedCorpus(t *testing.T) {
+	db := store.NewMemory()
+	root := t.TempDir()
+	must(t, os.WriteFile(filepath.Join(root, "keep.go"), []byte("package main\n"), 0o644))
+
+	m := New(config.Default(), db, root, "", nil)
+	gi := filetree.LoadGitignore(root)
+	files, dirMtimes, _ := filetree.BuildAllEntries(root, config.Default().Tree.Ignore, gi, 50000)
+	next, _ := m.Update(corpusMsg{files: files, gi: gi, dirMtimes: dirMtimes, builtAt: time.Now()})
+	_ = next.(Model) // corpusMsg handler persisted the index to db
+
+	m2 := New(config.Default(), db, root, "", nil)
+	if m2.corpusBuiltAt.IsZero() {
+		t.Fatal("expected a warm start (corpus loaded from db)")
+	}
+	if !containsStr(m2.corpus, "keep.go") {
+		t.Fatalf("warm-started corpus missing keep.go: %v", m2.corpus)
+	}
+	if m2.Init() != nil {
+		t.Fatal("warm start must not trigger a rebuild in Init")
 	}
 }

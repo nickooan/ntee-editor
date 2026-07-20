@@ -186,13 +186,18 @@ func (m Model) renderGrepOverlay(width, height int) string {
 	rows := make([]string, 0, innerH)
 
 	// --- top: preview of the selected hit ---
-	re := view.CreateSearchRegex(m.grepQuery)
-	f, hit, ok := m.grepSelectedFile()
-	if ok {
-		rows = append(rows, renderPreviewRows(f.lines, m.grepHl, re, hit.line, previewH, innerW)...)
+	re := view.CreateMultilineSearchRegex(m.grepQuery)
+	_, hit, ok := m.grepSelectedFile()
+	if ok && m.grepPrevLines != nil {
+		rows = append(rows, renderPreviewRows(m.grepPrevLines, m.grepHl, re, hit.line, previewH, innerW)...)
 	} else {
 		msg := "Type at least 2 characters to search the repo."
-		if len([]rune(m.grepQuery)) >= 2 {
+		switch {
+		case m.grepLoading:
+			msg = "Indexing repository…"
+		case m.grepResultsGen != m.grepSearchGen:
+			msg = "Searching…"
+		case len([]rune(m.grepQuery)) >= 2:
 			msg = "No matches."
 		}
 		rows = append(rows, overlayHintStyle.Render(padTo(" "+msg, innerW)))
@@ -205,6 +210,12 @@ func (m Model) renderGrepOverlay(width, height int) string {
 
 	// --- bottom: query input + result rows ---
 	count := fmt.Sprintf("%d results", len(m.grepResults))
+	switch {
+	case m.grepLoading:
+		count = fmt.Sprintf("indexing %d/%d files…", len(m.grepFiles), len(m.corpus))
+	case m.grepResultsGen != m.grepSearchGen:
+		count = "searching…"
+	}
 	inputRow := promptStyle.Render("grep ") + renderInputLine(m.grepQuery, len([]rune(m.grepQuery)))
 	if pad := innerW - lipgloss.Width(inputRow) - lipgloss.Width(count); pad > 0 {
 		inputRow += statusTextStyle.Render(strings.Repeat(" ", pad)) + overlayHintStyle.Render(count)

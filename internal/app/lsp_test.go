@@ -11,11 +11,17 @@ import (
 	"github.com/nickooan/ntee-editor/internal/lsp"
 )
 
-// stubClient records the doc-sync calls the app makes.
+// stubClient records the doc-sync calls the app makes, plus the UTF-16
+// columns of definition/references lookups. When defQueue is set, Definition
+// pops one scripted answer per call (for retry-ladder tests); otherwise it
+// returns locs.
 type stubClient struct {
 	calls       []string
 	locs        []lsp.Location
+	defQueue    [][]lsp.Location
+	defCols     []int
 	refLocs     []lsp.Location
+	refCols     []int
 	completions []lsp.CompletionItem
 }
 
@@ -23,11 +29,20 @@ func (s *stubClient) DidOpen(path, _ string) { s.calls = append(s.calls, "open:"
 func (s *stubClient) DidChange(path string, _ string, _ int) {
 	s.calls = append(s.calls, "change:"+filepath.Base(path))
 }
-func (s *stubClient) DidSave(path string)                                 { s.calls = append(s.calls, "save:"+filepath.Base(path)) }
-func (s *stubClient) DidClose(path string)                                { s.calls = append(s.calls, "close:"+filepath.Base(path)) }
-func (s *stubClient) Definition(string, int, int) ([]lsp.Location, error) { return s.locs, nil }
-func (s *stubClient) References(string, int, int) ([]lsp.Location, error) {
+func (s *stubClient) DidSave(path string)  { s.calls = append(s.calls, "save:"+filepath.Base(path)) }
+func (s *stubClient) DidClose(path string) { s.calls = append(s.calls, "close:"+filepath.Base(path)) }
+func (s *stubClient) Definition(_ string, _, col int) ([]lsp.Location, error) {
+	s.defCols = append(s.defCols, col)
+	if len(s.defQueue) > 0 {
+		locs := s.defQueue[0]
+		s.defQueue = s.defQueue[1:]
+		return locs, nil
+	}
+	return s.locs, nil
+}
+func (s *stubClient) References(_ string, _, col int) ([]lsp.Location, error) {
 	s.calls = append(s.calls, "references")
+	s.refCols = append(s.refCols, col)
 	return s.refLocs, nil
 }
 func (s *stubClient) Completion(string, int, int) ([]lsp.CompletionItem, error) {

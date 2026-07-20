@@ -34,6 +34,20 @@ func CreateSearchRegex(query string) *regexp.Regexp {
 	return re
 }
 
+// CreateMultilineSearchRegex is CreateSearchRegex in multi-line mode: ^ and $
+// match at line boundaries. Required when matching whole file content in one
+// pass, so anchored queries behave exactly as they would line-at-a-time.
+func CreateMultilineSearchRegex(query string) *regexp.Regexp {
+	if query == "" {
+		return nil
+	}
+	if re, err := regexp.Compile("(?im)" + query); err == nil {
+		return re
+	}
+	re, _ := regexp.Compile("(?im)" + regexp.QuoteMeta(query))
+	return re
+}
+
 // FindSearchMatches returns every match of query across content.
 func FindSearchMatches(content, query string) []SearchMatch {
 	re := CreateSearchRegex(query)

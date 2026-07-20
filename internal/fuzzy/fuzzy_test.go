@@ -3,7 +3,7 @@ package fuzzy
 import "testing"
 
 func TestFilterEmptyQueryKeepsOrder(t *testing.T) {
-	cands := []string{"b.go", "a.go", "c.go"}
+	cands := Prepare([]string{"b.go", "a.go", "c.go"})
 	got := Filter("", cands)
 	if len(got) != 3 {
 		t.Fatalf("want 3 matches, got %d", len(got))
@@ -16,25 +16,25 @@ func TestFilterEmptyQueryKeepsOrder(t *testing.T) {
 }
 
 func TestFilterSubsequence(t *testing.T) {
-	cands := []string{
+	cands := Prepare([]string{
 		"internal/app/render.go",
 		"internal/store/store.go",
 		"README.md",
-	}
+	})
 	got := Filter("store", cands)
 	if len(got) != 1 || got[0].Index != 1 {
 		t.Fatalf("want only store.go, got %+v", got)
 	}
-	if len(got[0].Positions) != 5 {
-		t.Fatalf("want 5 matched positions, got %v", got[0].Positions)
+	if pos := Positions("store", cands[got[0].Index]); len(pos) != 5 {
+		t.Fatalf("want 5 matched positions, got %v", pos)
 	}
 }
 
 func TestFilterRanksBasenameAndBoundaries(t *testing.T) {
-	cands := []string{
+	cands := Prepare([]string{
 		"internal/app/keys_tree.go", // "tree" in basename after boundary
 		"src/subtree/util.go",       // "tree" mid-word in a directory
-	}
+	})
 	got := Filter("tree", cands)
 	if len(got) != 2 {
 		t.Fatalf("want 2 matches, got %d", len(got))
@@ -45,7 +45,7 @@ func TestFilterRanksBasenameAndBoundaries(t *testing.T) {
 }
 
 func TestFilterCaseInsensitiveAndUTF8(t *testing.T) {
-	cands := []string{"docs/Résumé.md"}
+	cands := Prepare([]string{"docs/Résumé.md"})
 	if got := Filter("résumé", cands); len(got) != 1 {
 		t.Fatalf("utf8 case-insensitive match failed: %+v", got)
 	}
@@ -56,7 +56,20 @@ func TestFilterCaseInsensitiveAndUTF8(t *testing.T) {
 }
 
 func TestFilterNoMatch(t *testing.T) {
-	if got := Filter("zzz", []string{"a.go"}); len(got) != 0 {
+	if got := Filter("zzz", Prepare([]string{"a.go"})); len(got) != 0 {
 		t.Fatalf("want no matches, got %+v", got)
+	}
+}
+
+// isSubsequence must reject candidates that contain the query runes out of
+// order, so the pre-filter agrees with the scorer's full-subsequence result.
+func TestPrefilterRejectsOutOfOrder(t *testing.T) {
+	// "zx" is not a subsequence of "xz" (x precedes z), so no match.
+	if got := Filter("zx", Prepare([]string{"xz.go"})); len(got) != 0 {
+		t.Fatalf("out-of-order query must not match: %+v", got)
+	}
+	// but "xz" is a subsequence of "xaz".
+	if got := Filter("xz", Prepare([]string{"xaz.go"})); len(got) != 1 {
+		t.Fatalf("in-order subsequence must match: %+v", got)
 	}
 }

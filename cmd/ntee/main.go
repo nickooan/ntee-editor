@@ -10,8 +10,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"gopkg.in/yaml.v3"
 
 	"github.com/nickooan/ntee-editor/internal/app"
 	"github.com/nickooan/ntee-editor/internal/config"
@@ -26,9 +30,22 @@ func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	prepareLSP := flag.Bool("prepare-lsp", false, "install language servers and write config, then exit")
 	assumeYes := flag.Bool("yes", false, "skip the confirmation prompt for --prepare-lsp")
+	disableLSP := flag.Bool("disable-lsp", false, "disable LSP for the named languages (or 'all'); writes the user config")
+	enableLSP := flag.Bool("enable-lsp", false, "re-enable LSP for the named languages (or 'all'); writes the user config")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println("ntee-editor " + version)
+		return
+	}
+	if *disableLSP || *enableLSP {
+		if *disableLSP && *enableLSP {
+			fmt.Fprintln(os.Stderr, "use either --disable-lsp or --enable-lsp, not both")
+			os.Exit(1)
+		}
+		if err := toggleLSP(flag.Args(), *enableLSP); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 		return
 	}
 	if *prepareLSP {
@@ -94,4 +111,61 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+// knownLanguages is the union of the built-in defaults, the --prepare-lsp
+// recipes, and any languages already in the user config — the names
+// --disable-lsp/--enable-lsp accept (plus "all").
+func knownLanguages() []string {
+	names := map[string]bool{}
+	for name := range config.Default().Languages {
+		names[name] = true
+	}
+	for name := range lspsetup.Recipes() {
+		names[name] = true
+	}
+	if path, err := config.ConfigPath(); err == nil {
+		var user config.Config
+		if data, err := os.ReadFile(path); err == nil {
+			if yaml.Unmarshal(data, &user) == nil {
+				for name := range user.Languages {
+					names[name] = true
+				}
+			}
+		}
+	}
+	out := make([]string, 0, len(names))
+	for name := range names {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// toggleLSP validates the language names and writes their enable flag (or the
+// global lsp.enabled for "all") into the user config.
+func toggleLSP(langs []string, enabled bool) error {
+	known := knownLanguages()
+	verb := "disable"
+	if enabled {
+		verb = "enable"
+	}
+	if len(langs) == 0 {
+		return fmt.Errorf("usage: ntee --%s-lsp <language>... (or 'all')\nknown languages: %s", verb, strings.Join(known, ", "))
+	}
+	for i, l := range langs {
+		langs[i] = strings.ToLower(l)
+	}
+	for _, l := range langs {
+		if l == "all" || slices.Contains(known, l) {
+			continue
+		}
+		return fmt.Errorf("unknown language %q\nknown languages: all, %s", l, strings.Join(known, ", "))
+	}
+	path, err := config.SetLanguagesEnabled(langs, enabled)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("LSP %sd for %s — written to %s\n", verb, strings.Join(langs, ", "), path)
+	return nil
 }

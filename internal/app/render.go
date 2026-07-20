@@ -214,7 +214,7 @@ func (m Model) renderSidebar(width, height int) string {
 			lines = append(lines, selectedEntryStyle.Render(label))
 		case entry.RelativePath == m.openRel && m.openRel != "":
 			lines = append(lines, openFileStyle.Render(label))
-		case entry.Gitignored:
+		case entry.Dimmed:
 			lines = append(lines, ignoredFileStyle.Render(label))
 		case entry.Type == "directory":
 			lines = append(lines, dirStyle.Render(label))

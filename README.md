@@ -13,10 +13,41 @@ recently opened files, per-file edit snapshots (undo history), and the session
  status line / : command bar
 ```
 
+## Install
+
+One command (macOS or Linux) — checks Go (installs it via brew/apt/dnf/pacman if
+missing), clones and builds the editor to `~/go/bin/ntee`, then installs the
+language servers for every supported language whose runtime is present:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/nickooan/ntee-editor/main/install.sh | bash
+```
+
+From a local checkout the same script builds in place:
+
+```sh
+./install.sh
+```
+
+**Updating** is the same command — re-running pulls the latest source
+(`git pull --ff-only`) and rebuilds.
+
+Make sure `~/go/bin` is on your PATH (the script prints the exact `export` line
+if it isn't), then use the editor globally:
+
+```sh
+ntee <path>        # open a project (defaults to the current directory)
+```
+
+Knobs: `NTEE_INSTALL_DIR=<dir>` overrides the clone destination
+(default `~/.ntee-editor/src`); `NTEE_SKIP_LSP=1` skips the language-server
+step (run `ntee --prepare-lsp` later).
+
 ## Run
 
 ```sh
-go run ./cmd/ntee [project-root]     # defaults to the current directory
+ntee [project-root]                  # installed binary
+go run ./cmd/ntee [project-root]     # from a checkout; defaults to the current directory
 ```
 
 ## Keymap
@@ -104,6 +135,18 @@ plan and asks before running installers (`--yes` skips the prompt); it **adds on
 languages** (your tuned entries are kept, and the old file is backed up to `config.yaml.bak`),
 and skips servers whose runtime (Node/JDK/Ruby/Go) is absent, telling you what to install.
 Recipes can be overridden per language via an `install:` block in the config.
+
+### Toggling LSP from the command line
+
+```sh
+ntee --disable-lsp typescript vue   # write enable: false for these languages
+ntee --disable-lsp all              # turn LSP off globally (lsp.enabled: false)
+ntee --enable-lsp typescript        # flip a language (or 'all') back on
+```
+
+Both write to `~/.config/ntee-editor/config.yaml` (previous file backed up to
+`config.yaml.bak`; per-language tuning like a custom `command` is kept — only the
+`enable` flag changes). Unknown names error with the list of known languages.
 
 ## Persistence
 

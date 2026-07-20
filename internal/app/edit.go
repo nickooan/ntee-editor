@@ -1,7 +1,9 @@
 package app
 
 import (
+	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/nickooan/ntee-editor/internal/input"
 )
@@ -292,6 +294,75 @@ func wordRange(line []rune, cx int) selRange {
 		end++
 	}
 	return selRange{start, end}
+}
+
+// identifierAt returns the identifier run containing cx (or ending exactly at
+// cx — the cursor sitting just past a word still counts), else ok=false.
+func identifierAt(line []rune, cx int) (start, end int, ok bool) {
+	n := len(line)
+	i := input.Clamp(cx, 0, n)
+	pos := -1
+	switch {
+	case i < n && isIdentRune(line[i]):
+		pos = i
+	case i > 0 && isIdentRune(line[i-1]):
+		pos = i - 1
+	}
+	if pos < 0 {
+		return 0, 0, false
+	}
+	start, end = pos, pos+1
+	for start > 0 && isIdentRune(line[start-1]) {
+		start--
+	}
+	for end < n && isIdentRune(line[end]) {
+		end++
+	}
+	return start, end, true
+}
+
+// identifierText returns the identifier at cx, or "".
+func identifierText(line []rune, cx int) string {
+	if s, e, ok := identifierAt(line, cx); ok {
+		return string(line[s:e])
+	}
+	return ""
+}
+
+// identifierCols returns the start columns of up to max identifier runs on the
+// line, nearest to cx first (ties resolve left-to-right). Runs starting with a
+// digit are skipped — those are number literals, not names.
+func identifierCols(line []rune, cx int, max int) []int {
+	type run struct{ start, end int }
+	var runs []run
+	for i := 0; i < len(line); {
+		if !isIdentRune(line[i]) {
+			i++
+			continue
+		}
+		start := i
+		for i < len(line) && isIdentRune(line[i]) {
+			i++
+		}
+		if !unicode.IsDigit(line[start]) {
+			runs = append(runs, run{start, i})
+		}
+	}
+	dist := func(r run) int {
+		if cx >= r.start && cx <= r.end {
+			return 0
+		}
+		if cx < r.start {
+			return r.start - cx
+		}
+		return cx - r.end
+	}
+	sort.SliceStable(runs, func(a, b int) bool { return dist(runs[a]) < dist(runs[b]) })
+	cols := make([]int, 0, min(max, len(runs)))
+	for _, r := range runs[:min(max, len(runs))] {
+		cols = append(cols, r.start)
+	}
+	return cols
 }
 
 // dedupeRanges drops empty and consecutive-duplicate ranges, preserving order.

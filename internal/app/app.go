@@ -120,7 +120,7 @@ type Model struct {
 	fuzzyOpen    bool
 	fuzzyQuery   string
 	fuzzyIndex   int
-	fuzzyCorpus  []string
+	fuzzyCorpus  []fuzzy.Prepared // candidates with matching data precomputed once per open
 	fuzzyMatches []fuzzy.Match
 
 	// Search corpus: the full project file walk (BuildAllEntries), shared by the
@@ -164,14 +164,24 @@ type Model struct {
 	completionPending   bool // a request is in flight
 	completionDismissed bool // Esc'd — suppress auto-reopen until a word boundary
 
-	// Repo-wide content search overlay (Ctrl+G).
-	grepOpen    bool
-	grepQuery   string
-	grepIndex   int
-	grepResults []grepHit
-	grepFiles   []grepFile
-	grepHlRel   string
-	grepHl      [][]view.HighlightSegment
+	// Repo-wide content search overlay (Ctrl+G). All heavy work is async: the
+	// snapshot loads via grepLoadedMsg (guarded by grepGen), searches are
+	// debounced via grepTickMsg and land via grepResultsMsg (guarded by
+	// grepSearchGen). grepResultsGen == grepSearchGen means the displayed
+	// results are current.
+	grepOpen       bool
+	grepQuery      string
+	grepIndex      int
+	grepResults    []grepHit
+	grepFiles      []grepFile // streams in per grepBatchMsg; released on close
+	grepLoading    bool       // snapshot batches still arriving
+	grepLoadBytes  int        // bytes loaded so far, for the maxGrepBytes cap
+	grepGen        int        // bumped per openGrep; drops stale loads
+	grepSearchGen  int        // bumped per query change; tags ticks + results
+	grepResultsGen int        // grepSearchGen of the displayed grepResults
+	grepPrevLines  []string   // selected file's lines, derived on demand
+	grepHlRel      string
+	grepHl         [][]view.HighlightSegment
 }
 
 func New(cfg config.Config, db store.Backend, root, notice string, reg lsp.Registry) Model {
@@ -365,6 +375,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notice = truncatedNotice(m.cfg.Tree.MaxIndexFiles)
 		}
 		return m, nil
+
+	case grepBatchMsg:
+		return m.handleGrepBatch(msg)
+
+	case grepTickMsg:
+		return m.handleGrepTick(msg)
+
+	case grepResultsMsg:
+		return m.handleGrepResults(msg)
 
 	case definitionMsg:
 		return m.handleDefinition(msg)

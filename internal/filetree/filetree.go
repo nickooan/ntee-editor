@@ -21,7 +21,7 @@ type FileTreeEntry struct {
 	Depth        int
 	Type         string // "directory" | "file"
 	IsExpanded   bool
-	Gitignored   bool // matched by .gitignore (or under an ignored dir) — rendered gray
+	Dimmed       bool // shown in the tree but excluded from search (gitignore match or node_modules) — rendered gray
 }
 
 type dirChild struct {
@@ -98,13 +98,19 @@ func isInsideRoot(root, target string) bool {
 	return rel == "." || (!strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel))
 }
 
-// alwaysIgnore names are skipped by every walk regardless of config — never
-// worth indexing and the dominant source of file-count blowup in
-// dependency-heavy trees (one ~/workspace had 1200+ node_modules). Config
-// tree.ignore ADDS to this set; it can never remove from it.
-var alwaysIgnore = map[string]bool{
+// hardIgnore names are dropped by every walk — never shown in the tree and
+// never indexed. Config tree.ignore ADDS to this set (see hardIgnored); it can
+// never remove from it.
+var hardIgnore = map[string]bool{
+	".git": true,
+}
+
+// softIgnore names are shown in the tree (rendered gray, flagged Dimmed) but
+// kept out of the search corpus — the dominant source of file-count blowup in
+// dependency-heavy trees (one ~/workspace had 1200+ node_modules), yet still
+// worth seeing in the sidebar.
+var softIgnore = map[string]bool{
 	"node_modules": true,
-	".git":         true,
 }
 
 // IsGitRepo reports whether dir is a git repository root — it contains a .git
@@ -200,8 +206,10 @@ func FindProjectRoot(editorRoot, filePath string) string {
 	}
 }
 
-func ignored(name string, ignore []string) bool {
-	if alwaysIgnore[name] {
+// hardIgnored reports whether name is dropped from every walk: the built-in
+// hardIgnore set plus any config tree.ignore entry.
+func hardIgnored(name string, ignore []string) bool {
+	if hardIgnore[name] {
 		return true
 	}
 	for _, ig := range ignore {
@@ -212,10 +220,17 @@ func ignored(name string, ignore []string) bool {
 	return false
 }
 
+// softIgnored reports whether name is shown-but-dimmed in the tree and kept out
+// of the search corpus.
+func softIgnored(name string) bool {
+	return softIgnore[name]
+}
+
 // BuildFileTreeEntries walks the root, descending only into directories whose
-// relative paths are in expanded. Names in ignore are skipped entirely. Entries
-// matched by gi (or nested under an ignored directory) are flagged Gitignored;
-// gi may be nil to disable that.
+// relative paths are in expanded. Hard-ignored names (.git, config tree.ignore)
+// are skipped entirely. Entries matched by gi, nested under a dimmed directory,
+// or soft-ignored (node_modules) are shown but flagged Dimmed (rendered gray and
+// excluded from search); gi may be nil to disable gitignore matching.
 func BuildFileTreeEntries(root string, expanded map[string]bool, ignore []string, gi *Gitignore) []FileTreeEntry {
 	if root == "" {
 		return nil
@@ -238,15 +253,16 @@ func BuildFileTreeEntries(root string, expanded map[string]bool, ignore []string
 		}
 
 		for _, child := range children {
-			if ignored(child.name, ignore) {
+			if hardIgnored(child.name, ignore) {
 				continue
 			}
 			rel := child.name
 			if dirPath != "" {
 				rel = dirPath + "/" + child.name
 			}
-			// Once a directory is gitignored, everything under it inherits it.
-			ign := parentIgnored || gi.Match(rel, child.isDir)
+			// Once a directory is dimmed (gitignored or soft-ignored), everything
+			// under it inherits it.
+			dim := parentIgnored || softIgnored(child.name) || gi.Match(rel, child.isDir)
 
 			if child.isDir {
 				isExpanded := expanded[rel]
@@ -257,10 +273,10 @@ func BuildFileTreeEntries(root string, expanded map[string]bool, ignore []string
 					Depth:        depth,
 					Type:         "directory",
 					IsExpanded:   isExpanded,
-					Gitignored:   ign,
+					Dimmed:       dim,
 				})
 				if isExpanded {
-					appendDir(rel, depth+1, ign)
+					appendDir(rel, depth+1, dim)
 				}
 				continue
 			}
@@ -273,7 +289,7 @@ func BuildFileTreeEntries(root string, expanded map[string]bool, ignore []string
 				CommandValue: rel,
 				Depth:        depth,
 				Type:         "file",
-				Gitignored:   ign,
+				Dimmed:       dim,
 			})
 		}
 	}
@@ -319,7 +335,9 @@ func BuildAllEntries(root string, ignore []string, gi *Gitignore, maxFiles int) 
 		}
 		dirMtimes[dirPath] = mtime.UnixNano()
 		for _, child := range children {
-			if ignored(child.name, ignore) {
+			// Hard- and soft-ignored names (.git, config tree.ignore, node_modules)
+			// are both kept out of the search corpus.
+			if hardIgnored(child.name, ignore) || softIgnored(child.name) {
 				continue
 			}
 			rel := child.name

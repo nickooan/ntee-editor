@@ -100,9 +100,10 @@ func Default() Config {
 			MaxHighlightKB: 512,
 		},
 		Tree: TreeConfig{
-			// node_modules and .git are ALWAYS skipped (filetree.alwaysIgnore),
+			// .git is always fully hidden and node_modules is always shown-but-
+			// dimmed and kept out of search (filetree.hardIgnore/softIgnore),
 			// regardless of this list. These are additional, user-overridable
-			// build/dependency dirs kept out of the tree and search corpus so a
+			// build/dependency dirs hidden from the tree and search corpus so a
 			// repo without a covering .gitignore (or a multi-repo root) does not
 			// index vendored/output trees. Overriding tree.ignore in config
 			// replaces this list.

@@ -101,7 +101,14 @@ func (m Model) executeCommand(cmd string) (tea.Model, tea.Cmd) {
 		m, _ = m.tabCommand(arg)
 
 	case "recent":
-		m = m.openFuzzy()
+		return m.openFuzzy()
+
+	case "refresh":
+		// Force a full rebuild now, dropping the mtime-keyed dir cache so even
+		// same-second external changes are picked up.
+		filetree.ClearDirCache()
+		m.corpusRebuilding = true
+		return m, m.rebuildCorpusCmd()
 
 	default:
 		m.errText = "unknown command :" + name
@@ -111,9 +118,10 @@ func (m Model) executeCommand(cmd string) (tea.Model, tea.Cmd) {
 
 // openFuzzy opens the Ctrl+P finder. The corpus is the full project walk with
 // recents moved to the front, so an empty query lists recently opened files.
-func (m Model) openFuzzy() Model {
+func (m Model) openFuzzy() (Model, tea.Cmd) {
 	m = m.closeCompletion()
-	corpus := filetree.BuildAllEntries(m.root, m.cfg.Tree.Ignore, m.gitignore)
+	m, cmd := m.ensureCorpus()
+	corpus := m.corpus
 	inCorpus := make(map[string]int, len(corpus))
 	for i, rel := range corpus {
 		inCorpus[rel] = i
@@ -137,7 +145,7 @@ func (m Model) openFuzzy() Model {
 	m.fuzzyIndex = 0
 	m.fuzzyCorpus = ordered
 	m.fuzzyMatches = fuzzy.Filter("", ordered)
-	return m
+	return m, cmd
 }
 
 func (m Model) handleFuzzyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {

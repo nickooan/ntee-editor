@@ -2,14 +2,12 @@ module github.com/nickooan/ntee-editor
 
 go 1.25.6
 
-replace github.com/nickooan/ntee-db => /Users/ningan/workspaces/ntee-db
-
 require (
 	github.com/alecthomas/chroma/v2 v2.27.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/charmbracelet/x/ansi v0.10.1
-	github.com/nickooan/ntee-db v0.0.0
+	github.com/nickooan/ntee-db v0.2.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 

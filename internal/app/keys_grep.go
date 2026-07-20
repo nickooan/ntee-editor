@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"path"
 	"strings"
 
@@ -28,18 +29,33 @@ type grepHit struct {
 // maxGrepResults caps the hit list per query.
 const maxGrepResults = 200
 
+// Grep loads matching files' contents into memory, so bound how much it will
+// hold to avoid ballooning RAM on a huge corpus (the corpus itself is already
+// capped by Tree.MaxIndexFiles, but each file's text is resident here).
+const (
+	maxGrepFiles = 10000
+	maxGrepBytes = 200 << 20 // 200 MB
+)
+
 // openGrep loads the corpus and opens the overlay. From edit mode with
 // unsaved changes it asks the user to save first — Enter on a hit opens
 // another file, which would silently discard the buffer.
-func (m Model) openGrep() Model {
+func (m Model) openGrep() (Model, tea.Cmd) {
 	m = m.closeCompletion()
 	if m.mode == modeEdit && m.edit.dirty {
 		m.errText = "unsaved changes — save (Ctrl+S) before repo search"
-		return m
+		return m, nil
 	}
+	m, cmd := m.ensureCorpus()
 	sizeCap := m.cfg.Editor.MaxHighlightKB * 1024
 	var files []grepFile
-	for _, rel := range filetree.BuildAllEntries(m.root, m.cfg.Tree.Ignore, m.gitignore) {
+	totalBytes := 0
+	truncated := false
+	for _, rel := range m.corpus {
+		if len(files) >= maxGrepFiles || totalBytes >= maxGrepBytes {
+			truncated = true
+			break
+		}
 		f, ok := filetree.ReadViewFile(m.root, rel)
 		if !ok || f.Binary {
 			continue
@@ -48,6 +64,10 @@ func (m Model) openGrep() Model {
 			continue
 		}
 		files = append(files, grepFile{rel: rel, lines: view.NormalizeLines(f.Content)})
+		totalBytes += len(f.Content)
+	}
+	if truncated {
+		m.notice = fmt.Sprintf("repo search limited to %d files — narrow your root or add ignores", len(files))
 	}
 	m.grepOpen = true
 	m.grepQuery = ""
@@ -56,7 +76,7 @@ func (m Model) openGrep() Model {
 	m.grepFiles = files
 	m.grepHlRel = ""
 	m.grepHl = nil
-	return m
+	return m, cmd
 }
 
 // refreshGrep re-runs the search over the in-memory corpus. Same semantics as

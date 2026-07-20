@@ -40,22 +40,32 @@ var (
 	dirCache   = map[string]cachedDir{}
 )
 
-func readDirectorySorted(path string) ([]dirChild, error) {
+// ClearDirCache drops all cached directory listings so the next walk re-reads
+// from disk. Used by the manual :refresh to pick up changes that mtime
+// comparison would miss (e.g. a same-second external edit).
+func ClearDirCache() {
+	dirCacheMu.Lock()
+	dirCache = map[string]cachedDir{}
+	dirCacheMu.Unlock()
+}
+
+func readDirectorySorted(path string) ([]dirChild, time.Time, error) {
 	info, err := os.Stat(path)
 	if err != nil {
-		return nil, err
+		return nil, time.Time{}, err
 	}
+	mtime := info.ModTime()
 
 	dirCacheMu.Lock()
 	cached, ok := dirCache[path]
 	dirCacheMu.Unlock()
-	if ok && cached.mtime.Equal(info.ModTime()) {
-		return cached.entries, nil
+	if ok && cached.mtime.Equal(mtime) {
+		return cached.entries, mtime, nil
 	}
 
 	raw, err := os.ReadDir(path)
 	if err != nil {
-		return nil, err
+		return nil, time.Time{}, err
 	}
 
 	entries := make([]dirChild, 0, len(raw))
@@ -75,9 +85,9 @@ func readDirectorySorted(path string) ([]dirChild, error) {
 	})
 
 	dirCacheMu.Lock()
-	dirCache[path] = cachedDir{mtime: info.ModTime(), entries: entries}
+	dirCache[path] = cachedDir{mtime: mtime, entries: entries}
 	dirCacheMu.Unlock()
-	return entries, nil
+	return entries, mtime, nil
 }
 
 func isInsideRoot(root, target string) bool {
@@ -88,7 +98,112 @@ func isInsideRoot(root, target string) bool {
 	return rel == "." || (!strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel))
 }
 
+// alwaysIgnore names are skipped by every walk regardless of config — never
+// worth indexing and the dominant source of file-count blowup in
+// dependency-heavy trees (one ~/workspace had 1200+ node_modules). Config
+// tree.ignore ADDS to this set; it can never remove from it.
+var alwaysIgnore = map[string]bool{
+	"node_modules": true,
+	".git":         true,
+}
+
+// IsGitRepo reports whether dir is a git repository root — it contains a .git
+// entry (a directory for a normal clone, or a file for a worktree/submodule).
+func IsGitRepo(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, ".git"))
+	return err == nil
+}
+
+// FindRepoRoot returns the nearest ancestor of filePath — walking up to and
+// including editorRoot — that IsGitRepo. If none is found, or filePath lies
+// outside editorRoot, it returns the absolute editorRoot. Used to scope a
+// language server to the file's own repo rather than the whole opened tree.
+func FindRepoRoot(editorRoot, filePath string) string {
+	er, err := filepath.Abs(editorRoot)
+	if err != nil {
+		return editorRoot
+	}
+	abs, err := filepath.Abs(filePath)
+	if err != nil {
+		return er
+	}
+	dir := abs
+	if info, statErr := os.Stat(abs); statErr != nil || !info.IsDir() {
+		dir = filepath.Dir(abs) // filePath is a file (or gone): search from its dir
+	}
+	if !isInsideRoot(er, dir) {
+		return er // outside the opened tree → fall back to the editor root
+	}
+	for {
+		if IsGitRepo(dir) {
+			return dir
+		}
+		if dir == er {
+			return er
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return er // filesystem root reached without a match
+		}
+		dir = parent
+	}
+}
+
+// projectMarkers name a language project's root. FindProjectRoot returns the
+// deepest ancestor containing one — for a monorepo that is the sub-project
+// (e.g. a frontend's tsconfig/package.json), not the outer .git, so a language
+// server scopes to hundreds of files instead of the whole repo.
+var projectMarkers = []string{
+	"tsconfig.json", "jsconfig.json", "package.json", // JS/TS
+	"go.mod",                                 // Go
+	"Cargo.toml",                             // Rust
+	"pyproject.toml", "setup.py", "setup.cfg", // Python
+	"pom.xml", "build.gradle", "build.gradle.kts", // JVM
+	"Gemfile", // Ruby
+	".git",    // repo boundary — the fallback marker
+}
+
+// FindProjectRoot returns the nearest ancestor of filePath (up to and including
+// editorRoot) that holds a project marker, else editorRoot. Preferred over
+// FindRepoRoot for scoping language servers: in a monorepo it lands on the
+// sub-project rather than the outer repo.
+func FindProjectRoot(editorRoot, filePath string) string {
+	er, err := filepath.Abs(editorRoot)
+	if err != nil {
+		return editorRoot
+	}
+	abs, err := filepath.Abs(filePath)
+	if err != nil {
+		return er
+	}
+	dir := abs
+	if info, statErr := os.Stat(abs); statErr != nil || !info.IsDir() {
+		dir = filepath.Dir(abs)
+	}
+	if !isInsideRoot(er, dir) {
+		return er
+	}
+	for {
+		for _, m := range projectMarkers {
+			if _, err := os.Stat(filepath.Join(dir, m)); err == nil {
+				return dir
+			}
+		}
+		if dir == er {
+			return er
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return er
+		}
+		dir = parent
+	}
+}
+
 func ignored(name string, ignore []string) bool {
+	if alwaysIgnore[name] {
+		return true
+	}
 	for _, ig := range ignore {
 		if name == ig {
 			return true
@@ -117,7 +232,7 @@ func BuildFileTreeEntries(root string, expanded map[string]bool, ignore []string
 		if !isInsideRoot(resolvedRoot, resolvedDir) {
 			return
 		}
-		children, err := readDirectorySorted(resolvedDir)
+		children, _, err := readDirectorySorted(resolvedDir)
 		if err != nil {
 			return
 		}
@@ -174,29 +289,35 @@ const maxScanDepth = 16
 // returns every regular file's relative path. This is the fuzzy-search corpus:
 // matching must find entries inside collapsed directories, hence the full walk.
 // The ignore list is applied during the walk (load-bearing for big JS repos).
-func BuildAllEntries(root string, ignore []string, gi *Gitignore) []string {
+//
+// maxFiles bounds the corpus (≤0 = unlimited); when hit, the walk stops and
+// truncated is true. dirMtimes maps every visited directory's relative path
+// (root = "") to its mtime (unix-nano) — a signature callers can persist and
+// later stat-sweep to decide whether the corpus is still valid.
+func BuildAllEntries(root string, ignore []string, gi *Gitignore, maxFiles int) (files []string, dirMtimes map[string]int64, truncated bool) {
+	dirMtimes = map[string]int64{}
 	if root == "" {
-		return nil
+		return nil, dirMtimes, false
 	}
 	resolvedRoot, err := filepath.Abs(root)
 	if err != nil {
-		return nil
+		return nil, dirMtimes, false
 	}
 
-	var files []string
 	var appendDir func(dirPath string, depth int)
 	appendDir = func(dirPath string, depth int) {
-		if depth > maxScanDepth {
+		if truncated || depth > maxScanDepth {
 			return
 		}
 		resolvedDir := filepath.Join(resolvedRoot, dirPath)
 		if !isInsideRoot(resolvedRoot, resolvedDir) {
 			return
 		}
-		children, err := readDirectorySorted(resolvedDir)
+		children, mtime, err := readDirectorySorted(resolvedDir)
 		if err != nil {
 			return
 		}
+		dirMtimes[dirPath] = mtime.UnixNano()
 		for _, child := range children {
 			if ignored(child.name, ignore) {
 				continue
@@ -212,16 +333,23 @@ func BuildAllEntries(root string, ignore []string, gi *Gitignore) []string {
 			}
 			if child.isDir {
 				appendDir(rel, depth+1)
+				if truncated {
+					return
+				}
 				continue
 			}
 			if child.isFile {
 				files = append(files, rel)
+				if maxFiles > 0 && len(files) >= maxFiles {
+					truncated = true
+					return
+				}
 			}
 		}
 	}
 
 	appendDir("", 0)
-	return files
+	return files, dirMtimes, truncated
 }
 
 // FileTreeViewport is the visible window of the tree.

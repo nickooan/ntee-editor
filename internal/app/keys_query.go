@@ -12,13 +12,15 @@ import (
 // queryInputSuggestions completes the typed bar text: exact/prefix over the
 // visible tree, fuzzy over the full corpus.
 func (m Model) queryInputSuggestions(entries []filetree.FileTreeEntry) []filetree.InputSuggestion {
-	all := filetree.BuildAllEntries(m.root, m.cfg.Tree.Ignore, m.gitignore)
-	return filetree.BuildInputSuggestions(entries, all, m.command, filetree.MaxInputSuggestions)
+	// Reads the cached corpus (populated by ensureCorpus in the key handler);
+	// never walks the tree here, so this is cheap on every keystroke and render.
+	return filetree.BuildInputSuggestions(entries, m.corpus, m.command, filetree.MaxInputSuggestions)
 }
 
 // handleQueryKey is the home-mode handler: the bottom input bar drives the
 // sidebar (typing expands, navigation highlights) and Enter enters/opens.
 func (m Model) handleQueryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	m, corpusCmd := m.ensureCorpus()
 	entries := m.treeEntries()
 	suggestions := m.queryInputSuggestions(entries)
 	if m.inputSuggestIndex >= len(suggestions) {
@@ -92,7 +94,9 @@ func (m Model) handleQueryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.inputSuggestIndex = 0
 		m.keyboardSelectedCommand = ""
 	}
-	return m, nil
+	// corpusCmd (background revalidation, or nil) rides out on the typing paths
+	// that fall through here — exactly when fresh results matter.
+	return m, corpusCmd
 }
 
 // adoptPreview promotes a navigated preview into the editable command so the

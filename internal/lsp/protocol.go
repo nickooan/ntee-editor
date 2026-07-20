@@ -109,10 +109,35 @@ type publishDiagnosticsParams struct {
 }
 
 type initializeParams struct {
-	ProcessID             int            `json:"processId"`
-	RootURI               string         `json:"rootUri"`
-	Capabilities          map[string]any `json:"capabilities"`
-	InitializationOptions map[string]any `json:"initializationOptions,omitempty"`
+	ProcessID             int               `json:"processId"`
+	RootURI               string            `json:"rootUri"`
+	WorkspaceFolders      []workspaceFolder `json:"workspaceFolders,omitempty"`
+	Capabilities          map[string]any    `json:"capabilities"`
+	InitializationOptions map[string]any    `json:"initializationOptions,omitempty"`
+}
+
+// workspaceFolder is one root the server should treat as a project. Scoping the
+// server to the file's own repo (rather than a huge multi-repo root) keeps its
+// initialize/index fast.
+type workspaceFolder struct {
+	URI  string `json:"uri"`
+	Name string `json:"name"`
+}
+
+type workspaceFoldersChangeEvent struct {
+	Added   []workspaceFolder `json:"added"`
+	Removed []workspaceFolder `json:"removed"`
+}
+
+type didChangeWorkspaceFoldersParams struct {
+	Event workspaceFoldersChangeEvent `json:"event"`
+}
+
+// executeCommandParams is a workspace/executeCommand request — used by the
+// hybrid bridge to relay a Vue tsserver command to the TypeScript server.
+type executeCommandParams struct {
+	Command   string `json:"command"`
+	Arguments []any  `json:"arguments,omitempty"`
 }
 
 // clientCapabilities: full-content sync, plain publishDiagnostics, plain
@@ -126,7 +151,8 @@ var clientCapabilities = map[string]any{
 		"completion":         map[string]any{},
 	},
 	"workspace": map[string]any{
-		"configuration": true,
+		"configuration":    true,
+		"workspaceFolders": true,
 	},
 }
 

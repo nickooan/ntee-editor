@@ -78,6 +78,21 @@ type Tabs struct {
 	Cursors map[string]TabCursor `json:"cursors,omitempty"`
 }
 
+// CorpusVersion is bumped when the CorpusIndex format changes, so a stale
+// persisted index is discarded instead of misread.
+const CorpusVersion = 1
+
+// CorpusIndex is the persisted search corpus plus a directory-mtime signature.
+// On boot the app stat-sweeps DirMtimes; if every directory still matches, the
+// cached Files are reused and the full walk is skipped. Stored as a singleton
+// (one record per project store), so it self-caps at one — no eviction needed.
+type CorpusIndex struct {
+	Version   int              `json:"version"`
+	Files     []string         `json:"files"`     // relative paths, the pruned corpus
+	DirMtimes map[string]int64 `json:"dirMtimes"` // rel dir path ("" = root) → mtime unix-nano
+	Truncated bool             `json:"truncated"` // the walk hit MaxIndexFiles
+}
+
 // Backend is the persistence surface the app depends on. Store (ntee-db) and
 // Memory (fallback when the store's flock is held) both satisfy it.
 type Backend interface {
@@ -94,6 +109,8 @@ type Backend interface {
 	DeleteDraft(path string) error
 	SaveTabs(t Tabs) error
 	LoadTabs() (Tabs, bool)
+	SaveCorpus(c CorpusIndex) error
+	LoadCorpus() (CorpusIndex, bool)
 	Close() error
 }
 
@@ -103,6 +120,7 @@ const (
 	draftPrefix   = "draft:"
 	sessionKey    = "session:current"
 	tabsKey       = "tabs:current"
+	corpusKey     = "corpus:current"
 )
 
 func versionKey(seq int64) string { return fmt.Sprintf("%s%016d", versionPrefix, seq) }
@@ -297,4 +315,27 @@ func (s *Store) LoadTabs() (Tabs, bool) {
 		return Tabs{}, false
 	}
 	return t, true
+}
+
+// Corpus is a singleton (fixed key): each SaveCorpus overwrites the previous,
+// so the store holds exactly one index. A large Files/DirMtimes JSON (≥64 KiB)
+// auto-offloads to ntee-db's blob side-file, out of the heap.
+func (s *Store) SaveCorpus(c CorpusIndex) error {
+	data, err := json.Marshal(c)
+	if err != nil {
+		return err
+	}
+	return s.db.Put(corpusKey, data)
+}
+
+func (s *Store) LoadCorpus() (CorpusIndex, bool) {
+	data, ok, err := s.db.Get(corpusKey)
+	if err != nil || !ok {
+		return CorpusIndex{}, false
+	}
+	var c CorpusIndex
+	if json.Unmarshal(data, &c) != nil {
+		return CorpusIndex{}, false
+	}
+	return c, true
 }

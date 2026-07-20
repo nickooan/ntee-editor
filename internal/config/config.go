@@ -32,6 +32,10 @@ type EditorConfig struct {
 
 type TreeConfig struct {
 	Ignore []string `yaml:"ignore"`
+	// MaxIndexFiles caps the search corpus (BuildAllEntries). When the walk hits
+	// it, indexing stops and the UI flags a truncated index. Bounds memory/CPU on
+	// huge roots. <1 is clamped to the default in Load.
+	MaxIndexFiles int `yaml:"max_index_files"`
 }
 
 type ThemeConfig struct {
@@ -69,6 +73,17 @@ type LSPServerConfig struct {
 	// Init is passed through as LSP initializationOptions (e.g.
 	// typescript-language-server's tsserver.path).
 	Init map[string]any `yaml:"init"`
+	// Bridge declares a hybrid-mode companion: this server's tsserver/request
+	// notifications are relayed to the To language's server via the Command
+	// executeCommand. Used by Volar/Vue (To: typescript, Command:
+	// typescript.tsserverRequest). nil = standalone server.
+	Bridge *BridgeConfig `yaml:"bridge,omitempty"`
+}
+
+// BridgeConfig wires a hybrid language server to a companion server.
+type BridgeConfig struct {
+	To      string `yaml:"to"`      // companion language whose server answers
+	Command string `yaml:"command"` // executeCommand used to relay (tsserver passthrough)
 }
 
 type LSPConfig struct {
@@ -85,10 +100,19 @@ func Default() Config {
 			MaxHighlightKB: 512,
 		},
 		Tree: TreeConfig{
-			// Only .git is hard-hidden. Other noise (node_modules, dist, …) is
-			// handled by .gitignore: shown grayed in the tree, browsable one
-			// level at a time, and kept out of the search corpus.
-			Ignore: []string{".git"},
+			// node_modules and .git are ALWAYS skipped (filetree.alwaysIgnore),
+			// regardless of this list. These are additional, user-overridable
+			// build/dependency dirs kept out of the tree and search corpus so a
+			// repo without a covering .gitignore (or a multi-repo root) does not
+			// index vendored/output trees. Overriding tree.ignore in config
+			// replaces this list.
+			Ignore: []string{
+				"dist", "build", "target", "vendor",
+				".next", ".nuxt", ".svelte-kit",
+				".venv", "venv", "__pycache__",
+				".gradle", "coverage", ".turbo", ".cache",
+			},
+			MaxIndexFiles: 50000,
 		},
 		Theme: ThemeConfig{Syntax: "gruvbox"},
 		Languages: map[string]LanguageConfig{
@@ -122,6 +146,9 @@ func Load(projectRoot string) Config {
 	if cfg.Editor.MaxSnapshots < 1 {
 		cfg.Editor.MaxSnapshots = 50
 	}
+	if cfg.Tree.MaxIndexFiles < 1 {
+		cfg.Tree.MaxIndexFiles = 50000
+	}
 	return cfg
 }
 
@@ -153,6 +180,17 @@ func MergeUserLanguages(langs map[string]LanguageConfig) (added []string, err er
 	existing, readErr := os.ReadFile(path)
 	if readErr == nil {
 		_ = yaml.Unmarshal(existing, &file) // best-effort; malformed → treated as empty
+	} else {
+		// No config yet: seed the non-language sections from defaults. Otherwise
+		// we'd marshal bool/int zero values — notably lsp.enabled:false, which
+		// DISABLES all LSP on load — into the fresh file. Languages stay empty so
+		// only the prepared servers are written (not the default recipes).
+		d := Default()
+		file.Version = d.Version
+		file.Editor = d.Editor
+		file.Tree = d.Tree
+		file.Theme = d.Theme
+		file.LSP = d.LSP
 	}
 	if file.Languages == nil {
 		file.Languages = map[string]LanguageConfig{}
@@ -242,6 +280,9 @@ func mergeLSP(base, o *LSPServerConfig) *LSPServerConfig {
 	}
 	if o.Init != nil {
 		res.Init = o.Init
+	}
+	if o.Bridge != nil {
+		res.Bridge = o.Bridge
 	}
 	return &res
 }

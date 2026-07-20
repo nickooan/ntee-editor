@@ -63,7 +63,8 @@ func TestBuildAllEntriesExcludesGitignored(t *testing.T) {
 
 	gi := CompileGitignore([]string{"dist/", "node_modules/"})
 	set := map[string]bool{}
-	for _, f := range BuildAllEntries(root, nil, gi) {
+	files, _, _ := BuildAllEntries(root, nil, gi, 0)
+	for _, f := range files {
 		set[f] = true
 	}
 	if set["dist/bundle.js"] || set["node_modules/pkg/index.js"] {

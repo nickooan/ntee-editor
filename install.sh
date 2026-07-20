@@ -114,7 +114,8 @@ path_hint() {
         ;;
     esac
     echo "  ntee is not on your PATH yet. To use it globally, run:"
-    printf '      echo '\''export PATH="$HOME/go/bin:$PATH"'\'' >> %s && source %s\n' "$profile" "$profile"
+    printf '      echo '\''export PATH="$HOME/go/bin:$PATH"'\'' >> %s\n' "$profile"
+    printf '      source %s\n' "$profile"
 }
 
 info "done"

@@ -263,12 +263,6 @@ func (m Model) jumpToReference() (tea.Model, tea.Cmd) {
 	if m.openFile == nil {
 		return m, nil
 	}
-	if m.edit.dirty {
-		// A jump rebuilds the editor and undo timeline; unsaved work would
-		// be lost silently.
-		m.errText = "unsaved changes — save (Ctrl+S) before jumping"
-		return m, nil
-	}
 	token := m.jumpToken()
 	if rel, ok := m.resolveJumpPath(token); ok {
 		return m.jumpToLocation(rel, 0, 0), nil
@@ -351,10 +345,6 @@ func (m Model) requestDefinition(token string, cx int, tryCols []int, snapped bo
 // the user may have typed while the request was in flight.
 func (m Model) handleDefinition(msg definitionMsg) (tea.Model, tea.Cmd) {
 	if m.openFile == nil || m.mode != modeEdit {
-		return m, nil
-	}
-	if m.edit.dirty {
-		m.errText = "unsaved changes — save (Ctrl+S) before jumping"
 		return m, nil
 	}
 	// LSP-strict: when a server is configured for this file type, its answer
@@ -491,10 +481,6 @@ func (m Model) jumpBack() (tea.Model, tea.Cmd) {
 	if m.openFile == nil {
 		return m, nil
 	}
-	if m.edit.dirty {
-		m.errText = "unsaved changes — save (Ctrl+S) before jumping"
-		return m, nil
-	}
 	if len(m.jumpStack) == 0 {
 		m.errText = "no jump to return to"
 		return m, nil
@@ -506,7 +492,9 @@ func (m Model) jumpBack() (tea.Model, tea.Cmd) {
 }
 
 // openJumpFile opens a target into a fresh edit session at (cy, cx), keeping
-// the jump stack intact (unlike a deliberate openFileAt).
+// the jump stack intact (unlike a deliberate openFileAt). Like openFileAt, an
+// unsaved outgoing buffer is stashed as a draft (its tab stays red) and a
+// stashed draft of the target is restored — jumping never loses edits.
 func (m Model) openJumpFile(rel string, cy, cx, scrollY int) (Model, bool) {
 	f, ok := filetree.ReadViewFile(m.root, rel)
 	if !ok || f.Binary {
@@ -517,10 +505,15 @@ func (m Model) openJumpFile(rel string, cy, cx, scrollY int) (Model, bool) {
 		m.errText = "cannot open " + rel
 		return m, false
 	}
+	m = m.recordCursor()
+	m = m.stashDraftIfDirty()
 	m.openFile = &f
 	m.openRel = rel
 	m.selectedCommand = rel
 	m = m.beginEditSession(f.Content) // does not touch the jump stack
+	if d, ok := m.db.LoadDraft(rel); ok {
+		m = m.restoreDraft(d)
+	}
 	m = m.addTab(rel)
 	m.mode = modeEdit
 	m.edit.cy, m.edit.cx = cy, cx

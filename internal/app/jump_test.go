@@ -56,22 +56,47 @@ func TestJumpToPathUnderCursorAndBack(t *testing.T) {
 func TestJumpGuards(t *testing.T) {
 	m := jumpFixture(t)
 
-	// Dirty buffer blocks jumping.
-	m = runes(m, "x")
-	m = ctrl(m, tea.KeyCtrlJ)
-	if !strings.Contains(m.errText, "save") {
-		t.Fatalf("dirty guard missing: %q", m.errText)
-	}
-	m = ctrl(m, tea.KeyCtrlZ) // undo back to clean baseline
-	if m.edit.dirty {
-		t.Fatal("undo should restore the clean baseline")
-	}
-
 	// Unresolvable token errors and leaves no stack residue.
 	m.edit.cy, m.edit.cx = 0, 0 // "package" — keyword line, no definition
 	m = ctrl(m, tea.KeyCtrlJ)
 	if m.errText == "" || len(m.jumpStack) != 0 {
 		t.Fatalf("unresolvable jump: err=%q stack=%d", m.errText, len(m.jumpStack))
+	}
+}
+
+// Jumping with unsaved edits must not block: the dirty buffer is stashed as a
+// draft (red tab), and jumping back restores it.
+func TestJumpWithUnsavedChangesStashesDraft(t *testing.T) {
+	m := jumpFixture(t)
+	m = runes(m, "x") // dirty: line 0 becomes "xpackage main"
+	if !m.edit.dirty {
+		t.Fatal("fixture should be dirty")
+	}
+
+	m.edit.cy, m.edit.cx = 2, 8 // on "lib/util.ts" in the comment
+	m = ctrl(m, tea.KeyCtrlJ)
+	if m.openRel != "lib/util.ts" || m.errText != "" {
+		t.Fatalf("dirty buffer must not block the jump: open=%q err=%q", m.openRel, m.errText)
+	}
+	if !m.draftSet["main.go"] {
+		t.Fatal("the unsaved origin buffer should be stashed as a draft")
+	}
+	if m.edit.dirty {
+		t.Fatal("the jump target opens clean")
+	}
+
+	// Jumping back restores the draft: content, dirty flag, red-tab marker.
+	m = ctrl(m, tea.KeyCtrlO)
+	if m.openRel != "main.go" || !m.edit.dirty {
+		t.Fatalf("jump back should restore the drafted buffer: open=%q dirty=%v", m.openRel, m.edit.dirty)
+	}
+	if !strings.HasPrefix(m.edit.lines[0], "xpackage") {
+		t.Fatalf("draft content lost: %q", m.edit.lines[0])
+	}
+	// Undo still walks back to the on-disk baseline.
+	m = ctrl(m, tea.KeyCtrlZ)
+	if m.edit.dirty || m.edit.lines[0] != "package main" {
+		t.Fatalf("undo should reach the disk baseline: %q dirty=%v", m.edit.lines[0], m.edit.dirty)
 	}
 }
 

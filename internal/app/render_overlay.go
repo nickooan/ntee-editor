@@ -9,6 +9,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/nickooan/ntee-editor/internal/fuzzy"
 	"github.com/nickooan/ntee-editor/internal/input"
 	"github.com/nickooan/ntee-editor/internal/view"
 )
@@ -55,7 +56,11 @@ func (m Model) renderFuzzyOverlay(width, height int) string {
 	}
 	for i := start; i < start+visible && i < len(m.fuzzyMatches); i++ {
 		match := m.fuzzyMatches[i]
-		row := renderFuzzyRow(m.fuzzyCorpus[match.Index], match.Positions, rowWidth, i == selected)
+		cand := m.fuzzyCorpus[match.Index]
+		// Matched positions are computed here, only for the visible rows, rather
+		// than for every match during Filter.
+		positions := fuzzy.Positions(m.fuzzyQuery, cand)
+		row := renderFuzzyRow(cand.Text, positions, rowWidth, i == selected)
 		b.WriteString("\n" + row)
 	}
 

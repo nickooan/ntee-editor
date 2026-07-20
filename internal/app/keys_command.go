@@ -143,22 +143,35 @@ func (m Model) openFuzzy() (Model, tea.Cmd) {
 	m.fuzzyOpen = true
 	m.fuzzyQuery = ""
 	m.fuzzyIndex = 0
-	m.fuzzyCorpus = ordered
-	m.fuzzyMatches = fuzzy.Filter("", ordered)
+	m.fuzzyCorpus = fuzzy.Prepare(ordered)
+	m.fuzzyMatches = fuzzy.Filter("", m.fuzzyCorpus)
 	return m, cmd
+}
+
+// closeFuzzy hides the finder and releases the prepared corpus. That slice can
+// be a few MB on a large workspace; there is no reason to keep it resident
+// between opens, so drop it and let openFuzzy rebuild on demand.
+func (m Model) closeFuzzy() Model {
+	m.fuzzyOpen = false
+	m.fuzzyCorpus = nil
+	m.fuzzyMatches = nil
+	m.fuzzyQuery = ""
+	m.fuzzyIndex = 0
+	return m
 }
 
 func (m Model) handleFuzzyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyEsc, tea.KeyCtrlP:
-		m.fuzzyOpen = false
+		m = m.closeFuzzy()
 	case tea.KeyEnter:
-		m.fuzzyOpen = false
 		if len(m.fuzzyMatches) == 0 {
+			m = m.closeFuzzy()
 			break
 		}
 		idx := input.Clamp(m.fuzzyIndex, 0, len(m.fuzzyMatches)-1)
-		rel := m.fuzzyCorpus[m.fuzzyMatches[idx].Index]
+		rel := m.fuzzyCorpus[m.fuzzyMatches[idx].Index].Text
+		m = m.closeFuzzy()
 		if m.mode == modeEdit {
 			m = m.flushBurst() // keep the abandoned buffer reachable in history
 		}

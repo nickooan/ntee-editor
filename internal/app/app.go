@@ -120,7 +120,7 @@ type Model struct {
 	fuzzyOpen    bool
 	fuzzyQuery   string
 	fuzzyIndex   int
-	fuzzyCorpus  []string
+	fuzzyCorpus  []fuzzy.Prepared // candidates with matching data precomputed once per open
 	fuzzyMatches []fuzzy.Match
 
 	// Search corpus: the full project file walk (BuildAllEntries), shared by the

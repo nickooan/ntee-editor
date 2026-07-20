@@ -54,7 +54,7 @@ func BuildInputSuggestions(visible []FileTreeEntry, allFiles []string, command s
 	}
 
 	fz := make([]InputSuggestion, 0, limit)
-	for _, m := range fuzzy.Filter(normalized, allFiles) {
+	for _, m := range fuzzy.Filter(normalized, fuzzy.Prepare(allFiles)) {
 		rel := allFiles[m.Index]
 		fz = append(fz, InputSuggestion{
 			Label:      rel,

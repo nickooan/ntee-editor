@@ -189,3 +189,7 @@ state with a status notice (undo works, nothing persists).
   instead of guessing (a bare file path under the cursor still opens directly).
   A missing binary degrades to a one-time notice with everything else
   unchanged.
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE). Copyright 2026 Nick An.

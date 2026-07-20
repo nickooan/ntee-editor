@@ -24,6 +24,7 @@ type fakeServer struct {
 	initDone       bool
 	sawRefParams   bool
 	refIncludeDecl bool
+	addedFolders   []string // workspace/didChangeWorkspaceFolders added URIs
 }
 
 func newFakeServer(end pipeEnd) *fakeServer {
@@ -51,6 +52,12 @@ func (s *fakeServer) handle(method string, params json.RawMessage) (any, error) 
 		var p didCloseParams
 		_ = json.Unmarshal(params, &p)
 		s.closed = append(s.closed, p.TextDocument.URI)
+	case "workspace/didChangeWorkspaceFolders":
+		var p didChangeWorkspaceFoldersParams
+		_ = json.Unmarshal(params, &p)
+		for _, f := range p.Event.Added {
+			s.addedFolders = append(s.addedFolders, f.URI)
+		}
 	case "textDocument/definition":
 		return s.deflocs, nil
 	case "textDocument/references":
@@ -189,6 +196,27 @@ func TestReferencesRequest(t *testing.T) {
 	defer server.mu.Unlock()
 	if !server.sawRefParams || server.refIncludeDecl {
 		t.Fatalf("params: saw=%v includeDecl=%v", server.sawRefParams, server.refIncludeDecl)
+	}
+}
+
+// EnsureFolder adds a repo as a workspace folder exactly once; the init folder
+// (the client's root) and repeats are no-ops.
+func TestEnsureFolderAddsOncePerRepo(t *testing.T) {
+	c, server := startTestClient(t, nil) // root "/proj" → folders{"/proj"}
+
+	c.EnsureFolder("/proj")  // already the init folder → no notify
+	c.EnsureFolder("/other") // new → one didChangeWorkspaceFolders{added:[/other]}
+	c.EnsureFolder("/other") // duplicate → no further notify
+
+	waitFor(t, func() bool {
+		server.mu.Lock()
+		defer server.mu.Unlock()
+		return len(server.addedFolders) == 1
+	})
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if server.addedFolders[0] != PathToURI("/other") {
+		t.Fatalf("added folder uri: %q", server.addedFolders[0])
 	}
 }
 

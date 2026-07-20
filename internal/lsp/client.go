@@ -31,10 +31,18 @@ type serverClient struct {
 	dead     bool
 	pending  []func()
 	versions map[string]int
+	folders  map[string]bool // repo roots registered as workspace folders
 }
 
 func newServerClient(lang string, conf config.LSPServerConfig, root string, sink func(any)) *serverClient {
-	return &serverClient{lang: lang, conf: conf, root: root, sink: sink, versions: map[string]int{}}
+	return &serverClient{
+		lang:     lang,
+		conf:     conf,
+		root:     root,
+		sink:     sink,
+		versions: map[string]int{},
+		folders:  map[string]bool{root: true}, // the initial workspace folder
+	}
 }
 
 // stdioConn adapts a child process's stdio pipes to io.ReadWriteCloser.
@@ -152,6 +160,7 @@ func (c *serverClient) start() {
 	_, err = conn.Request(ctx, "initialize", initializeParams{
 		ProcessID:             os.Getpid(),
 		RootURI:               PathToURI(c.root),
+		WorkspaceFolders:      []workspaceFolder{{URI: PathToURI(c.root), Name: filepath.Base(c.root)}},
 		Capabilities:          clientCapabilities,
 		InitializationOptions: c.conf.Init,
 	})
@@ -206,6 +215,33 @@ func (c *serverClient) DidOpen(path, content string) {
 			Version:    1,
 			Text:       content,
 		}})
+	})
+}
+
+// EnsureFolder registers repo as a workspace folder if the server does not
+// already know it, so opening a file in a new repo scopes the (single) server
+// to that repo instead of spawning another. Queued through run() so it lands
+// after initialize and before the didOpen that follows it.
+func (c *serverClient) EnsureFolder(repo string) {
+	c.mu.Lock()
+	if c.dead || c.folders[repo] {
+		c.mu.Unlock()
+		return // already known (or nothing to notify) — dedup at enqueue time
+	}
+	c.folders[repo] = true
+	c.mu.Unlock()
+	c.run(func() {
+		c.mu.Lock()
+		conn := c.conn
+		c.mu.Unlock()
+		if conn == nil {
+			return
+		}
+		_ = conn.Notify("workspace/didChangeWorkspaceFolders", didChangeWorkspaceFoldersParams{
+			Event: workspaceFoldersChangeEvent{
+				Added: []workspaceFolder{{URI: PathToURI(repo), Name: filepath.Base(repo)}},
+			},
+		})
 	})
 }
 

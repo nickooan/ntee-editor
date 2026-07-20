@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/nickooan/ntee-editor/internal/config"
+	"github.com/nickooan/ntee-editor/internal/filetree"
 )
 
 // Manager is the real Registry: it lazily starts one server per configured
@@ -78,12 +79,19 @@ func (m *Manager) ClientFor(path string) (Client, bool) {
 		return nil, false
 	}
 
+	// Scope the server to the file's own git repo (not the whole opened tree),
+	// so a multi-repo root like ~/workspace does not make the server index all
+	// of it. One server per language: the first file visited roots it; later
+	// repos are added as workspace folders.
+	repoRoot := filetree.FindRepoRoot(m.root, path)
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.disabled[lang] {
 		return nil, false
 	}
 	if c, ok := m.clients[lang]; ok {
+		c.EnsureFolder(repoRoot)
 		return c, true
 	}
 	lc := m.cfg.Languages[lang]
@@ -96,7 +104,7 @@ func (m *Manager) ClientFor(path string) (Client, bool) {
 		m.emit(NoticeMsg{Text: lc.LSP.Command + " not found — LSP disabled for " + lang})
 		return nil, false
 	}
-	c := newServerClient(lang, *lc.LSP, m.root, m.emit)
+	c := newServerClient(lang, *lc.LSP, repoRoot, m.emit)
 	m.clients[lang] = c
 	go c.start()
 	return c, true

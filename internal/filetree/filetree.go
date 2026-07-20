@@ -107,6 +107,48 @@ var alwaysIgnore = map[string]bool{
 	".git":         true,
 }
 
+// IsGitRepo reports whether dir is a git repository root — it contains a .git
+// entry (a directory for a normal clone, or a file for a worktree/submodule).
+func IsGitRepo(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, ".git"))
+	return err == nil
+}
+
+// FindRepoRoot returns the nearest ancestor of filePath — walking up to and
+// including editorRoot — that IsGitRepo. If none is found, or filePath lies
+// outside editorRoot, it returns the absolute editorRoot. Used to scope a
+// language server to the file's own repo rather than the whole opened tree.
+func FindRepoRoot(editorRoot, filePath string) string {
+	er, err := filepath.Abs(editorRoot)
+	if err != nil {
+		return editorRoot
+	}
+	abs, err := filepath.Abs(filePath)
+	if err != nil {
+		return er
+	}
+	dir := abs
+	if info, statErr := os.Stat(abs); statErr != nil || !info.IsDir() {
+		dir = filepath.Dir(abs) // filePath is a file (or gone): search from its dir
+	}
+	if !isInsideRoot(er, dir) {
+		return er // outside the opened tree → fall back to the editor root
+	}
+	for {
+		if IsGitRepo(dir) {
+			return dir
+		}
+		if dir == er {
+			return er
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return er // filesystem root reached without a match
+		}
+		dir = parent
+	}
+}
+
 func ignored(name string, ignore []string) bool {
 	if alwaysIgnore[name] {
 		return true

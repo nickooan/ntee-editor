@@ -61,6 +61,32 @@ func TestBuildAllEntriesHonorsMaxFiles(t *testing.T) {
 	}
 }
 
+func TestFindRepoRoot(t *testing.T) {
+	root := t.TempDir()
+	mkfile(t, root, "repoA/.git/config")
+	mkfile(t, root, "repoA/src/x.go")
+	mkfile(t, root, "plain/y.go")
+
+	repoA := filepath.Join(root, "repoA")
+	// A file inside a repo resolves to that repo.
+	if got := FindRepoRoot(root, filepath.Join(root, "repoA/src/x.go")); got != repoA {
+		t.Fatalf("file in repoA: got %q want %q", got, repoA)
+	}
+	// A file with no .git up to the editor root resolves to the editor root.
+	if got := FindRepoRoot(root, filepath.Join(root, "plain/y.go")); got != root {
+		t.Fatalf("file in plain: got %q want %q", got, root)
+	}
+	// When the editor root itself is the repo, every file resolves to it.
+	mkfile(t, root, ".git/config")
+	if got := FindRepoRoot(root, filepath.Join(root, "plain/y.go")); got != root {
+		t.Fatalf("root-is-repo: got %q want %q", got, root)
+	}
+	// A path outside the editor root falls back to the editor root.
+	if got := FindRepoRoot(repoA, filepath.Join(root, "plain/y.go")); got != repoA {
+		t.Fatalf("outside editor root: got %q want %q", got, repoA)
+	}
+}
+
 func TestBuildAllEntriesReturnsDirSignature(t *testing.T) {
 	root := t.TempDir()
 	mkfile(t, root, "sub/a.go")

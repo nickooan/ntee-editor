@@ -46,8 +46,8 @@ type LanguageConfig struct {
 	// Enabled toggles the language: nil (omitted) means enabled; false turns it
 	// off (its extensions route to no server, and --prepare-lsp skips it).
 	Enabled    *bool             `yaml:"enable,omitempty"`
-	Extensions []string          `yaml:"extensions"`
-	LSP        *LSPServerConfig  `yaml:"lsp"`
+	Extensions []string          `yaml:"extensions,omitempty"`
+	LSP        *LSPServerConfig  `yaml:"lsp,omitempty"`
 	Install    []InstallStrategy `yaml:"install,omitempty"` // consumed only by --prepare-lsp
 }
 
@@ -167,25 +167,22 @@ func ConfigPath() (string, error) {
 	return filepath.Join(dir, "ntee-editor", "config.yaml"), nil
 }
 
-// MergeUserLanguages adds languages to the user config file, keeping existing
-// entries (and their tuning) untouched — a language already present is skipped.
-// The prior file is backed up to config.yaml.bak. Returns the languages added.
-// Note: comments in the existing file are lost on rewrite (hence the backup).
-func MergeUserLanguages(langs map[string]LanguageConfig) (added []string, err error) {
-	path, err := ConfigPath()
+// readUserConfig loads the user config file for editing. When the file is
+// absent, the non-language sections are seeded from defaults — otherwise we'd
+// marshal bool/int zero values (notably lsp.enabled:false, which DISABLES all
+// LSP on load) into a fresh file. Languages stay empty so only explicit
+// entries are written (not the default recipes). existing is the raw prior
+// content (nil when absent), for the pre-write backup.
+func readUserConfig() (file Config, existing []byte, path string, err error) {
+	path, err = ConfigPath()
 	if err != nil {
-		return nil, err
+		return Config{}, nil, "", err
 	}
-
-	var file Config
 	existing, readErr := os.ReadFile(path)
 	if readErr == nil {
 		_ = yaml.Unmarshal(existing, &file) // best-effort; malformed → treated as empty
 	} else {
-		// No config yet: seed the non-language sections from defaults. Otherwise
-		// we'd marshal bool/int zero values — notably lsp.enabled:false, which
-		// DISABLES all LSP on load — into the fresh file. Languages stay empty so
-		// only the prepared servers are written (not the default recipes).
+		existing = nil
 		d := Default()
 		file.Version = d.Version
 		file.Editor = d.Editor
@@ -195,6 +192,34 @@ func MergeUserLanguages(langs map[string]LanguageConfig) (added []string, err er
 	}
 	if file.Languages == nil {
 		file.Languages = map[string]LanguageConfig{}
+	}
+	return file, existing, path, nil
+}
+
+// writeUserConfig marshals file to path, backing the prior content up to
+// path+".bak" first. Comments in the existing file are lost on rewrite (hence
+// the backup).
+func writeUserConfig(path string, file *Config, existing []byte) error {
+	out, err := yaml.Marshal(file)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	if existing != nil {
+		_ = os.WriteFile(path+".bak", existing, 0o644) // best-effort backup
+	}
+	return os.WriteFile(path, out, 0o644)
+}
+
+// MergeUserLanguages adds languages to the user config file, keeping existing
+// entries (and their tuning) untouched — a language already present is skipped.
+// The prior file is backed up to config.yaml.bak. Returns the languages added.
+func MergeUserLanguages(langs map[string]LanguageConfig) (added []string, err error) {
+	file, existing, path, err := readUserConfig()
+	if err != nil {
+		return nil, err
 	}
 
 	for name, lang := range langs {
@@ -208,21 +233,36 @@ func MergeUserLanguages(langs map[string]LanguageConfig) (added []string, err er
 	if len(added) == 0 {
 		return nil, nil
 	}
-
-	out, err := yaml.Marshal(&file)
-	if err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, err
-	}
-	if readErr == nil {
-		_ = os.WriteFile(path+".bak", existing, 0o644) // best-effort backup
-	}
-	if err := os.WriteFile(path, out, 0o644); err != nil {
+	if err := writeUserConfig(path, &file, existing); err != nil {
 		return nil, err
 	}
 	return added, nil
+}
+
+// SetLanguagesEnabled writes enable: <enabled> for the named languages into
+// the user config file, creating it if needed. The special name "all" toggles
+// the global lsp.enabled flag instead. Unlike MergeUserLanguages, existing
+// entries ARE modified — but only their enable flag; other tuning is kept.
+// Returns the config path written.
+func SetLanguagesEnabled(names []string, enabled bool) (string, error) {
+	file, existing, path, err := readUserConfig()
+	if err != nil {
+		return "", err
+	}
+	for _, name := range names {
+		if name == "all" {
+			file.LSP.Enabled = enabled
+			continue
+		}
+		lc := file.Languages[name] // zero value when absent — extensions come from defaults at load time
+		v := enabled
+		lc.Enabled = &v
+		file.Languages[name] = lc
+	}
+	if err := writeUserConfig(path, &file, existing); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 func merge(cfg *Config, path string) {

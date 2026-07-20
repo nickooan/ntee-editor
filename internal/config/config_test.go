@@ -167,3 +167,81 @@ func TestLoadAddsNewLanguage(t *testing.T) {
 		t.Error("default languages should remain when a new one is added")
 	}
 }
+
+func TestSetLanguagesEnabledCreatesFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	path, err := SetLanguagesEnabled([]string{"typescript"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != filepath.Join(dir, "ntee-editor", "config.yaml") {
+		t.Fatalf("path = %q", path)
+	}
+
+	out := Load(t.TempDir())
+	if out.Languages["typescript"].IsEnabled() {
+		t.Fatal("typescript should be disabled")
+	}
+	// The seed guard must keep global LSP on and default extensions intact.
+	if !out.LSP.Enabled {
+		t.Fatal("global lsp.enabled must survive the fresh-file seed")
+	}
+	if !contains(out.Languages["typescript"].Extensions, ".ts") {
+		t.Fatalf("default extensions lost: %v", out.Languages["typescript"].Extensions)
+	}
+}
+
+func TestSetLanguagesEnabledPreservesTuning(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	cfgDir := filepath.Join(dir, "ntee-editor")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.yaml"),
+		[]byte("languages:\n  typescript:\n    lsp:\n      command: \"/custom/tsls\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := SetLanguagesEnabled([]string{"typescript"}, false); err != nil {
+		t.Fatal(err)
+	}
+	out := Load(t.TempDir())
+	if out.Languages["typescript"].IsEnabled() {
+		t.Fatal("typescript should be disabled")
+	}
+	if out.Languages["typescript"].LSP.Command != "/custom/tsls" {
+		t.Fatalf("custom command clobbered: %+v", out.Languages["typescript"].LSP)
+	}
+	if _, err := os.Stat(filepath.Join(cfgDir, "config.yaml.bak")); err != nil {
+		t.Fatal("expected a .bak backup")
+	}
+
+	// Round-trip: re-enable flips it back.
+	if _, err := SetLanguagesEnabled([]string{"typescript"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if out := Load(t.TempDir()); !out.Languages["typescript"].IsEnabled() {
+		t.Fatal("typescript should be enabled again")
+	}
+}
+
+func TestSetLanguagesEnabledAll(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	if _, err := SetLanguagesEnabled([]string{"all"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if out := Load(t.TempDir()); out.LSP.Enabled {
+		t.Fatal("'all' should disable global lsp.enabled")
+	}
+	if _, err := SetLanguagesEnabled([]string{"all"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if out := Load(t.TempDir()); !out.LSP.Enabled {
+		t.Fatal("'all' should re-enable global lsp.enabled")
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -50,10 +51,44 @@ func looksLikePath(token string) bool {
 	return strings.ContainsAny(token, "/.")
 }
 
+// statRegular reports whether abs names a regular file.
+func statRegular(abs string) bool {
+	info, err := os.Stat(abs)
+	return err == nil && info.Mode().IsRegular()
+}
+
+// probeExtensions returns the extensions tried for an extensionless path
+// token: the current file's own extension first (an import in a .ts file most
+// likely names another .ts file), then every configured language extension.
+// Driven by cfg.Languages so any language added via config resolves the same
+// way — nothing here is language-specific.
+func (m Model) probeExtensions() []string {
+	own := strings.ToLower(filepath.Ext(m.openRel))
+	seen := map[string]bool{own: true}
+	var exts []string
+	if own != "" {
+		exts = append(exts, own)
+	}
+	var rest []string
+	for _, lc := range m.cfg.Languages {
+		for _, e := range lc.Extensions {
+			e = strings.ToLower(e)
+			if !seen[e] {
+				seen[e] = true
+				rest = append(rest, e)
+			}
+		}
+	}
+	sort.Strings(rest)
+	return append(exts, rest...)
+}
+
 // resolveJumpPath tries the token as a file path: relative to the current
 // file's directory, then relative to the project root. The target must stat
 // as a regular file inside the root (stat-first so missing targets error
-// cleanly instead of opening an error buffer).
+// cleanly instead of opening an error buffer). An extensionless token also
+// probes the configured language extensions ("../config" → config.ts) and
+// directory index files ("./lib" → lib/index.ts).
 func (m Model) resolveJumpPath(token string) (string, bool) {
 	if !looksLikePath(token) {
 		return "", false
@@ -67,8 +102,16 @@ func (m Model) resolveJumpPath(token string) (string, bool) {
 		if err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
 			continue // outside the project root
 		}
-		if info, err := os.Stat(abs); err == nil && info.Mode().IsRegular() {
+		if statRegular(abs) {
 			return filepath.ToSlash(rel), true
+		}
+		for _, ext := range m.probeExtensions() {
+			if statRegular(abs + ext) {
+				return filepath.ToSlash(rel) + ext, true
+			}
+			if statRegular(filepath.Join(abs, "index"+ext)) {
+				return filepath.ToSlash(rel) + "/index" + ext, true
+			}
 		}
 	}
 	return "", false
@@ -153,12 +196,17 @@ func (m Model) handleDefPickKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// definitionMsg carries an async textDocument/definition result. token rides
-// along so an empty/failed answer can fall back to the heuristic.
+// definitionMsg carries an async textDocument/definition result. token labels
+// the picker; col is the rune column that was queried (the references pivot
+// re-queries there); tryCols holds fallback columns to try when the answer is
+// empty; snapped marks a query at a snapped-to column rather than the cursor.
 type definitionMsg struct {
-	token string
-	locs  []lsp.Location
-	err   error
+	token   string
+	col     int
+	tryCols []int
+	snapped bool
+	locs    []lsp.Location
+	err     error
 }
 
 // referencesMsg carries an async textDocument/references result.
@@ -196,10 +244,21 @@ func (m Model) collectInRootCandidates(locs []lsp.Location) []defCandidate {
 	return cands
 }
 
-// jumpToReference (Ctrl+J) jumps to the file or definition under the cursor,
-// pushing the origin so Ctrl+O returns. A path-shaped token opens that file;
-// otherwise the language server is asked (async — the answer arrives as
-// definitionMsg). Files with no configured server report "no language server".
+// maxJumpTries bounds how many nearby identifiers the no-symbol fallback
+// queries before giving up.
+const maxJumpTries = 4
+
+// jumpToReference (Ctrl+J) jumps to whatever the cursor plausibly means,
+// pushing the origin so Ctrl+O returns. Priority ladder:
+//  1. a path-shaped token under the cursor that names a real file → open it
+//     (a language server does not resolve bare paths);
+//  2. cursor on an identifier → textDocument/definition there (a definition
+//     resolving to the cursor's own line pivots to references — see
+//     handleDefinition);
+//  3. cursor on no symbol: a quoted path elsewhere on the line that names a
+//     real file → open it;
+//  4. else snap to the nearest identifiers on the line and query definition,
+//     retrying the next-nearest (bounded) while the server returns nothing.
 func (m Model) jumpToReference() (tea.Model, tea.Cmd) {
 	if m.openFile == nil {
 		return m, nil
@@ -211,28 +270,80 @@ func (m Model) jumpToReference() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	token := m.jumpToken()
-	if strings.TrimSpace(token) == "" {
-		m.errText = "nothing to jump to"
-		return m, nil
-	}
-
-	// A token that names a real file jumps straight there — a language server
-	// does not resolve bare file paths.
 	if rel, ok := m.resolveJumpPath(token); ok {
 		return m.jumpToLocation(rel, 0, 0), nil
 	}
 
-	if client, ok := m.lsp.ClientFor(m.openFile.Path); ok {
-		path := m.openFile.Path
-		line := m.edit.cy
-		utf16Col := lsp.UTF16Col(m.edit.lines[m.edit.cy], m.edit.cx)
-		return m, func() tea.Msg {
-			locs, err := client.Definition(path, line, utf16Col)
-			return definitionMsg{token: token, locs: locs, err: err}
+	line := m.edit.line()
+	if _, _, onIdent := identifierAt(line, m.edit.cx); onIdent {
+		return m.requestDefinition(token, m.edit.cx, nil, false)
+	}
+	if rel, ok := m.jumpLinePath(); ok {
+		return m.jumpToLocation(rel, 0, 0), nil
+	}
+	cols := identifierCols(line, m.edit.cx, maxJumpTries)
+	if len(cols) == 0 {
+		m.errText = "nothing to jump to"
+		return m, nil
+	}
+	return m.requestDefinition(identifierText(line, cols[0]), cols[0], cols[1:], true)
+}
+
+// jumpLinePath scans the cursor line's quoted spans for one that resolves to a
+// real file — the "this line references a file" default for a cursor that is
+// not on any symbol.
+func (m Model) jumpLinePath() (string, bool) {
+	line := m.edit.line()
+	for i := 0; i < len(line); i++ {
+		q := line[i]
+		if q != '"' && q != '\'' && q != '`' {
+			continue
+		}
+		for j := i + 1; j < len(line); j++ {
+			if line[j] != q {
+				continue
+			}
+			if rel, ok := m.resolveJumpPath(strings.TrimSpace(string(line[i+1 : j]))); ok {
+				return rel, true
+			}
+			i = j // skip past this span; keep scanning for a later one
+			break
 		}
 	}
-	m.errText = "no language server for this file type"
-	return m, nil
+	return "", false
+}
+
+// noServerError explains the missing server and how to install one —
+// "ClientFor false" usually means the binary is absent, and --prepare-lsp is
+// the remedy for that and for unmapped extensions alike.
+func (m Model) noServerError() string {
+	if ext := filepath.Ext(m.openRel); ext != "" {
+		return fmt.Sprintf("no language server for %s files — try: ntee --prepare-lsp", ext)
+	}
+	return "no language server for this file type"
+}
+
+// requestDefinition queries textDocument/definition at rune column cx of the
+// cursor line. tryCols carries the fallback columns handleDefinition may try
+// next when the answer is empty.
+func (m Model) requestDefinition(token string, cx int, tryCols []int, snapped bool) (tea.Model, tea.Cmd) {
+	client, ok := m.lsp.ClientFor(m.openFile.Path)
+	if !ok {
+		// No server: a file referenced on the line is still a useful jump —
+		// an import line redirects to the imported file instead of erroring.
+		if rel, ok := m.jumpLinePath(); ok {
+			return m.jumpToLocation(rel, 0, 0), nil
+		}
+		m.errText = m.noServerError()
+		return m, nil
+	}
+	path := m.openFile.Path
+	line := m.edit.cy
+	utf16Col := lsp.UTF16Col(m.edit.lines[m.edit.cy], cx)
+	return m, func() tea.Msg {
+		locs, err := client.Definition(path, line, utf16Col)
+		return definitionMsg{token: token, col: cx, tryCols: tryCols, snapped: snapped, locs: locs, err: err}
+	}
 }
 
 // handleDefinition lands an LSP definition answer, falling back to the
@@ -272,9 +383,24 @@ func (m Model) handleDefinition(msg definitionMsg) (tea.Model, tea.Cmd) {
 			"no definition or path under cursor: "+msg.token, others), nil
 	}
 	if onCursor {
-		return m.requestReferences(msg.token)
+		return m.requestReferences(msg.token, msg.col)
 	}
-	m.errText = "no definition found: " + msg.token
+	// The queried spot produced nothing — a keyword like `import`, or noise.
+	// A file referenced on the line is the better guess, so prefer it over
+	// snapping to neighboring identifiers.
+	if rel, ok := m.jumpLinePath(); ok {
+		return m.jumpToLocation(rel, 0, 0), nil
+	}
+	if len(msg.tryCols) > 0 {
+		// Nothing at the tried column — snap to the next-nearest identifier.
+		line := m.edit.line()
+		return m.requestDefinition(identifierText(line, msg.tryCols[0]), msg.tryCols[0], msg.tryCols[1:], true)
+	}
+	if msg.snapped {
+		m.errText = "no definition found near cursor"
+	} else {
+		m.errText = "no definition found: " + msg.token
+	}
 	return m, nil
 }
 
@@ -287,19 +413,20 @@ func lspLookupError(err error) string {
 	return "lsp lookup failed: " + err.Error()
 }
 
-// requestReferences chains a references lookup for the symbol under the cursor
-// via the language server.
-func (m Model) requestReferences(token string) (tea.Model, tea.Cmd) {
+// requestReferences chains a references lookup at rune column cx of the cursor
+// line — the column whose definition resolved to this line, which is not
+// necessarily the cursor column when the jump snapped to a nearby identifier.
+func (m Model) requestReferences(token string, cx int) (tea.Model, tea.Cmd) {
 	if client, ok := m.lsp.ClientFor(m.openFile.Path); ok {
 		path := m.openFile.Path
 		line := m.edit.cy
-		utf16Col := lsp.UTF16Col(m.edit.lines[m.edit.cy], m.edit.cx)
+		utf16Col := lsp.UTF16Col(m.edit.lines[m.edit.cy], cx)
 		return m, func() tea.Msg {
 			locs, err := client.References(path, line, utf16Col)
 			return referencesMsg{token: token, locs: locs, err: err}
 		}
 	}
-	m.errText = "no language server for this file type"
+	m.errText = m.noServerError()
 	return m, nil
 }
 

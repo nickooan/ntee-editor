@@ -108,6 +108,9 @@ func (m Model) executeCommand(cmd string) (tea.Model, tea.Cmd) {
 		// same-second external changes are picked up.
 		filetree.ClearDirCache()
 		m.corpusRebuilding = true
+		if m.gitRepo {
+			return m, tea.Batch(m.rebuildCorpusCmd(), m.refreshGitStatusCmd())
+		}
 		return m, m.rebuildCorpusCmd()
 
 	default:

@@ -24,7 +24,7 @@ func TestBuildFileTreeEntriesGitignore(t *testing.T) {
 
 	gi := CompileGitignore([]string{"*.log", "ignoredDir/"})
 	expanded := map[string]bool{"ignoredDir": true}
-	entries := BuildFileTreeEntries(root, expanded, nil, gi)
+	entries := BuildFileTreeEntries(root, expanded, nil, gi, nil)
 
 	byPath := map[string]FileTreeEntry{}
 	for _, e := range entries {
@@ -81,7 +81,7 @@ func TestBuildFileTreeEntriesNilGitignore(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "a.log"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	for _, e := range BuildFileTreeEntries(root, nil, nil, nil) {
+	for _, e := range BuildFileTreeEntries(root, nil, nil, nil, nil) {
 		if e.Dimmed {
 			t.Fatalf("nil matcher must not flag %q", e.RelativePath)
 		}
@@ -134,7 +134,7 @@ func TestNestedGitignore(t *testing.T) {
 	})
 
 	expanded := map[string]bool{"sub": true, "sub/deep": true}
-	dim := dimByPath(t, BuildFileTreeEntries(root, expanded, nil, nil))
+	dim := dimByPath(t, BuildFileTreeEntries(root, expanded, nil, nil, nil))
 
 	if !dim["sub/app.log"] {
 		t.Error("sub/app.log must be dimmed by sub/.gitignore")
@@ -173,7 +173,7 @@ func TestNestedGitignoreOverridesRoot(t *testing.T) {
 
 	gi := LoadGitignore(root)
 	expanded := map[string]bool{"sub": true}
-	dim := dimByPath(t, BuildFileTreeEntries(root, expanded, nil, gi))
+	dim := dimByPath(t, BuildFileTreeEntries(root, expanded, nil, gi, nil))
 
 	if dim["sub/keep.log"] {
 		t.Error("sub/keep.log must be re-included (not dimmed) by nested !keep.log")
@@ -207,7 +207,7 @@ func TestRootGitignoreDimsAtDepth(t *testing.T) {
 
 	gi := LoadGitignore(root)
 	expanded := map[string]bool{"a": true, "a/b": true}
-	dim := dimByPath(t, BuildFileTreeEntries(root, expanded, nil, gi))
+	dim := dimByPath(t, BuildFileTreeEntries(root, expanded, nil, gi, nil))
 
 	if !dim["a/b/deep.log"] {
 		t.Error("a/b/deep.log must be dimmed by root *.log at depth")
@@ -242,7 +242,7 @@ func TestNodeModulesDimmedButNotSearched(t *testing.T) {
 	// Tree: node_modules appears and is dimmed; expanding it keeps children dimmed.
 	expanded := map[string]bool{"node_modules": true, "node_modules/pkg": true}
 	byPath := map[string]FileTreeEntry{}
-	for _, e := range BuildFileTreeEntries(root, expanded, nil, nil) {
+	for _, e := range BuildFileTreeEntries(root, expanded, nil, nil, nil) {
 		byPath[e.RelativePath] = e
 	}
 	nm, ok := byPath["node_modules"]

@@ -22,6 +22,7 @@ type FileTreeEntry struct {
 	Type         string // "directory" | "file"
 	IsExpanded   bool
 	Dimmed       bool // shown in the tree but excluded from search (gitignore match or node_modules) — rendered gray
+	Uncommitted  bool // has uncommitted git changes (or, for a dir, contains one) — rendered yellow
 }
 
 type dirChild struct {
@@ -330,8 +331,11 @@ func softIgnored(name string) bool {
 // relative paths are in expanded. Hard-ignored names (.git, config tree.ignore)
 // are skipped entirely. Entries matched by gi, nested under a dimmed directory,
 // or soft-ignored (node_modules) are shown but flagged Dimmed (rendered gray and
-// excluded from search); gi may be nil to disable gitignore matching.
-func BuildFileTreeEntries(root string, expanded map[string]bool, ignore []string, gi *Gitignore) []FileTreeEntry {
+// excluded from search); gi may be nil to disable gitignore matching. dirty is
+// the GitDirtySet (paths with uncommitted changes plus their ancestor dirs, so
+// a collapsed dir flags too); entries in it are flagged Uncommitted (rendered
+// yellow). nil disables git-status flagging.
+func BuildFileTreeEntries(root string, expanded map[string]bool, ignore []string, gi *Gitignore, dirty map[string]bool) []FileTreeEntry {
 	if root == "" {
 		return nil
 	}
@@ -382,6 +386,7 @@ func BuildFileTreeEntries(root string, expanded map[string]bool, ignore []string
 					Type:         "directory",
 					IsExpanded:   isExpanded,
 					Dimmed:       dim,
+					Uncommitted:  dirty[rel],
 				})
 				if isExpanded {
 					appendDir(rel, depth+1, dim, chain)
@@ -398,6 +403,7 @@ func BuildFileTreeEntries(root string, expanded map[string]bool, ignore []string
 				Depth:        depth,
 				Type:         "file",
 				Dimmed:       dim,
+				Uncommitted:  dirty[rel],
 			})
 		}
 	}

@@ -212,6 +212,12 @@ func (m Model) renderSidebar(width, height int) string {
 		switch {
 		case highlighted >= 0 && vp.SafeScrollY+i == highlighted:
 			lines = append(lines, selectedEntryStyle.Render(label))
+		// Uncommitted outranks the open-file green: "yellow instead of green"
+		// is exactly the signal that the open file has unsaved-to-git work.
+		case entry.Uncommitted && entry.Type == "directory":
+			lines = append(lines, uncommittedDirStyle.Render(label))
+		case entry.Uncommitted:
+			lines = append(lines, uncommittedFileStyle.Render(label))
 		case entry.RelativePath == m.openRel && m.openRel != "":
 			lines = append(lines, openFileStyle.Render(label))
 		case entry.Dimmed:
@@ -910,6 +916,10 @@ var (
 	dirStyle           = lipgloss.NewStyle().Foreground(colAqua).Bold(true).Background(colBg)
 	fileStyle          = lipgloss.NewStyle().Foreground(colFg).Background(colBg)
 	ignoredFileStyle   = lipgloss.NewStyle().Foreground(colComment).Background(colBg) // .gitignore'd: gray
+	// Uncommitted git changes: yellow, bubbling up to ancestor (even folded)
+	// dirs. The dir variant keeps dirStyle's bold weight.
+	uncommittedFileStyle = lipgloss.NewStyle().Foreground(colYellow).Background(colBg)
+	uncommittedDirStyle  = lipgloss.NewStyle().Foreground(colYellow).Bold(true).Background(colBg)
 
 	// Autocomplete dropdown rows.
 	completionItemStyle = lipgloss.NewStyle().Foreground(colFg).Background(colBgChrome)

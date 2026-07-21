@@ -46,6 +46,15 @@ type Model struct {
 	// gray. nil when the project has no .gitignore.
 	gitignore *filetree.Gitignore
 
+	// Git working-tree status for the sidebar: gitDirty holds every uncommitted
+	// path plus its ancestor dirs (rendered yellow, folded dirs included). It is
+	// refreshed by a background poll (gitStatusTickMsg) so changes made by
+	// external processes — another terminal, an agent, a build — surface without
+	// any editor input. gitRepo gates the whole feature at startup.
+	gitRepo          bool
+	gitDirty         map[string]bool
+	gitStatusRunning bool
+
 	width, height int
 	ready         bool
 	mode          mode
@@ -199,6 +208,7 @@ func New(cfg config.Config, db store.Backend, root, notice string, reg lsp.Regis
 		diags:         map[string][]lsp.Diagnostic{},
 		copyClipboard: clipboard.Copy,
 		gitignore:     filetree.LoadGitignore(root),
+		gitRepo:       filetree.IsGitRepo(root),
 		draftSet:      map[string]bool{},
 		cursorMem:     map[string]store.TabCursor{},
 	}
@@ -237,12 +247,46 @@ func New(cfg config.Config, db store.Backend, root, notice string, reg lsp.Regis
 }
 
 // Init warms the search corpus in the background when there is no valid
-// persisted index; a warm start (New loaded one) skips the walk.
+// persisted index (a warm start skips the walk) and, in a git repo, kicks off
+// the git-status poll loop.
 func (m Model) Init() tea.Cmd {
+	var cmds []tea.Cmd
 	if m.corpusBuiltAt.IsZero() {
-		return m.rebuildCorpusCmd()
+		cmds = append(cmds, m.rebuildCorpusCmd())
 	}
-	return nil
+	if m.gitRepo {
+		cmds = append(cmds, m.refreshGitStatusCmd(), gitStatusTick())
+	}
+	return tea.Batch(cmds...)
+}
+
+// gitStatusInterval paces the background `git status` poll. Polling (rather
+// than an fs watcher) is what surfaces changes made by external processes —
+// another terminal, an agent editing files, a build — while the editor idles.
+const gitStatusInterval = 3 * time.Second
+
+// gitStatusTickMsg drives the poll loop; gitStatusMsg delivers a fresh dirty
+// set from the worker goroutine.
+type gitStatusTickMsg struct{}
+
+type gitStatusMsg struct {
+	dirty map[string]bool
+	ok    bool
+}
+
+func gitStatusTick() tea.Cmd {
+	return tea.Tick(gitStatusInterval, func(time.Time) tea.Msg { return gitStatusTickMsg{} })
+}
+
+// refreshGitStatusCmd runs the `git status` child process off the UI goroutine
+// and delivers the parsed dirty set. The process is short-lived — one spawn per
+// call, no daemon.
+func (m Model) refreshGitStatusCmd() tea.Cmd {
+	root := m.root
+	return func() tea.Msg {
+		dirty, ok := filetree.GitDirtySet(root)
+		return gitStatusMsg{dirty: dirty, ok: ok}
+	}
 }
 
 // signatureValid stat-sweeps a persisted index's directory-mtime map against
@@ -376,6 +420,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case gitStatusTickMsg:
+		// Poll heartbeat: refresh unless one is already in flight, and always
+		// re-arm the next tick so the loop survives a skipped round.
+		if m.gitStatusRunning {
+			return m, gitStatusTick()
+		}
+		m.gitStatusRunning = true
+		return m, tea.Batch(m.refreshGitStatusCmd(), gitStatusTick())
+
+	case gitStatusMsg:
+		m.gitStatusRunning = false
+		if msg.ok {
+			m.gitDirty = msg.dirty
+		}
+		return m, nil
+
 	case grepBatchMsg:
 		return m.handleGrepBatch(msg)
 
@@ -465,6 +525,7 @@ func (m Model) treeEntries() []filetree.FileTreeEntry {
 		filetree.BuildExpandedDirectoryPaths(m.sidebarCommand()),
 		m.cfg.Tree.Ignore,
 		m.gitignore,
+		m.gitDirty,
 	)
 }
 

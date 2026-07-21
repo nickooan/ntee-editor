@@ -337,6 +337,47 @@ func TestJumpDefLinePivotsToReferencesFromSnap(t *testing.T) {
 	}
 }
 
+// The Kotlin case: the cursor sits directly on a declaration, but the server
+// returns no definition (kotlin-language-server does not self-resolve a
+// declaration). The jump pivots to references anyway, queried at the
+// identifier column, and lands on the single usage.
+func TestJumpEmptyDefinitionOnIdentifierPivotsToReferences(t *testing.T) {
+	m, client := lspJumpModel(t,
+		"package main\n\nvar bookingReference = 1\n\nfunc use() { _ = bookingReference }\n")
+	// defQueue empty → Definition returns nothing, as kotlin-language-server
+	// does on a declaration. References points at the usage on line 4.
+	client.refLocs = selfLoc(m, 4)
+	m.edit.cy, m.edit.cx = 2, 4 // on `bookingReference` in `var bookingReference = 1`
+
+	m = ctrlJ(t, m)
+	if len(client.defCols) != 1 || client.defCols[0] != 4 {
+		t.Fatalf("definition should be queried once at the cursor: %v", client.defCols)
+	}
+	if len(client.refCols) != 1 || client.refCols[0] != 4 {
+		t.Fatalf("references should be queried at the identifier column: %v", client.refCols)
+	}
+	if m.edit.cy != 4 || m.errText != "" {
+		t.Fatalf("should land on the single reference: cy=%d err=%q", m.edit.cy, m.errText)
+	}
+}
+
+// When the references pivot also comes back empty, the message is the
+// references miss — proving the pivot ran rather than the old definition
+// dead-end.
+func TestJumpEmptyDefinitionEmptyReferencesReportsReferencesMiss(t *testing.T) {
+	m, client := lspJumpModel(t, "package main\n\nvar bookingReference = 1\n")
+	client.refLocs = nil // no references either
+	m.edit.cy, m.edit.cx = 2, 4 // on `bookingReference`
+
+	m = ctrlJ(t, m)
+	if len(client.refCols) != 1 {
+		t.Fatalf("the pivot should still query references: %v", client.refCols)
+	}
+	if m.errText != "no references found: bookingReference" {
+		t.Fatalf("should report a references miss, not a definition miss: %q", m.errText)
+	}
+}
+
 // A cursor on no symbol jumps to a file referenced (quoted) on the line.
 func TestJumpLinePathRedirect(t *testing.T) {
 	m, client := lspJumpModel(t, "package main\n\n// see \"lib/util.ts\" for details\n")

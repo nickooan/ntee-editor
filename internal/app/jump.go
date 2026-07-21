@@ -253,8 +253,9 @@ const maxJumpTries = 4
 //  1. a path-shaped token under the cursor that names a real file → open it
 //     (a language server does not resolve bare paths);
 //  2. cursor on an identifier → textDocument/definition there (a definition
-//     resolving to the cursor's own line pivots to references — see
-//     handleDefinition);
+//     resolving to the cursor's own line — or returning nothing at all, as
+//     kotlin-language-server does on a declaration — pivots to references;
+//     see handleDefinition);
 //  3. cursor on no symbol: a quoted path elsewhere on the line that names a
 //     real file → open it;
 //  4. else snap to the nearest identifiers on the line and query definition,
@@ -341,8 +342,12 @@ func (m Model) requestDefinition(token string, cx int, tryCols []int, snapped bo
 }
 
 // handleDefinition lands an LSP definition answer, falling back to the
-// heuristic when the server had none (or is still starting). Guards re-run —
-// the user may have typed while the request was in flight.
+// heuristic when the server had none (or is still starting). A definition that
+// lands on the cursor's own line, or that comes back empty for an identifier
+// the cursor sits directly on, pivots to references — the "who uses this
+// declaration?" question (empty is how kotlin-language-server answers a
+// definition query on a declaration). Guards re-run — the user may have typed
+// while the request was in flight.
 func (m Model) handleDefinition(msg definitionMsg) (tea.Model, tea.Cmd) {
 	if m.openFile == nil || m.mode != modeEdit {
 		return m, nil
@@ -387,11 +392,17 @@ func (m Model) handleDefinition(msg definitionMsg) (tea.Model, tea.Cmd) {
 		return m.requestDefinition(identifierText(line, msg.tryCols[0]), msg.tryCols[0], msg.tryCols[1:], true)
 	}
 	if msg.snapped {
+		// A snapped guess with no answer stays an error — we don't chase
+		// references for an identifier the user didn't actually point at.
 		m.errText = "no definition found near cursor"
-	} else {
-		m.errText = "no definition found: " + msg.token
+		return m, nil
 	}
-	return m, nil
+	// The cursor was directly on an identifier but the server returned no
+	// definition. Some servers (kotlin-language-server) don't return a
+	// self-location for a definition query on a declaration, so the onCursor
+	// pivot above never fires. Treat the identifier as its own declaration and
+	// ask who references it.
+	return m.requestReferences(msg.token, msg.col)
 }
 
 // lspLookupError renders a server failure as a status message; the common

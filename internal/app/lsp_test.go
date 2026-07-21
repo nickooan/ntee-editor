@@ -118,10 +118,16 @@ func TestLSPDefinitionJumpAndFallback(t *testing.T) {
 		t.Fatalf("cursor: cy=%d cx=%d", m.edit.cy, m.edit.cx)
 	}
 
-	// Empty LSP answer → strict: report, don't guess; no stack residue.
+	// Empty LSP answer on an identifier → strict: no heuristic jump. The cursor
+	// pivots to references (an identifier with no definition is treated as its
+	// own declaration); an empty references answer reports cleanly, no residue.
 	m = key(m, tea.KeyMsg{Type: tea.KeyCtrlO})
-	next, _ = m.handleDefinition(definitionMsg{token: "nonexistentsymbolxyz"})
+	next, cmd = m.handleDefinition(definitionMsg{token: "nonexistentsymbolxyz"})
 	m = next.(Model)
+	for cmd != nil {
+		next, cmd = m.Update(cmd())
+		m = next.(Model)
+	}
 	if m.errText == "" || len(m.jumpStack) != 0 {
 		t.Fatalf("fallback should error cleanly: err=%q stack=%d", m.errText, len(m.jumpStack))
 	}
@@ -215,14 +221,19 @@ func TestLSPStrictNoHeuristicFallback(t *testing.T) {
 	m.edit.cy, m.edit.cx = 3, 1
 
 	// The heuristic WOULD find "func main" in this buffer, but with a server
-	// configured an empty LSP answer must not guess a jump.
-	next, _ := m.handleDefinition(definitionMsg{token: "main"})
+	// configured an empty LSP answer must not guess a jump — it pivots to a
+	// references request (a real LSP call, not an in-buffer guess) and does not
+	// move on its own.
+	next, cmd := m.handleDefinition(definitionMsg{token: "main"})
 	m = next.(Model)
+	if cmd == nil {
+		t.Fatal("empty definition on an identifier should pivot to references")
+	}
+	if _, ok := cmd().(referencesMsg); !ok {
+		t.Fatalf("expected a references pivot, got %T", cmd())
+	}
 	if m.openRel != "main.go" || m.edit.cy != 3 || len(m.jumpStack) != 0 {
 		t.Fatalf("strict mode must not move: %q cy=%d stack=%d", m.openRel, m.edit.cy, len(m.jumpStack))
-	}
-	if !strings.Contains(m.errText, "no definition found") {
-		t.Fatalf("err: %q", m.errText)
 	}
 
 	// A still-starting server gets the friendly message.

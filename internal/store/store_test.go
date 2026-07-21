@@ -77,6 +77,42 @@ func TestRecentFilesOrderAndRePut(t *testing.T) {
 	}
 }
 
+// DeleteOpenedUnder prunes rel and its subtree, honoring path boundaries:
+// removing "lib" must not touch "library/…". Run against both backends.
+func TestDeleteOpenedUnder(t *testing.T) {
+	check := func(t *testing.T, s Backend) {
+		t.Helper()
+		for _, p := range []string{"lib/util.ts", "lib/deep/x.go", "library/y.go", "main.go"} {
+			_ = s.TouchOpened(OpenedFile{Path: p, LastOpenedAt: 100})
+		}
+		if err := s.DeleteOpenedUnder("lib"); err != nil {
+			t.Fatal(err)
+		}
+		left := map[string]bool{}
+		for _, f := range s.RecentFiles(0) {
+			left[f.Path] = true
+		}
+		if left["lib/util.ts"] || left["lib/deep/x.go"] {
+			t.Fatalf("lib subtree must be pruned: %v", left)
+		}
+		if !left["library/y.go"] || !left["main.go"] {
+			t.Fatalf("boundary sibling and unrelated file must survive: %v", left)
+		}
+
+		// Removing a single file prunes exactly that record.
+		if err := s.DeleteOpenedUnder("main.go"); err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range s.RecentFiles(0) {
+			if f.Path == "main.go" {
+				t.Fatal("main.go record must be gone")
+			}
+		}
+	}
+	t.Run("store", func(t *testing.T) { check(t, openTestStore(t)) })
+	t.Run("memory", func(t *testing.T) { check(t, NewMemory()) })
+}
+
 func TestSessionRoundTrip(t *testing.T) {
 	s := openTestStore(t)
 	if _, ok := s.LoadSession(); ok {

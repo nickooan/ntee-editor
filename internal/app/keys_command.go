@@ -100,9 +100,6 @@ func (m Model) executeCommand(cmd string) (tea.Model, tea.Cmd) {
 		// restored cmdPrevMode); close verbs just prune the tab list.
 		m, _ = m.tabCommand(arg)
 
-	case "recent":
-		return m.openFuzzy()
-
 	case "refresh":
 		// Force a full rebuild now, dropping the mtime-keyed dir cache so even
 		// same-second external changes are picked up.

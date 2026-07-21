@@ -94,7 +94,7 @@ func (m Model) renderStatusLine() string {
 			line += renderInputLine(m.command, m.qCursor)
 		}
 		return withNotice(m, line) + "\n" +
-			hintStyle.Render("Enter open+edit · Shift+↑/↓ tree · Esc parent · :recent · Ctrl + P goto / Q quit")
+			hintStyle.Render("Enter open+edit · Shift+↑/↓ tree · Esc parent · :mkdir/:touch/:rm · Ctrl + P goto / Q quit")
 	case modeEdit:
 		return m.renderEditStatus()
 	case modeExec:
@@ -118,7 +118,7 @@ func (m Model) renderStatusLine() string {
 			hintStyle.Render("↑/↓ next · Enter jump · Esc back")
 	case modeCommand:
 		return promptStyle.Render(":") + renderInputLine(m.cmdInput, m.cmdCursor) +
-			statusTextStyle.Render("   ") + hintStyle.Render("jump <line|top|end> · tab <name|cl|cr> · revert · recent")
+			statusTextStyle.Render("   ") + hintStyle.Render("jump <line|top|end> · tab <name|cl|cr> · revert")
 	}
 	return ""
 }

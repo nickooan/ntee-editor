@@ -1,6 +1,9 @@
 package app
 
 import (
+	"os"
+	"path"
+	"path/filepath"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -99,6 +102,158 @@ func (m Model) handleQueryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, corpusCmd
 }
 
+// parseInlineFs recognizes the bar's filesystem commands — "<path> :mkdir
+// <rel>", "<path> :touch <rel>", and "<path> :rm" (the prefix itself is the
+// target; an empty prefix means the root for mkdir/touch) — and returns the
+// verb plus the root-relative target (prefix joined with the argument,
+// cleaned). ok is false for any other input, including a missing target or one
+// escaping the root, so other ":" commands and plain navigation are untouched.
+func parseInlineFs(trimmed string) (verb, rel string, ok bool) {
+	var base, rest string
+	switch {
+	case strings.HasPrefix(trimmed, ":"):
+		rest = trimmed[1:]
+	default:
+		i := strings.Index(trimmed, " :")
+		if i == -1 {
+			return "", "", false
+		}
+		base, rest = strings.TrimSpace(trimmed[:i]), trimmed[i+2:]
+	}
+	verb, arg, _ := strings.Cut(rest, " ")
+	arg = strings.TrimSpace(arg)
+	switch verb {
+	case "mkdir", "touch":
+		if arg == "" {
+			return "", "", false
+		}
+	case "rm":
+		// rm removes the typed path itself: no argument, and a bare ":rm"
+		// (which would target the root) is refused.
+		if arg != "" || base == "" {
+			return "", "", false
+		}
+	default:
+		return "", "", false
+	}
+	// An absolute argument must be rejected here — the slash-normalization
+	// below would otherwise strip the leading "/" and mask it.
+	if strings.HasPrefix(strings.ReplaceAll(arg, "\\", "/"), "/") {
+		return "", "", false
+	}
+
+	base = strings.Trim(strings.ReplaceAll(base, "\\", "/"), "/")
+	arg = strings.Trim(strings.ReplaceAll(arg, "\\", "/"), "/")
+	rel = arg
+	if base != "" {
+		rel = base + "/" + arg
+	}
+	rel = path.Clean(rel)
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, "../") || path.IsAbs(rel) {
+		return "", "", false
+	}
+	return verb, rel, true
+}
+
+// queryCreate performs an inline create and enters the result: a new dir is
+// confirmed into the bar/sidebar (like Enter on a directory), a new file opens
+// straight into edit mode. Errors keep the typed input so it can be corrected.
+func (m Model) queryCreate(verb, rel string) (tea.Model, tea.Cmd) {
+	if verb == "mkdir" {
+		if err := filetree.MakeDir(m.root, rel); err != nil {
+			m.errText = "mkdir failed: " + err.Error()
+			return m, nil
+		}
+		m.notice = "created " + rel + "/"
+		m.keyboardSelectedCommand = ""
+		m.inputSuggestIndex = 0
+		m.selectedCommand = rel + "/"
+		m.command = m.selectedCommand
+		m.qCursor = len([]rune(m.command))
+		return m, nil
+	}
+
+	created, err := filetree.EnsureFile(m.root, rel)
+	if err != nil {
+		m.errText = "touch failed: " + err.Error()
+		return m, nil
+	}
+	if created {
+		m.notice = "created " + rel
+	} else {
+		m.notice = "opened existing " + rel
+	}
+	m.keyboardSelectedCommand = ""
+	m.inputSuggestIndex = 0
+	m.command, m.qCursor = "", 0
+	return m.openFileAt(rel), nil
+}
+
+// queryRemove deletes the typed path (file, or directory with its whole
+// subtree), prunes any editor state that pointed into it (tabs, drafts, the
+// open file), and moves the bar to the parent directory.
+func (m Model) queryRemove(rel string) (tea.Model, tea.Cmd) {
+	if _, err := os.Stat(filepath.Join(m.root, filepath.FromSlash(rel))); err != nil {
+		m.errText = "rm: no such path: " + rel
+		return m, nil
+	}
+	if err := filetree.Remove(m.root, rel); err != nil {
+		m.errText = "rm failed: " + err.Error()
+		return m, nil
+	}
+	m = m.dropRemovedPath(rel)
+	parent, _ := filetree.ResolveParentDirectoryCommand(rel)
+	m.selectedCommand = parent
+	m.command = parent
+	m.qCursor = len([]rune(parent))
+	m.keyboardSelectedCommand = ""
+	m.commandPreview = ""
+	m.inputSuggestIndex = 0
+	m.notice = "removed " + rel
+	return m, nil
+}
+
+// dropRemovedPath forgets every rel at or under the removed path: its tabs,
+// remembered cursors, and stashed drafts. If the open file was among them the
+// editor resets to the empty query state (a buffer over a deleted file would
+// silently resurrect it on the next save).
+func (m Model) dropRemovedPath(rel string) Model {
+	prefix := rel + "/"
+	affected := func(p string) bool { return p == rel || strings.HasPrefix(p, prefix) }
+
+	// The recent-visit records cover files that may never have been tabs this
+	// session, so prune the store by path, not by tab list.
+	_ = m.db.DeleteOpenedUnder(rel)
+
+	kept := make([]string, 0, len(m.tabs))
+	for _, t := range m.tabs {
+		if affected(t) {
+			delete(m.cursorMem, t)
+			delete(m.draftSet, t)
+			_ = m.db.DeleteDraft(t)
+			continue
+		}
+		kept = append(kept, t)
+	}
+	m.tabs = kept
+	m.tabActive = input.Clamp(m.tabActive, 0, max(0, len(m.tabs)-1))
+	if affected(m.openRel) {
+		m.openFile = nil
+		m.openRel = ""
+		m.fileLines, m.hlLines = nil, nil
+		m.edit = newEditor("")
+		m.mode = modeQuery
+	} else {
+		for i, t := range m.tabs {
+			if t == m.openRel {
+				m.tabActive = i
+			}
+		}
+	}
+	m.persistTabs()
+	return m
+}
+
 // adoptPreview promotes a navigated preview into the editable command so the
 // next keystroke continues from the highlighted value.
 func (m Model) adoptPreview() Model {
@@ -162,6 +317,17 @@ func (m Model) moveQueryToParentDirectory() Model {
 func (m Model) submitQuery(entries []filetree.FileTreeEntry, suggestions []filetree.InputSuggestion) (tea.Model, tea.Cmd) {
 	m.commandPreview = ""
 	trimmed := strings.TrimSpace(m.command)
+
+	// Inline fs commands ride on the typed path prefix: "src/acp/ :mkdir sub",
+	// ":touch a/b.go" (no prefix = root), "src/acp/old :rm". Checked before
+	// the generic ":" branch so a root-level ":mkdir x" doesn't land in
+	// executeCommand.
+	if verb, rel, ok := parseInlineFs(trimmed); ok {
+		if verb == "rm" {
+			return m.queryRemove(rel)
+		}
+		return m.queryCreate(verb, rel)
+	}
 
 	if strings.HasPrefix(trimmed, ":") {
 		m.command, m.qCursor = "", 0

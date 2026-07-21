@@ -7,15 +7,18 @@ import (
 	"strings"
 )
 
-// Gitignore matches root-relative slash paths against the rules of a project's
-// .gitignore. It is a pragmatic subset of the gitignore spec: comments, blank
-// lines, negation (!), directory-only (trailing /), anchoring (leading or
+// Gitignore matches directory-relative slash paths against the rules of one
+// .gitignore file. It is a pragmatic subset of the gitignore spec: comments,
+// blank lines, negation (!), directory-only (trailing /), anchoring (leading or
 // internal /), and *, ?, ** globs. Rules apply in order, last match wins.
 //
-// Scope: only the root .gitignore is read (no nested per-directory gitignore or
-// .git/info/exclude), and a `!` re-include under an already-ignored directory is
-// not honored. It drives a visual cue (graying ignored files), not any hard
-// exclusion.
+// Nested per-directory .gitignore files ARE honored: the tree/corpus walks
+// chain a matcher per directory that has one and test each path relative to the
+// file's own directory, with deeper files overriding shallower ones (see
+// chainIgnored in filetree.go). Still unsupported: .git/info/exclude, and a `!`
+// re-include under an already-ignored/dimmed directory (dimmed dirs are not
+// descended for matching). It drives a visual cue (graying ignored files) plus a
+// search filter, not any hard exclusion from the tree.
 type Gitignore struct {
 	rules []gitRule
 }
@@ -47,23 +50,32 @@ func CompileGitignore(lines []string) *Gitignore {
 	return g
 }
 
-// Match reports whether a root-relative, slash-separated path is ignored. isDir
-// lets directory-only patterns (trailing /) apply only to directories.
+// Match reports whether a directory-relative, slash-separated path is ignored.
+// isDir lets directory-only patterns (trailing /) apply only to directories.
 func (g *Gitignore) Match(path string, isDir bool) bool {
+	_, ignored := g.MatchState(path, isDir)
+	return ignored
+}
+
+// MatchState reports this file's opinion on a directory-relative path: matched
+// is false when no rule applied at all, so a caller chaining several .gitignore
+// files can let a deeper file's opinion win only when it actually has one. When
+// matched is true, ignored is the resulting state (false = negated re-include).
+func (g *Gitignore) MatchState(path string, isDir bool) (matched, ignored bool) {
 	if g == nil {
-		return false
+		return false, false
 	}
 	path = strings.TrimPrefix(path, "/")
-	ignored := false
 	for _, r := range g.rules {
 		if r.dirOnly && !isDir {
 			continue
 		}
 		if r.re.MatchString(path) {
+			matched = true
 			ignored = !r.negated
 		}
 	}
-	return ignored
+	return matched, ignored
 }
 
 // compileGitRule turns one .gitignore line into a rule. ok is false for blank

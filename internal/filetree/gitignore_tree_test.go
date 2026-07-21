@@ -88,6 +88,141 @@ func TestBuildFileTreeEntriesNilGitignore(t *testing.T) {
 	}
 }
 
+// writeTree is a test helper: writes each rel→content pair, creating parents.
+func writeTree(t *testing.T, root string, files map[string]string) {
+	t.Helper()
+	for rel, content := range files {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func dimByPath(t *testing.T, entries []FileTreeEntry) map[string]bool {
+	t.Helper()
+	out := map[string]bool{}
+	for _, e := range entries {
+		out[e.RelativePath] = e.Dimmed
+	}
+	return out
+}
+
+func corpusSet(files []string) map[string]bool {
+	set := map[string]bool{}
+	for _, f := range files {
+		set[f] = true
+	}
+	return set
+}
+
+// A .gitignore inside a subdirectory dims its matches in the tree and keeps
+// them out of the search corpus, without affecting siblings or the root.
+func TestNestedGitignore(t *testing.T) {
+	ClearDirCache()
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		"app.log":          "x", // root-level, no rule applies to it
+		"sub/.gitignore":   "*.log\n",
+		"sub/app.log":      "x",
+		"sub/app.go":       "x",
+		"sub/deep/x.log":   "x", // *.log applies at any depth below sub
+		"sub/deep/keep.go": "x",
+	})
+
+	expanded := map[string]bool{"sub": true, "sub/deep": true}
+	dim := dimByPath(t, BuildFileTreeEntries(root, expanded, nil, nil))
+
+	if !dim["sub/app.log"] {
+		t.Error("sub/app.log must be dimmed by sub/.gitignore")
+	}
+	if !dim["sub/deep/x.log"] {
+		t.Error("sub/deep/x.log must be dimmed by sub/.gitignore at depth")
+	}
+	if dim["sub/app.go"] {
+		t.Error("sub/app.go must not be dimmed")
+	}
+	if dim["app.log"] {
+		t.Error("root app.log must not be dimmed (nested rule is scoped to sub/)")
+	}
+
+	corpus := corpusSet(mustFiles(BuildAllEntries(root, nil, nil, 0)))
+	if corpus["sub/app.log"] || corpus["sub/deep/x.log"] {
+		t.Errorf("nested-gitignored files must be excluded from the corpus: %v", corpus)
+	}
+	if !corpus["sub/app.go"] || !corpus["app.log"] {
+		t.Errorf("non-ignored files must remain in the corpus: %v", corpus)
+	}
+}
+
+// A deeper .gitignore overrides a shallower one, including a `!` re-include of a
+// file the root ignores.
+func TestNestedGitignoreOverridesRoot(t *testing.T) {
+	ClearDirCache()
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		".gitignore":     "*.log\n",
+		"x.log":          "x",
+		"sub/.gitignore": "!keep.log\n",
+		"sub/keep.log":   "x", // re-included by the nested negation
+		"sub/other.log":  "x", // still ignored by the root rule
+	})
+
+	gi := LoadGitignore(root)
+	expanded := map[string]bool{"sub": true}
+	dim := dimByPath(t, BuildFileTreeEntries(root, expanded, nil, gi))
+
+	if dim["sub/keep.log"] {
+		t.Error("sub/keep.log must be re-included (not dimmed) by nested !keep.log")
+	}
+	if !dim["sub/other.log"] {
+		t.Error("sub/other.log must stay dimmed by the root *.log")
+	}
+	if !dim["x.log"] {
+		t.Error("root x.log must stay dimmed")
+	}
+
+	corpus := corpusSet(mustFiles(BuildAllEntries(root, nil, gi, 0)))
+	if !corpus["sub/keep.log"] {
+		t.Errorf("re-included sub/keep.log must be in the corpus: %v", corpus)
+	}
+	if corpus["sub/other.log"] || corpus["x.log"] {
+		t.Errorf("root-ignored *.log files must stay out of the corpus: %v", corpus)
+	}
+}
+
+// Locks in issue #2: an entry matched by the ROOT .gitignore grays even when
+// deeply nested (unanchored patterns match at any depth).
+func TestRootGitignoreDimsAtDepth(t *testing.T) {
+	ClearDirCache()
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		".gitignore":   "*.log\n",
+		"a/b/deep.log": "x",
+		"a/b/keep.go":  "x",
+	})
+
+	gi := LoadGitignore(root)
+	expanded := map[string]bool{"a": true, "a/b": true}
+	dim := dimByPath(t, BuildFileTreeEntries(root, expanded, nil, gi))
+
+	if !dim["a/b/deep.log"] {
+		t.Error("a/b/deep.log must be dimmed by root *.log at depth")
+	}
+	if dim["a/b/keep.go"] {
+		t.Error("a/b/keep.go must not be dimmed")
+	}
+}
+
+// mustFiles unwraps BuildAllEntries' (files, dirMtimes, truncated) for tests
+// that only care about the file list.
+func mustFiles(files []string, _ map[string]int64, _ bool) []string {
+	return files
+}
+
 // node_modules is soft-ignored: shown in the tree (dimmed) but kept out of the
 // search corpus, even without a .gitignore.
 func TestNodeModulesDimmedButNotSearched(t *testing.T) {

@@ -84,6 +84,44 @@ func TestCompletionEscDismissesAndSuppresses(t *testing.T) {
 	}
 }
 
+// A word boundary (Space, Enter, arrows — any non-typing key) must lift an Esc
+// dismissal so the popup auto-opens again at the next word. Regression: the
+// flag used to survive Space/Enter, leaving completion dead on new lines until
+// a punctuation rune happened to be typed.
+func TestCompletionDismissalLiftsAtWordBoundary(t *testing.T) {
+	for _, boundary := range []tea.KeyType{tea.KeySpace, tea.KeyEnter, tea.KeyLeft} {
+		m, _ := newLSPTestModel(t)
+		m = m.openFileAt("main.go")
+		m.completionOpen = true
+		m.completionItems = []lsp.CompletionItem{{Label: "Println"}}
+		m, _, _ = m.completionKey(tea.KeyMsg{Type: tea.KeyEsc})
+		if !m.completionDismissed {
+			t.Fatal("Esc must set the dismissal flag")
+		}
+
+		next, _ := m.handleEditKey(tea.KeyMsg{Type: boundary})
+		m = next.(Model)
+		if m.completionDismissed {
+			t.Fatalf("%v must lift the Esc dismissal (word boundary)", boundary)
+		}
+	}
+}
+
+// Typing more of the same word keeps the dismissal (that is the point of Esc).
+func TestCompletionDismissalPersistsMidWord(t *testing.T) {
+	m, _ := newLSPTestModel(t)
+	m = m.openFileAt("main.go")
+	m.completionOpen = true
+	m.completionItems = []lsp.CompletionItem{{Label: "Println"}}
+	m, _, _ = m.completionKey(tea.KeyMsg{Type: tea.KeyEsc})
+
+	next, _ := m.handleEditKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	m = next.(Model)
+	if !m.completionDismissed {
+		t.Fatal("typing an identifier rune must keep the dismissal")
+	}
+}
+
 func TestCompletionViewSmoke(t *testing.T) {
 	m, _ := newLSPTestModel(t)
 	m = m.openFileAt("main.go")

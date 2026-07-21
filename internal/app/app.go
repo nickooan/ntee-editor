@@ -124,6 +124,10 @@ type Model struct {
 	execInput    string
 	execCursor   int
 	execPrevMode mode
+	// Inline suggestions for the bar's trailing token (execSuggestions);
+	// execSugIndex is the ↑/↓-cycled candidate that Tab accepts.
+	execSugs     []string
+	execSugIndex int
 
 	// Fuzzy file finder overlay: Ctrl+P (whole project) and Ctrl+U (uncommitted
 	// files only) share it; fuzzyPrompt labels which source is showing.

@@ -99,38 +99,55 @@ func parseBlockAt(lines []string, start int) (conflictBlock, int, bool) {
 	return conflictBlock{}, 0, false // reached EOF unclosed
 }
 
+// conflictSide selects what replaces a resolved block.
+type conflictSide int
+
+const (
+	sideOurs   conflictSide = iota // content between <<<<<<< and ======= (minus diff3 base)
+	sideTheirs                     // content between ======= and >>>>>>>
+	sideBoth                       // ours then theirs, markers dropped
+)
+
 // matchConflictSide resolves target (case-insensitive) to a side of block b:
-// keepOurs=true when it names the ours label, false when it names theirs. ok is
-// false when it matches neither.
-func matchConflictSide(b conflictBlock, target string) (keepOurs, ok bool) {
+// the ours label, the theirs label, or the keyword "both" (kept last so a
+// branch literally named "both" still wins by label). ok is false when nothing
+// matches.
+func matchConflictSide(b conflictBlock, target string) (side conflictSide, ok bool) {
 	t := strings.ToLower(strings.TrimSpace(target))
 	switch {
 	case t == strings.ToLower(b.oursLabel):
-		return true, true
+		return sideOurs, true
 	case t == strings.ToLower(b.theirsLabel):
-		return false, true
+		return sideTheirs, true
+	case t == "both":
+		return sideBoth, true
 	default:
-		return false, false
+		return 0, false
 	}
 }
 
 // resolveConflicts replaces each block in blocks with its chosen side's content
-// (ours when keepOurs[i], else theirs; the diff3 base section is always
-// dropped) and returns the new line slice. Blocks are spliced back-to-front so
-// earlier indices stay valid; the input slice is not mutated.
-func resolveConflicts(lines []string, blocks []conflictBlock, keepOurs []bool) []string {
+// (the diff3 base section is always dropped; sideBoth keeps ours then theirs)
+// and returns the new line slice. Blocks are spliced back-to-front so earlier
+// indices stay valid; the input slice is not mutated.
+func resolveConflicts(lines []string, blocks []conflictBlock, sides []conflictSide) []string {
 	out := lines
 	for i := len(blocks) - 1; i >= 0; i-- {
 		b := blocks[i]
+		oursEnd := b.mid
+		if b.base != -1 {
+			oursEnd = b.base // stop before the diff3 base section
+		}
 		var chosen []string
-		if keepOurs[i] {
-			hi := b.mid
-			if b.base != -1 {
-				hi = b.base // stop before the diff3 base section
-			}
-			chosen = out[b.start+1 : hi]
-		} else {
+		switch sides[i] {
+		case sideOurs:
+			chosen = out[b.start+1 : oursEnd]
+		case sideTheirs:
 			chosen = out[b.mid+1 : b.end]
+		case sideBoth:
+			chosen = make([]string, 0, (oursEnd-b.start-1)+(b.end-b.mid-1))
+			chosen = append(chosen, out[b.start+1:oursEnd]...)
+			chosen = append(chosen, out[b.mid+1:b.end]...)
 		}
 		next := make([]string, 0, len(out)-(b.end-b.start))
 		next = append(next, out[:b.start]...)

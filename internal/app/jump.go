@@ -308,10 +308,16 @@ func (m Model) jumpLinePath() (string, bool) {
 	return "", false
 }
 
-// noServerError explains the missing server and how to install one —
-// "ClientFor false" usually means the binary is absent, and --prepare-lsp is
-// the remedy for that and for unmapped extensions alike.
+// noServerError explains why no server answered. The registry knows the real
+// cause (binary missing vs crashed repeatedly vs unmapped extension), so ask it
+// first — suggesting --prepare-lsp to someone whose installed server crashed
+// would send them down the wrong path.
 func (m Model) noServerError() string {
+	if m.openFile != nil {
+		if reason := m.lsp.UnavailableReason(m.openFile.Path); reason != "" {
+			return reason
+		}
+	}
 	if ext := filepath.Ext(m.openRel); ext != "" {
 		return fmt.Sprintf("no language server for %s files — try: ntee --prepare-lsp", ext)
 	}

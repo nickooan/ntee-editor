@@ -25,6 +25,11 @@ type serverClient struct {
 	root string
 	sink func(any)
 
+	// startedAt is when this client was constructed (immediately before its
+	// process spawns); immutable, so read without the lock. The registry uses
+	// it to tell a long-lived server's crash from a startup crash-loop.
+	startedAt time.Time
+
 	mu       sync.Mutex
 	conn     *Conn
 	cmd      *exec.Cmd
@@ -91,12 +96,13 @@ func (t *tailBuffer) String() string {
 
 func newServerClient(lang string, conf config.LSPServerConfig, root string, sink func(any)) *serverClient {
 	return &serverClient{
-		lang:     lang,
-		conf:     conf,
-		root:     root,
-		sink:     sink,
-		versions: map[string]int{},
-		folders:  map[string]bool{root: true}, // the initial workspace folder
+		lang:      lang,
+		conf:      conf,
+		root:      root,
+		sink:      sink,
+		versions:  map[string]int{},
+		folders:   map[string]bool{root: true}, // the initial workspace folder
+		startedAt: time.Now(),
 	}
 }
 
@@ -324,6 +330,20 @@ func crashReason(s string) string {
 	return ""
 }
 
+// isDead reports whether the server process has exited (crash or stop). The
+// registry uses it to replace the corpse with a fresh server on next demand.
+func (c *serverClient) isDead() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.dead
+}
+
+// uptime is how long this client has existed — for a dead one, roughly how long
+// the server ran before crashing.
+func (c *serverClient) uptime() time.Duration {
+	return time.Since(c.startedAt)
+}
+
 // run executes a doc-sync op now, or queues it until initialize completes.
 func (c *serverClient) run(op func()) {
 	c.mu.Lock()
@@ -388,10 +408,24 @@ func (c *serverClient) EnsureFolder(repo string) {
 func (c *serverClient) DidChange(path, content string, _ int) {
 	c.run(func() {
 		c.mu.Lock()
+		_, opened := c.versions[path]
 		c.versions[path]++
 		version := c.versions[path]
 		conn := c.conn
 		c.mu.Unlock()
+		if !opened {
+			// The doc was never opened on THIS client — e.g. the server was
+			// restarted after a crash and the file predates it. Servers drop a
+			// didChange for an unknown doc, so upgrade it to didOpen: the full
+			// content is the same either way (full sync).
+			_ = conn.Notify("textDocument/didOpen", didOpenParams{TextDocument: textDocumentItem{
+				URI:        PathToURI(path),
+				LanguageID: languageIDFor(path, c.lang),
+				Version:    version,
+				Text:       content,
+			}})
+			return
+		}
 		_ = conn.Notify("textDocument/didChange", didChangeParams{
 			TextDocument:   versionedTextDocumentIdentifier{URI: PathToURI(path), Version: version},
 			ContentChanges: []contentChange{{Text: content}}, // full sync

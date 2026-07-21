@@ -59,9 +59,14 @@ func TestFindConflictBlocksDiff3(t *testing.T) {
 		t.Fatalf("diff3 indices = %+v", b)
 	}
 	// Keeping ours must stop before the base section.
-	out := resolveConflicts(lines, []conflictBlock{b}, []bool{true})
+	out := resolveConflicts(lines, []conflictBlock{b}, []conflictSide{sideOurs})
 	if strings.Join(out, "\n") != "ours" {
 		t.Fatalf("diff3 ours resolve = %q", out)
+	}
+	// "both" drops the base section too: ours then theirs only.
+	out = resolveConflicts(lines, []conflictBlock{b}, []conflictSide{sideBoth})
+	if strings.Join(out, "\n") != "ours\ntheirs" {
+		t.Fatalf("diff3 both resolve = %q", out)
 	}
 }
 
@@ -108,10 +113,16 @@ func TestResolveConflictsMultiple(t *testing.T) {
 		t.Fatalf("want 2 blocks, got %d", len(blocks))
 	}
 	// Keep ours in the first, theirs in the second.
-	out := resolveConflicts(lines, blocks, []bool{true, false})
+	out := resolveConflicts(lines, blocks, []conflictSide{sideOurs, sideTheirs})
 	want := "top\nours1\nmiddle\ntheirs2\nbottom"
 	if got := strings.Join(out, "\n"); got != want {
 		t.Fatalf("resolve = %q, want %q", got, want)
+	}
+	// Both sides in the first, ours in the second.
+	out = resolveConflicts(lines, blocks, []conflictSide{sideBoth, sideOurs})
+	want = "top\nours1\ntheirs1\nmiddle\nours2\nbottom"
+	if got := strings.Join(out, "\n"); got != want {
+		t.Fatalf("both resolve = %q, want %q", got, want)
 	}
 	// Input slice must be untouched.
 	if lines[1] != "<<<<<<< HEAD" {
@@ -121,14 +132,22 @@ func TestResolveConflictsMultiple(t *testing.T) {
 
 func TestMatchConflictSide(t *testing.T) {
 	b := conflictBlock{oursLabel: "HEAD", theirsLabel: "feature/login"}
-	if ko, ok := matchConflictSide(b, "head"); !ok || !ko {
-		t.Errorf("head: ko=%v ok=%v, want true/true", ko, ok)
+	if side, ok := matchConflictSide(b, "head"); !ok || side != sideOurs {
+		t.Errorf("head: side=%v ok=%v, want sideOurs/true", side, ok)
 	}
-	if ko, ok := matchConflictSide(b, "Feature/Login"); !ok || ko {
-		t.Errorf("branch: ko=%v ok=%v, want false/true", ko, ok)
+	if side, ok := matchConflictSide(b, "Feature/Login"); !ok || side != sideTheirs {
+		t.Errorf("branch: side=%v ok=%v, want sideTheirs/true", side, ok)
+	}
+	if side, ok := matchConflictSide(b, "both"); !ok || side != sideBoth {
+		t.Errorf("both: side=%v ok=%v, want sideBoth/true", side, ok)
 	}
 	if _, ok := matchConflictSide(b, "nope"); ok {
 		t.Error("unmatched target must report ok=false")
+	}
+	// A branch literally named "both" wins by label over the keyword.
+	bb := conflictBlock{oursLabel: "HEAD", theirsLabel: "both"}
+	if side, ok := matchConflictSide(bb, "both"); !ok || side != sideTheirs {
+		t.Errorf("label-named both: side=%v ok=%v, want sideTheirs/true", side, ok)
 	}
 }
 
@@ -198,6 +217,28 @@ func TestExecGitScfKeepsTheirsBySelection(t *testing.T) {
 	}
 	if strings.Contains(got, "<<<<<<<") {
 		t.Fatalf("markers remain: %q", got)
+	}
+}
+
+func TestExecGitScfBothKeepsBothSides(t *testing.T) {
+	m := conflictFixture(t, 2) // cursor on the <<<<<<< line
+	m = ctrl(m, tea.KeyCtrlE)
+	m = runes(m, "git scf both")
+	m = ctrl(m, tea.KeyEnter)
+
+	got := m.edit.content()
+	if !strings.Contains(got, `"prod"`) || !strings.Contains(got, `"dev"`) {
+		t.Fatalf("both sides must be kept: %q", got)
+	}
+	// Ours must come before theirs, markers gone.
+	if strings.Index(got, `"prod"`) > strings.Index(got, `"dev"`) {
+		t.Fatalf("ours must precede theirs: %q", got)
+	}
+	if strings.Contains(got, "<<<<<<<") || strings.Contains(got, "=======") || strings.Contains(got, ">>>>>>>") {
+		t.Fatalf("markers must be removed: %q", got)
+	}
+	if m.mode != modeEdit {
+		t.Fatalf("should return to edit mode, got %v", m.mode)
 	}
 }
 

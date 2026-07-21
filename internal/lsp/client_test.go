@@ -145,6 +145,93 @@ func TestClientDocSyncAndDefinition(t *testing.T) {
 	}
 }
 
+// A DidChange for a doc this client never opened (e.g. after a crash restart:
+// the file was opened on the dead predecessor) must upgrade to didOpen — most
+// servers silently drop a didChange for an unknown document.
+func TestDidChangeUpgradesToDidOpenForUnopenedDoc(t *testing.T) {
+	c, server := startTestClient(t, nil)
+
+	c.DidChange("/proj/a.go", "package a", 0)
+	waitFor(t, func() bool {
+		server.mu.Lock()
+		defer server.mu.Unlock()
+		return len(server.opened) == 1
+	})
+	server.mu.Lock()
+	if len(server.changed) != 0 {
+		t.Fatalf("first sync of an unopened doc must be didOpen, saw didChange %v", server.changed)
+	}
+	server.mu.Unlock()
+
+	// Now the doc is known: the next DidChange is a plain didChange.
+	c.DidChange("/proj/a.go", "package a // x", 0)
+	waitFor(t, func() bool {
+		server.mu.Lock()
+		defer server.mu.Unlock()
+		return len(server.changed) == 1
+	})
+	server.mu.Lock()
+	if len(server.opened) != 1 || server.changed[0] != 2 {
+		t.Fatalf("second sync: opened=%v changed=%v", server.opened, server.changed)
+	}
+	server.mu.Unlock()
+}
+
+// A dead server must be replaced on next demand instead of leaving the language
+// silently broken for the session, and give up after maxServerRestarts.
+func TestManagerReplacesDeadServer(t *testing.T) {
+	msgs := make(chan any, 8)
+	cfg := config.Config{Languages: map[string]config.LanguageConfig{
+		// "true" exists everywhere and exits instantly — good enough: the test
+		// only exercises the registry's replacement logic, not the handshake.
+		"go": {Extensions: []string{".go"}, LSP: &config.LSPServerConfig{Command: "true"}},
+	}}
+	m := NewManager(cfg, "/tmp")
+	m.SetSink(func(msg any) { msgs <- msg })
+
+	// Seed a corpse: a client already marked dead, as after a crash.
+	corpse := newServerClient("go", config.LSPServerConfig{Command: "true"}, "/tmp", m.emit)
+	corpse.dead = true
+	m.clients["go"] = corpse
+
+	got, ok := m.ClientFor("/tmp/a.go")
+	if !ok {
+		t.Fatal("a dead server must be replaced, not reported unavailable")
+	}
+	if got == Client(corpse) {
+		t.Fatal("ClientFor returned the dead client instead of a replacement")
+	}
+	if m.restarts["go"] != 1 {
+		t.Fatalf("restarts = %d, want 1", m.restarts["go"])
+	}
+
+	// Crash-loop: after maxServerRestarts replacements the language disables.
+	for i := m.restarts["go"]; i < maxServerRestarts; i++ {
+		m.mu.Lock()
+		c := m.clients["go"]
+		m.mu.Unlock()
+		c.mu.Lock()
+		c.dead = true
+		c.mu.Unlock()
+		m.ClientFor("/tmp/a.go")
+	}
+	if m.disabled["go"] == "" {
+		t.Fatal("language must disable after repeated crashes")
+	}
+	if _, ok := m.ClientFor("/tmp/a.go"); ok {
+		t.Fatal("disabled language must not hand out clients")
+	}
+	// The disable reason surfaces through UnavailableReason (what Ctrl+J shows),
+	// naming the crash — not the misleading --prepare-lsp install hint.
+	if r := m.UnavailableReason("/tmp/a.go"); !strings.Contains(r, "crashed repeatedly") {
+		t.Fatalf("UnavailableReason = %q, want a crashed-repeatedly explanation", r)
+	}
+	if r := m.UnavailableReason("/tmp/x.unknown"); !strings.Contains(r, "--prepare-lsp") {
+		t.Fatalf("unmapped ext should keep the install hint, got %q", r)
+	}
+	m.ShutdownAll()
+}
+
 func TestDiagnosticsReachSink(t *testing.T) {
 	msgs := make(chan any, 4)
 	c, server := startTestClient(t, func(m any) { msgs <- m })

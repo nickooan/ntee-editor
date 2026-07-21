@@ -41,6 +41,12 @@ func (m Model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if msg.Type != tea.KeyRunes && msg.Type != tea.KeyBackspace {
 			m = m.closeCompletion()
 		}
+	} else if msg.Type != tea.KeyRunes && msg.Type != tea.KeyBackspace {
+		// Any non-typing key is a word boundary: lift an Esc dismissal so the
+		// popup auto-opens again at the next word. Without this, one Esc kept
+		// completion suppressed across new lines until a punctuation rune was
+		// typed (Space/Enter never went through afterEditType).
+		m.completionDismissed = false
 	}
 
 	switch msg.Type {

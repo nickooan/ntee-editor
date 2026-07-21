@@ -17,27 +17,54 @@ func (m Model) enterExec() Model {
 	m.execInput = ""
 	m.execCursor = 0
 	m.mode = modeExec
+	return m.refreshExecSugs()
+}
+
+// refreshExecSugs recomputes the inline suggestions for the current input and
+// resets the highlight to the first candidate.
+func (m Model) refreshExecSugs() Model {
+	m.execSugs = m.execSuggestions(m.execInput)
+	m.execSugIndex = 0
 	return m
 }
 
 // handleExecKey drives the @exec command bar. Text editing mirrors the : command
-// bar (handleCommandKey); Enter runs the typed editor command.
+// bar (handleCommandKey); Enter runs the typed editor command; Tab accepts the
+// highlighted inline suggestion and ↑/↓ cycle it.
 func (m Model) handleExecKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyEsc:
 		m.mode = m.execPrevMode
 	case tea.KeyEnter:
 		return m.runExecCommand(strings.TrimSpace(m.execInput))
+	case tea.KeyTab:
+		if len(m.execSugs) > 0 {
+			sel := m.execSugs[input.Clamp(m.execSugIndex, 0, len(m.execSugs)-1)]
+			m.execInput = acceptExecSuggestion(m.execInput, sel)
+			m.execCursor = len([]rune(m.execInput))
+			m = m.refreshExecSugs()
+		}
+	case tea.KeyDown:
+		if n := len(m.execSugs); n > 0 {
+			m.execSugIndex = (m.execSugIndex + 1) % n
+		}
+	case tea.KeyUp:
+		if n := len(m.execSugs); n > 0 {
+			m.execSugIndex = (m.execSugIndex + n - 1) % n
+		}
 	case tea.KeyLeft:
 		m.execCursor = input.MoveCursor(m.execInput, m.execCursor, -1)
 	case tea.KeyRight:
 		m.execCursor = input.MoveCursor(m.execInput, m.execCursor, 1)
 	case tea.KeyBackspace:
 		m.execInput, m.execCursor, _ = input.RemoveBeforeCursor(m.execInput, m.execCursor)
+		m = m.refreshExecSugs()
 	case tea.KeySpace:
 		m.execInput, m.execCursor = input.InsertAtCursor(m.execInput, m.execCursor, " ")
+		m = m.refreshExecSugs()
 	case tea.KeyRunes:
 		m.execInput, m.execCursor = input.InsertAtCursor(m.execInput, m.execCursor, string(msg.Runes))
+		m = m.refreshExecSugs()
 	}
 	return m, nil
 }
@@ -127,11 +154,12 @@ func (m Model) execGit(arg string) Model {
 // execSolveConflict resolves the git conflict block(s) touching the current
 // line-wise selection (or the cursor line when nothing is selected), keeping the
 // side whose marker label matches target (case-insensitive, e.g. "head" or a
-// branch name) and deleting the markers and the losing side. The whole resolve
-// is one undoable snapshot. On any error it edits nothing and stays in exec mode.
+// branch name) — or both sides in order for "both" — and deleting the markers
+// and any losing content. The whole resolve is one undoable snapshot. On any
+// error it edits nothing and stays in exec mode.
 func (m Model) execSolveConflict(target string) Model {
 	if target == "" {
-		m.errText = "git scf needs a side (e.g. head or a branch name)"
+		m.errText = "git scf needs a side (head, a branch name, or both)"
 		return m
 	}
 	blocks := findConflictBlocks(m.edit.lines)
@@ -171,19 +199,19 @@ func (m Model) execSolveConflict(target string) Model {
 
 	// Validate the target against every intersecting block before touching the
 	// buffer, so a bad label leaves it untouched (no partial resolve).
-	keepOurs := make([]bool, len(sel))
+	sides := make([]conflictSide, len(sel))
 	for i, b := range sel {
-		ko, ok := matchConflictSide(b, target)
+		side, ok := matchConflictSide(b, target)
 		if !ok {
 			m.errText = "git scf: '" + target + "' matches neither side (" +
-				b.oursLabel + " | " + b.theirsLabel + ")"
+				b.oursLabel + " | " + b.theirsLabel + " | both)"
 			return m
 		}
-		keepOurs[i] = ko
+		sides[i] = side
 	}
 
 	m = m.flushBurst() // checkpoint pending typing as the undo pre-state
-	newLines := resolveConflicts(m.edit.lines, sel, keepOurs)
+	newLines := resolveConflicts(m.edit.lines, sel, sides)
 	m.edit.lines = newLines
 	m.edit.cy = input.Clamp(sel[0].start, 0, len(newLines)-1)
 	m.edit.cx = 0

@@ -101,7 +101,7 @@ func (m Model) renderStatusLine() string {
 		// The @exec bar replaces the @edit status line while active (the @edit
 		// line returns on exit); its lighter dark background signals the mode.
 		bar := execPromptStyle.Render("@exec >") + renderInputLineStyled(m.execInput, m.execCursor, execTextStyle) +
-			execHintStyle.Render("   copy [a-b|all|fpath] · jump <line|top|end> · tab <name|cl|cr> · git scf <side> · Esc cancel")
+			"   " + m.renderExecSugs()
 		// Pre-pad to full width in the exec background so padStatusRows (which
 		// pads with the chrome style) leaves this row's color intact.
 		if pad := m.width - lipgloss.Width(bar); pad > 0 {
@@ -229,6 +229,32 @@ func (m Model) renderSidebar(width, height int) string {
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// renderExecSugs renders the @exec bar's inline suggestion strip: candidates
+// for the trailing token joined with · , the Tab-acceptable one highlighted,
+// capped at 6 with a +N overflow. With no candidates it falls back to the
+// static usage hint.
+func (m Model) renderExecSugs() string {
+	if len(m.execSugs) == 0 {
+		return execHintStyle.Render("copy [a-b|all|fpath] · jump <line|top|end> · tab <name|cl|cr> · git scf <side> · Esc cancel")
+	}
+	const maxShown = 6
+	sel := input.Clamp(m.execSugIndex, 0, len(m.execSugs)-1)
+	var parts []string
+	for i, s := range m.execSugs {
+		if i >= maxShown {
+			parts = append(parts, execHintStyle.Render(fmt.Sprintf("+%d", len(m.execSugs)-maxShown)))
+			break
+		}
+		if i == sel {
+			parts = append(parts, execSugSelStyle.Render(s))
+		} else {
+			parts = append(parts, execHintStyle.Render(s))
+		}
+	}
+	strip := strings.Join(parts, execHintStyle.Render(" · "))
+	return strip + execHintStyle.Render("   Tab complete · ↑/↓ pick · Esc cancel")
 }
 
 // renderQueryMain shows the open file (view-style) with the suggestion popup
@@ -906,6 +932,7 @@ var (
 	execPromptStyle = lipgloss.NewStyle().Foreground(colAqua).Bold(true).Background(colLineHl)
 	execTextStyle   = lipgloss.NewStyle().Foreground(colFg).Background(colLineHl)
 	execHintStyle   = lipgloss.NewStyle().Foreground(colComment).Background(colLineHl)
+	execSugSelStyle = lipgloss.NewStyle().Foreground(colYellow).Bold(true).Background(colLineHl) // Tab-acceptable suggestion
 
 	gutterErrStyle  = lipgloss.NewStyle().Foreground(colRed).Background(colBg)
 	gutterWarnStyle = lipgloss.NewStyle().Foreground(colYellow).Background(colBg)

@@ -53,6 +53,7 @@ func (s *stubClient) Completion(string, int, int) ([]lsp.CompletionItem, error) 
 type stubRegistry struct{ client *stubClient }
 
 func (r stubRegistry) ClientFor(string) (lsp.Client, bool) { return r.client, true }
+func (r stubRegistry) UnavailableReason(string) string     { return "" }
 func (r stubRegistry) ShutdownAll()                        {}
 
 func newLSPTestModel(t *testing.T) (Model, *stubClient) {

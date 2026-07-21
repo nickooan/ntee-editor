@@ -100,14 +100,14 @@ func (m Model) executeCommand(cmd string) (tea.Model, tea.Cmd) {
 		// restored cmdPrevMode); close verbs just prune the tab list.
 		m, _ = m.tabCommand(arg)
 
-	case "recent":
-		return m.openFuzzy()
-
 	case "refresh":
 		// Force a full rebuild now, dropping the mtime-keyed dir cache so even
 		// same-second external changes are picked up.
 		filetree.ClearDirCache()
 		m.corpusRebuilding = true
+		if m.gitRepo {
+			return m, tea.Batch(m.rebuildCorpusCmd(), m.refreshGitStatusCmd())
+		}
 		return m, m.rebuildCorpusCmd()
 
 	default:
@@ -143,9 +143,42 @@ func (m Model) openFuzzy() (Model, tea.Cmd) {
 	m.fuzzyOpen = true
 	m.fuzzyQuery = ""
 	m.fuzzyIndex = 0
+	m.fuzzyPrompt = "goto "
 	m.fuzzyCorpus = fuzzy.Prepare(ordered)
 	m.fuzzyMatches = fuzzy.Filter("", m.fuzzyCorpus)
 	return m, cmd
+}
+
+// openUncommitted opens the Ctrl+U finder: the same fuzzy overlay as Ctrl+P,
+// but its corpus is only the files with uncommitted git changes (the corpus ∩
+// gitDirty intersection — dirs, deleted files, and rename origins in the dirty
+// set are never in the walk corpus, so only openable files remain). A fresh
+// status refresh is batched so the set stays honest for the next open.
+func (m Model) openUncommitted() (Model, tea.Cmd) {
+	if !m.gitRepo {
+		m.errText = "not a git repository"
+		return m, nil
+	}
+	m = m.closeCompletion()
+	m, cmd := m.ensureCorpus()
+	var ordered []string
+	for _, rel := range m.corpus {
+		if m.gitDirty[rel] {
+			ordered = append(ordered, rel)
+		}
+	}
+	if len(ordered) == 0 {
+		m.notice = "no uncommitted files"
+		return m, tea.Batch(cmd, m.refreshGitStatusCmd())
+	}
+
+	m.fuzzyOpen = true
+	m.fuzzyQuery = ""
+	m.fuzzyIndex = 0
+	m.fuzzyPrompt = "uncommitted "
+	m.fuzzyCorpus = fuzzy.Prepare(ordered)
+	m.fuzzyMatches = fuzzy.Filter("", m.fuzzyCorpus)
+	return m, tea.Batch(cmd, m.refreshGitStatusCmd())
 }
 
 // closeFuzzy hides the finder and releases the prepared corpus. That slice can
@@ -157,12 +190,13 @@ func (m Model) closeFuzzy() Model {
 	m.fuzzyMatches = nil
 	m.fuzzyQuery = ""
 	m.fuzzyIndex = 0
+	m.fuzzyPrompt = ""
 	return m
 }
 
 func (m Model) handleFuzzyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
-	case tea.KeyEsc, tea.KeyCtrlP:
+	case tea.KeyEsc, tea.KeyCtrlP, tea.KeyCtrlU:
 		m = m.closeFuzzy()
 	case tea.KeyEnter:
 		if len(m.fuzzyMatches) == 0 {

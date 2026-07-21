@@ -46,6 +46,27 @@ func TestGitignoreMatch(t *testing.T) {
 	}
 }
 
+func TestGitignoreMatchState(t *testing.T) {
+	g := CompileGitignore([]string{"*.log", "!keep.log"})
+
+	if matched, ignored := g.MatchState("a.log", false); !matched || !ignored {
+		t.Errorf("a.log: matched=%v ignored=%v, want true/true", matched, ignored)
+	}
+	// keep.log is matched (by both rules) but re-included, so ignored is false.
+	if matched, ignored := g.MatchState("keep.log", false); !matched || ignored {
+		t.Errorf("keep.log: matched=%v ignored=%v, want true/false", matched, ignored)
+	}
+	// An unmatched path must report matched=false so a chained deeper file wins.
+	if matched, _ := g.MatchState("main.go", false); matched {
+		t.Error("main.go: matched=true, want false (no rule applied)")
+	}
+
+	var nilG *Gitignore
+	if matched, _ := nilG.MatchState("x.log", false); matched {
+		t.Error("nil matcher must report matched=false")
+	}
+}
+
 func TestGitignoreNilMatchesNothing(t *testing.T) {
 	var g *Gitignore
 	if g.Match("anything.log", false) {

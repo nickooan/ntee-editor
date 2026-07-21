@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	nteedb "github.com/nickooan/ntee-db/nteedb-core"
 )
@@ -98,6 +99,7 @@ type CorpusIndex struct {
 type Backend interface {
 	TouchOpened(f OpenedFile) error
 	RecentFiles(limit int) []OpenedFile
+	DeleteOpenedUnder(rel string) error
 	SnapshotPut(path string, seq int64, kind, content string) error
 	SnapshotGet(seq int64) (Snapshot, bool)
 	SnapshotDelete(seqs []int64)
@@ -203,6 +205,24 @@ func (s *Store) RecentFiles(limit int) []OpenedFile {
 		out = out[:limit]
 	}
 	return out
+}
+
+// DeleteOpenedUnder drops the recent-visit records for rel and everything
+// beneath it — called when a file or directory is removed from disk, so the
+// dead paths don't linger in the store. The scan prefix alone is not enough:
+// "lib" must not also match "library/…", hence the path-boundary filter.
+func (s *Store) DeleteOpenedUnder(rel string) error {
+	keys, err := s.db.PrefixScan(openedPrefix + rel)
+	if err != nil {
+		return err
+	}
+	exact, dirPrefix := openedPrefix+rel, openedPrefix+rel+"/"
+	for _, k := range keys {
+		if k == exact || strings.HasPrefix(k, dirPrefix) {
+			_ = s.db.Delete(k)
+		}
+	}
+	return nil
 }
 
 func (s *Store) SnapshotPut(path string, seq int64, kind, content string) error {

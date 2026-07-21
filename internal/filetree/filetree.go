@@ -22,6 +22,7 @@ type FileTreeEntry struct {
 	Type         string // "directory" | "file"
 	IsExpanded   bool
 	Dimmed       bool // shown in the tree but excluded from search (gitignore match or node_modules) — rendered gray
+	Uncommitted  bool // has uncommitted git changes (or, for a dir, contains one) — rendered yellow
 }
 
 type dirChild struct {
@@ -35,18 +36,118 @@ type cachedDir struct {
 	entries []dirChild
 }
 
+type cachedGitignore struct {
+	mtime time.Time
+	gi    *Gitignore
+}
+
 var (
 	dirCacheMu sync.Mutex
 	dirCache   = map[string]cachedDir{}
+
+	gitignoreCacheMu sync.Mutex
+	gitignoreCache   = map[string]cachedGitignore{}
 )
 
-// ClearDirCache drops all cached directory listings so the next walk re-reads
-// from disk. Used by the manual :refresh to pick up changes that mtime
-// comparison would miss (e.g. a same-second external edit).
+// ClearDirCache drops all cached directory listings and compiled nested
+// .gitignore matchers so the next walk re-reads from disk. Used by the manual
+// :refresh to pick up changes that mtime comparison would miss (e.g. a
+// same-second external edit).
 func ClearDirCache() {
 	dirCacheMu.Lock()
 	dirCache = map[string]cachedDir{}
 	dirCacheMu.Unlock()
+	gitignoreCacheMu.Lock()
+	gitignoreCache = map[string]cachedGitignore{}
+	gitignoreCacheMu.Unlock()
+}
+
+// scopedGitignore is one matcher in the chain applied during a walk. dir is the
+// root-relative directory the matcher is rooted at ("" = root); paths are tested
+// relative to it.
+type scopedGitignore struct {
+	dir string
+	gi  *Gitignore
+}
+
+// chainIgnored reports whether a root-relative path is ignored by a chain of
+// directory-scoped .gitignore matchers (shallow to deep). Each scope tests the
+// path relative to its own directory; a deeper file's opinion overrides a
+// shallower one (git's last-match-wins across levels, including `!` negation).
+func chainIgnored(chain []scopedGitignore, rel string, isDir bool) bool {
+	ignored := false
+	for _, sc := range chain {
+		sub := rel
+		if sc.dir != "" {
+			sub = strings.TrimPrefix(rel, sc.dir+"/")
+		}
+		if matched, ig := sc.gi.MatchState(sub, isDir); matched {
+			ignored = ig
+		}
+	}
+	return ignored
+}
+
+// loadNestedGitignore reads and compiles <absDir>/.gitignore, returning nil when
+// absent. Compiled matchers are cached by path and the .gitignore file's own
+// mtime (content edits do not bump the parent dir's mtime), so the per-keystroke
+// tree walk does not re-read or recompile regexes while a directory sits open.
+// Callers should invoke it only for directories whose listing actually contains
+// a .gitignore, so a directory without one costs no syscall here.
+func loadNestedGitignore(absDir string) *Gitignore {
+	p := filepath.Join(absDir, ".gitignore")
+	info, err := os.Stat(p)
+	if err != nil {
+		return nil
+	}
+	mtime := info.ModTime()
+
+	gitignoreCacheMu.Lock()
+	cached, ok := gitignoreCache[p]
+	gitignoreCacheMu.Unlock()
+	if ok && cached.mtime.Equal(mtime) {
+		return cached.gi
+	}
+
+	data, err := os.ReadFile(p)
+	if err != nil {
+		return nil
+	}
+	gi := CompileGitignore(strings.Split(string(data), "\n"))
+
+	gitignoreCacheMu.Lock()
+	gitignoreCache[p] = cachedGitignore{mtime: mtime, gi: gi}
+	gitignoreCacheMu.Unlock()
+	return gi
+}
+
+// hasGitignore reports whether a directory listing contains a regular
+// .gitignore file, so the walk can skip loadNestedGitignore entirely for the
+// overwhelming majority of directories that have none.
+func hasGitignore(children []dirChild) bool {
+	for _, c := range children {
+		if c.isFile && c.name == ".gitignore" {
+			return true
+		}
+	}
+	return false
+}
+
+// extendChain appends a scope for dirPath's own .gitignore (when present in
+// children) to chain, returning a chain safe to hand to child recursions. A
+// full-slice-expression append keeps sibling recursions from aliasing a shared
+// backing array, and allocates only at directories that actually have a
+// .gitignore. dirPath "" (the root) is skipped: the root matcher is seeded by
+// the caller from the passed-in gi.
+func extendChain(chain []scopedGitignore, dirPath, absDir string, children []dirChild) []scopedGitignore {
+	if dirPath == "" || !hasGitignore(children) {
+		return chain
+	}
+	gi := loadNestedGitignore(absDir)
+	if gi == nil {
+		return chain
+	}
+	return append(chain[:len(chain):len(chain)], scopedGitignore{dir: dirPath, gi: gi})
 }
 
 func readDirectorySorted(path string) ([]dirChild, time.Time, error) {
@@ -161,8 +262,8 @@ func FindRepoRoot(editorRoot, filePath string) string {
 // server scopes to hundreds of files instead of the whole repo.
 var projectMarkers = []string{
 	"tsconfig.json", "jsconfig.json", "package.json", // JS/TS
-	"go.mod",                                 // Go
-	"Cargo.toml",                             // Rust
+	"go.mod",                                  // Go
+	"Cargo.toml",                              // Rust
 	"pyproject.toml", "setup.py", "setup.cfg", // Python
 	"pom.xml", "build.gradle", "build.gradle.kts", // JVM
 	"Gemfile", // Ruby
@@ -230,8 +331,11 @@ func softIgnored(name string) bool {
 // relative paths are in expanded. Hard-ignored names (.git, config tree.ignore)
 // are skipped entirely. Entries matched by gi, nested under a dimmed directory,
 // or soft-ignored (node_modules) are shown but flagged Dimmed (rendered gray and
-// excluded from search); gi may be nil to disable gitignore matching.
-func BuildFileTreeEntries(root string, expanded map[string]bool, ignore []string, gi *Gitignore) []FileTreeEntry {
+// excluded from search); gi may be nil to disable gitignore matching. dirty is
+// the GitDirtySet (paths with uncommitted changes plus their ancestor dirs, so
+// a collapsed dir flags too); entries in it are flagged Uncommitted (rendered
+// yellow). nil disables git-status flagging.
+func BuildFileTreeEntries(root string, expanded map[string]bool, ignore []string, gi *Gitignore, dirty map[string]bool) []FileTreeEntry {
 	if root == "" {
 		return nil
 	}
@@ -240,9 +344,16 @@ func BuildFileTreeEntries(root string, expanded map[string]bool, ignore []string
 		return nil
 	}
 
+	// The chain of directory-scoped .gitignore matchers applying to the current
+	// directory's children, seeded with the root .gitignore (gi may be nil).
+	var rootChain []scopedGitignore
+	if gi != nil {
+		rootChain = []scopedGitignore{{dir: "", gi: gi}}
+	}
+
 	var entries []FileTreeEntry
-	var appendDir func(dirPath string, depth int, parentIgnored bool)
-	appendDir = func(dirPath string, depth int, parentIgnored bool) {
+	var appendDir func(dirPath string, depth int, parentIgnored bool, chain []scopedGitignore)
+	appendDir = func(dirPath string, depth int, parentIgnored bool, chain []scopedGitignore) {
 		resolvedDir := filepath.Join(resolvedRoot, dirPath)
 		if !isInsideRoot(resolvedRoot, resolvedDir) {
 			return
@@ -251,6 +362,7 @@ func BuildFileTreeEntries(root string, expanded map[string]bool, ignore []string
 		if err != nil {
 			return
 		}
+		chain = extendChain(chain, dirPath, resolvedDir, children)
 
 		for _, child := range children {
 			if hardIgnored(child.name, ignore) {
@@ -262,7 +374,7 @@ func BuildFileTreeEntries(root string, expanded map[string]bool, ignore []string
 			}
 			// Once a directory is dimmed (gitignored or soft-ignored), everything
 			// under it inherits it.
-			dim := parentIgnored || softIgnored(child.name) || gi.Match(rel, child.isDir)
+			dim := parentIgnored || softIgnored(child.name) || chainIgnored(chain, rel, child.isDir)
 
 			if child.isDir {
 				isExpanded := expanded[rel]
@@ -274,9 +386,10 @@ func BuildFileTreeEntries(root string, expanded map[string]bool, ignore []string
 					Type:         "directory",
 					IsExpanded:   isExpanded,
 					Dimmed:       dim,
+					Uncommitted:  dirty[rel],
 				})
 				if isExpanded {
-					appendDir(rel, depth+1, dim)
+					appendDir(rel, depth+1, dim, chain)
 				}
 				continue
 			}
@@ -290,11 +403,12 @@ func BuildFileTreeEntries(root string, expanded map[string]bool, ignore []string
 				Depth:        depth,
 				Type:         "file",
 				Dimmed:       dim,
+				Uncommitted:  dirty[rel],
 			})
 		}
 	}
 
-	appendDir("", 0, false)
+	appendDir("", 0, false, rootChain)
 	return entries
 }
 
@@ -320,8 +434,13 @@ func BuildAllEntries(root string, ignore []string, gi *Gitignore, maxFiles int) 
 		return nil, dirMtimes, false
 	}
 
-	var appendDir func(dirPath string, depth int)
-	appendDir = func(dirPath string, depth int) {
+	var rootChain []scopedGitignore
+	if gi != nil {
+		rootChain = []scopedGitignore{{dir: "", gi: gi}}
+	}
+
+	var appendDir func(dirPath string, depth int, chain []scopedGitignore)
+	appendDir = func(dirPath string, depth int, chain []scopedGitignore) {
 		if truncated || depth > maxScanDepth {
 			return
 		}
@@ -334,6 +453,7 @@ func BuildAllEntries(root string, ignore []string, gi *Gitignore, maxFiles int) 
 			return
 		}
 		dirMtimes[dirPath] = mtime.UnixNano()
+		chain = extendChain(chain, dirPath, resolvedDir, children)
 		for _, child := range children {
 			// Hard- and soft-ignored names (.git, config tree.ignore, node_modules)
 			// are both kept out of the search corpus.
@@ -346,11 +466,11 @@ func BuildAllEntries(root string, ignore []string, gi *Gitignore, maxFiles int) 
 			}
 			// Gitignored entries are kept out of the search corpus entirely; a
 			// gitignored directory is not descended, so its subtree is excluded.
-			if gi.Match(rel, child.isDir) {
+			if chainIgnored(chain, rel, child.isDir) {
 				continue
 			}
 			if child.isDir {
-				appendDir(rel, depth+1)
+				appendDir(rel, depth+1, chain)
 				if truncated {
 					return
 				}
@@ -366,7 +486,7 @@ func BuildAllEntries(root string, ignore []string, gi *Gitignore, maxFiles int) 
 		}
 	}
 
-	appendDir("", 0)
+	appendDir("", 0, rootChain)
 	return files, dirMtimes, truncated
 }
 

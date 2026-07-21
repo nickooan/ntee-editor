@@ -1,6 +1,9 @@
 package store
 
-import "sort"
+import (
+	"sort"
+	"strings"
+)
 
 // Memory is the in-process fallback Backend used when the project's ntee-db
 // store cannot be opened (typically: another editor instance holds the flock).
@@ -39,6 +42,15 @@ func (m *Memory) RecentFiles(limit int) []OpenedFile {
 		out = out[:limit]
 	}
 	return out
+}
+
+func (m *Memory) DeleteOpenedUnder(rel string) error {
+	for p := range m.opened {
+		if p == rel || strings.HasPrefix(p, rel+"/") {
+			delete(m.opened, p)
+		}
+	}
+	return nil
 }
 
 func (m *Memory) SnapshotPut(path string, seq int64, kind, content string) error {

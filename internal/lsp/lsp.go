@@ -41,6 +41,11 @@ type Client interface {
 // Registry resolves the client responsible for a file path, if any.
 type Registry interface {
 	ClientFor(path string) (Client, bool)
+	// UnavailableReason explains why ClientFor returns false for path — e.g.
+	// "binary not found" vs "crashed repeatedly" — so the UI can show the real
+	// cause instead of a generic install hint. "" when a client is available
+	// (or could be started) or the registry has nothing specific to say.
+	UnavailableReason(path string) string
 	ShutdownAll()
 }
 
@@ -50,4 +55,5 @@ type noopRegistry struct{}
 func NewNoopRegistry() Registry { return noopRegistry{} }
 
 func (noopRegistry) ClientFor(string) (Client, bool) { return nil, false }
+func (noopRegistry) UnavailableReason(string) string { return "" }
 func (noopRegistry) ShutdownAll()                    {}

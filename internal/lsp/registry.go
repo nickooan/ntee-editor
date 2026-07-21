@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/nickooan/ntee-editor/internal/config"
 	"github.com/nickooan/ntee-editor/internal/filetree"
@@ -25,8 +26,21 @@ type Manager struct {
 
 	mu       sync.Mutex
 	clients  map[string]*serverClient
-	disabled map[string]bool
+	disabled map[string]string // language → reason it is off ("" / absent = usable)
+	restarts map[string]int    // rapid dead-server replacements per language (capped)
 }
+
+// maxServerRestarts bounds how many times a language's crashed server is
+// replaced before the language is disabled for the session — a restart on
+// demand heals one-off crashes without letting a broken install crash-loop.
+const maxServerRestarts = 3
+
+// longLivedUptime is how long a server must have run for its crash to count as
+// news rather than part of a loop: a corpse that lived at least this long
+// resets the language's restart budget, so a stable server that dies once in a
+// while restarts forever, while one dying seconds after spawn burns through
+// maxServerRestarts and disables.
+const longLivedUptime = time.Minute
 
 func NewManager(cfg config.Config, root string) *Manager {
 	extLang := map[string]string{}
@@ -43,7 +57,8 @@ func NewManager(cfg config.Config, root string) *Manager {
 		root:     root,
 		extLang:  extLang,
 		clients:  map[string]*serverClient{},
-		disabled: map[string]bool{},
+		disabled: map[string]string{},
+		restarts: map[string]int{},
 	}
 }
 
@@ -94,6 +109,24 @@ func (m *Manager) ClientFor(path string) (Client, bool) {
 	return c, true
 }
 
+// UnavailableReason explains why ClientFor fails for path: an unmapped
+// extension gets the install hint, a disabled language gets the reason it was
+// disabled (binary missing, repeated crashes, …). "" when a client is (or could
+// be) available.
+func (m *Manager) UnavailableReason(path string) string {
+	ext := strings.ToLower(filepath.Ext(path))
+	lang, ok := m.extLang[ext]
+	if !ok {
+		if ext == "" {
+			return "no language server for this file type"
+		}
+		return "no language server for " + ext + " files — try: ntee --prepare-lsp"
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.disabled[lang]
+}
+
 // clientForLang returns the server for an explicit language (lazily starting
 // it) with the file's repo as a workspace folder. Used by the hybrid bridge to
 // reach the companion (e.g. typescript) server.
@@ -107,20 +140,38 @@ func (m *Manager) clientForLang(lang, file string) (*serverClient, bool) {
 // getOrStartLocked returns the (single) server for lang, starting it lazily and
 // ensuring repoRoot is one of its workspace folders. Caller must hold m.mu.
 func (m *Manager) getOrStartLocked(lang, repoRoot string) (*serverClient, bool) {
-	if m.disabled[lang] {
+	if m.disabled[lang] != "" {
 		return nil, false
 	}
 	if c, ok := m.clients[lang]; ok {
-		c.EnsureFolder(repoRoot)
-		return c, true
+		if !c.isDead() {
+			c.EnsureFolder(repoRoot)
+			return c, true
+		}
+		// The server exited (crash): previously the corpse stayed registered and
+		// the language was silently dead — no completions, no diagnostics — for
+		// the rest of the session. Drop it and start a replacement on demand. A
+		// long-lived server's crash resets the budget (news, not a loop); only
+		// rapid successive deaths burn through it and disable the language.
+		delete(m.clients, lang)
+		if c.uptime() >= longLivedUptime {
+			m.restarts[lang] = 0
+		}
+		m.restarts[lang]++
+		if m.restarts[lang] >= maxServerRestarts {
+			m.disabled[lang] = lang + " lsp crashed repeatedly — disabled for this session (restart ntee to retry)"
+			m.emit(NoticeMsg{Text: m.disabled[lang]})
+			return nil, false
+		}
+		m.emit(NoticeMsg{Text: "restarting " + lang + " lsp"})
 	}
 	lc, ok := m.cfg.Languages[lang]
 	if !ok || !lc.IsEnabled() || lc.LSP == nil || lc.LSP.Command == "" {
-		m.disabled[lang] = true
+		m.disabled[lang] = "no language server configured for " + lang + " — try: ntee --prepare-lsp"
 		return nil, false
 	}
 	if _, err := resolveBinary(lc.LSP.Command); err != nil {
-		m.disabled[lang] = true
+		m.disabled[lang] = lc.LSP.Command + " not found — try: ntee --prepare-lsp"
 		m.emit(NoticeMsg{Text: lc.LSP.Command + " not found — LSP disabled for " + lang})
 		return nil, false
 	}

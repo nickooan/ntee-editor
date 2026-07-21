@@ -34,15 +34,16 @@ func (m Model) renderMessageOverlay(width, height int) string {
 		lipgloss.WithWhitespaceBackground(colBg))
 }
 
-// renderFuzzyOverlay draws the Ctrl+P goto-file finder: query input on top,
-// matches beneath with the matched runes bold.
+// renderFuzzyOverlay draws the fuzzy file finder (Ctrl+P goto / Ctrl+U
+// uncommitted — fuzzyPrompt labels the source): query input on top, matches
+// beneath with the matched runes bold.
 func (m Model) renderFuzzyOverlay(width, height int) string {
 	const maxRows = 12
 	boxWidth := input.Clamp(width*8/10, 24, max(24, width-2))
 	rowWidth := max(1, boxWidth-2)
 
 	var b strings.Builder
-	b.WriteString(promptStyle.Render("goto ") + renderInputLine(m.fuzzyQuery, len([]rune(m.fuzzyQuery))) + "\n")
+	b.WriteString(promptStyle.Render(m.fuzzyPrompt) + renderInputLine(m.fuzzyQuery, len([]rune(m.fuzzyQuery))) + "\n")
 
 	if len(m.fuzzyMatches) == 0 {
 		b.WriteString(overlayHintStyle.Render("(no matches)"))

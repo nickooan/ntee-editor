@@ -125,10 +125,12 @@ type Model struct {
 	execCursor   int
 	execPrevMode mode
 
-	// Fuzzy file finder overlay (Ctrl+P).
+	// Fuzzy file finder overlay: Ctrl+P (whole project) and Ctrl+U (uncommitted
+	// files only) share it; fuzzyPrompt labels which source is showing.
 	fuzzyOpen    bool
 	fuzzyQuery   string
 	fuzzyIndex   int
+	fuzzyPrompt  string           // overlay title: "goto " (Ctrl+P) or "uncommitted " (Ctrl+U)
 	fuzzyCorpus  []fuzzy.Prepared // candidates with matching data precomputed once per open
 	fuzzyMatches []fuzzy.Match
 
@@ -478,6 +480,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.Type == tea.KeyCtrlP && m.mode != modeCommand && m.mode != modeSearch && m.mode != modeExec {
 			return m.openFuzzy()
+		}
+		if msg.Type == tea.KeyCtrlU && m.mode != modeCommand && m.mode != modeSearch && m.mode != modeExec {
+			return m.openUncommitted()
 		}
 		if msg.Type == tea.KeyCtrlG && m.mode != modeCommand && m.mode != modeSearch && m.mode != modeExec {
 			return m.openGrep()

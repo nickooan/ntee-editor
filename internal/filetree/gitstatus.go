@@ -19,7 +19,10 @@ func GitDirtySet(root string) (map[string]bool, bool) {
 	if !IsGitRepo(root) {
 		return nil, false
 	}
-	out, err := exec.Command("git", "-C", root, "status", "--porcelain", "-z").Output()
+	// --untracked-files=all lists every file inside an untracked directory
+	// individually (instead of one collapsed "dir/" record), so consumers like
+	// the Ctrl+U uncommitted-files finder see openable file paths.
+	out, err := exec.Command("git", "-C", root, "status", "--porcelain", "-z", "--untracked-files=all").Output()
 	if err != nil {
 		return nil, false
 	}

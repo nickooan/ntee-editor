@@ -140,7 +140,10 @@ func TestGitDirtySetIntegration(t *testing.T) {
 	if !ok {
 		t.Fatal("GitDirtySet must succeed")
 	}
-	for _, want := range []string{"sub/tracked.go", "sub", "newdir"} {
+	// newdir/fresh.go must be listed individually (--untracked-files=all), not
+	// collapsed into a bare "newdir/" record — the Ctrl+U finder needs openable
+	// file paths, and the ancestor dirs still mark for the sidebar.
+	for _, want := range []string{"sub/tracked.go", "sub", "newdir", "newdir/fresh.go"} {
 		if !dirty[want] {
 			t.Errorf("dirty set missing %q: %v", want, dirty)
 		}

@@ -504,6 +504,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case completionMsg:
 		return m.handleCompletion(msg)
 
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
+
 	case tea.KeyMsg:
 		if msg.Type == tea.KeyCtrlC || msg.Type == tea.KeyCtrlQ {
 			return m.quit()

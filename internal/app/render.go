@@ -25,7 +25,7 @@ func (m Model) View() string {
 	status := m.padStatusRows(m.renderStatusLine())
 	bodyHeight := max(3, m.height-2-strings.Count(status, "\n"))
 
-	sidebarWidth := input.Clamp(m.width/4, 16, max(16, m.width-24))
+	sidebarWidth := m.sidebarWidth()
 	// Panes tile the full width — a spare column would show as a stripe of
 	// terminal-default background against the themed panes.
 	mainWidth := max(3, m.width-sidebarWidth)

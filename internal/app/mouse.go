@@ -75,10 +75,21 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	switch msg.Button {
-	case tea.MouseButtonLeft:
-		if msg.Action == tea.MouseActionPress { // ignore drag-motion / release
-			return m.handleEditClick(msg), nil
+	case tea.MouseButtonLeft, tea.MouseButtonRight:
+		if msg.Action != tea.MouseActionPress { // ignore drag-motion / release
+			return m, nil
 		}
+		// Bare right-click (no Ctrl) is reserved — nothing yet. It's only
+		// handled as a safety net for terminals that map a physical Ctrl+click
+		// to the right button while still forwarding the Ctrl modifier.
+		if msg.Button == tea.MouseButtonRight && !msg.Ctrl {
+			return m, nil
+		}
+		next, hit := m.handleEditClick(msg)
+		if hit && msg.Ctrl {
+			return next.jumpToReference() // Ctrl+click = jump to definition
+		}
+		return next, nil
 	case tea.MouseButtonWheelUp:
 		return m.wheelScroll(-1), nil
 	case tea.MouseButtonWheelDown:
@@ -87,16 +98,16 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleEditClick moves the edit cursor to a left-clicked position in the file
-// pane. A click outside the file content area (or outside edit mode) is a
-// no-op.
-func (m Model) handleEditClick(msg tea.MouseMsg) Model {
+// handleEditClick moves the edit cursor to a clicked position in the file pane.
+// hit=false when the click misses the file content area (or we're not in edit
+// mode), so callers can tell a real landing from a no-op.
+func (m Model) handleEditClick(msg tea.MouseMsg) (Model, bool) {
 	if m.mode != modeEdit || m.openFile == nil {
-		return m
+		return m, false
 	}
 	line, col, ok := m.editClickTarget(msg.X, msg.Y)
 	if !ok {
-		return m
+		return m, false
 	}
 	if line != m.edit.cy {
 		m = m.flushBurst() // undo boundary on line change, like moveEditCursor
@@ -104,7 +115,7 @@ func (m Model) handleEditClick(msg tea.MouseMsg) Model {
 	m.edit.clearSelection()
 	m.edit.cy, m.edit.cx = line, col
 	m.edit.clampCursor()
-	return m
+	return m, true
 }
 
 // wheelScroll handles a vertical wheel notch (dir = -1 up, +1 down). In edit

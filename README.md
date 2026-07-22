@@ -101,6 +101,8 @@ Five things to know in your first five minutes:
 | Key | Action |
 |---|---|
 | **mouse click** | move the cursor to the clicked position (gutter click → column 0). Hold `Shift` for native terminal text selection |
+| **`Ctrl`+click** | jump to definition at the clicked token (same as `Ctrl+J`). Some terminals capture Ctrl+click as a right-click — then use `Ctrl+J` |
+| **wheel / two-finger scroll** | scroll up/down (moves the cursor); horizontal scroll does nothing |
 | `Ctrl+S` | save (also clears the file's stashed draft) |
 | `Ctrl+Z` / `Ctrl+Y` | undo / redo — snapshot bursts, persisted across relaunch |
 | `Ctrl+A` | progressive select: word → line; then `Shift+↑/↓` extends line-wise |

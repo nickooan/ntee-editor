@@ -28,6 +28,79 @@ func wheel(m Model, button tea.MouseButton) Model {
 	return next.(Model)
 }
 
+func ctrlClick(m Model, x, y int) (Model, tea.Cmd) {
+	next, cmd := m.Update(tea.MouseMsg{X: x, Y: y, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, Ctrl: true})
+	return next.(Model), cmd
+}
+
+// "package main" — "main" identifier starts at rune column 8 on line 0.
+const testIdentX = testTextX + 8
+
+func TestCtrlClickJumpsToDefinition(t *testing.T) {
+	m, client := newLSPTestModel(t)
+	m = m.openFileAt("main.go")
+	client.locs = selfLoc(m, 2) // definition sits at line 2 of main.go
+
+	m, cmd := ctrlClick(m, testIdentX, testTextY) // click "main" on line 0
+	if m.edit.cy != 0 || m.edit.cx != 8 {
+		t.Fatalf("ctrl+click should move the cursor to the token, got (%d,%d)", m.edit.cy, m.edit.cx)
+	}
+	if cmd == nil {
+		t.Fatal("ctrl+click on an identifier should issue a definition request")
+	}
+	next, _ := m.Update(cmd()) // drive the async definition response
+	m = next.(Model)
+	if m.edit.cy != 2 {
+		t.Fatalf("definition should jump to line 2, got %d", m.edit.cy)
+	}
+}
+
+func TestPlainClickDoesNotJump(t *testing.T) {
+	m, client := newLSPTestModel(t)
+	m = m.openFileAt("main.go")
+	client.locs = selfLoc(m, 2)
+	next, cmd := m.Update(tea.MouseMsg{X: testIdentX, Y: testTextY, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	m = next.(Model)
+	if m.edit.cy != 0 || m.edit.cx != 8 {
+		t.Fatalf("plain click should still move the cursor, got (%d,%d)", m.edit.cy, m.edit.cx)
+	}
+	if cmd != nil {
+		t.Fatal("plain click must not issue a definition request")
+	}
+}
+
+func TestCtrlRightClickJumps(t *testing.T) {
+	m, client := newLSPTestModel(t)
+	m = m.openFileAt("main.go")
+	client.locs = selfLoc(m, 2)
+	next, cmd := m.Update(tea.MouseMsg{X: testIdentX, Y: testTextY, Action: tea.MouseActionPress, Button: tea.MouseButtonRight, Ctrl: true})
+	m = next.(Model)
+	if cmd == nil || m.edit.cy != 0 || m.edit.cx != 8 {
+		t.Fatalf("ctrl+right-click should move cursor and jump: (%d,%d) cmd=%v", m.edit.cy, m.edit.cx, cmd)
+	}
+}
+
+func TestBareRightClickIgnored(t *testing.T) {
+	m := mouseFixture(t)
+	m.edit.cy, m.edit.cx = 2, 1
+	next, cmd := m.Update(tea.MouseMsg{X: testIdentX, Y: testTextY, Action: tea.MouseActionPress, Button: tea.MouseButtonRight})
+	m = next.(Model)
+	if m.edit.cy != 2 || m.edit.cx != 1 || cmd != nil {
+		t.Fatalf("bare right-click should be a no-op: (%d,%d) cmd=%v", m.edit.cy, m.edit.cx, cmd)
+	}
+}
+
+func TestCtrlClickOutsideContentIgnored(t *testing.T) {
+	m, client := newLSPTestModel(t)
+	m = m.openFileAt("main.go")
+	client.locs = selfLoc(m, 2)
+	m.edit.cy, m.edit.cx = 0, 0
+	m, cmd := ctrlClick(m, 5, testTextY) // sidebar column
+	if m.edit.cy != 0 || m.edit.cx != 0 || cmd != nil {
+		t.Fatalf("ctrl+click outside content should do nothing: (%d,%d) cmd=%v", m.edit.cy, m.edit.cx, cmd)
+	}
+}
+
 func mouseFixture(t *testing.T) Model {
 	t.Helper()
 	m, _ := newTestModel(t, nil)

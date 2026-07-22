@@ -1,106 +1,237 @@
 # ntee-editor
 
-A Sublime-style text editor that lives in the terminal. Bubble Tea TUI, with
-project state persisted in [ntee-db](https://github.com/nickooan/ntee-db):
-recently opened files, per-file edit snapshots (undo history), and the session
-(last file, expanded directories) all survive relaunch.
+A Sublime-style code editor that lives in your terminal. Built on Bubble Tea,
+powered by [ntee-db](https://github.com/nickooan/ntee-db) — your tabs, drafts,
+undo history, and session all survive relaunch.
 
 ```
-┌ header: project root ─────────────────────────────────┐
-│ file tree        │ file content (chroma-highlighted)  │
-│ (cursor-driven)  │ line numbers · cursor · selection  │
-└───────────────────────────────────────────────────────┘
- status line / : command bar
+┌ ntee-editor · ~/projects/my-app ──────────────────────────────┐
+│ file tree          │  tab1.go  tab2.ts  (red = unsaved)       │
+│ (cursor-driven,    │ ─────────────────────────────────────────│
+│  git-aware colors) │  1 │ package main        ← syntax colors │
+│                    │  2 │                     ← ● diagnostics │
+│                    │  3 │ func main() {       ← click to move │
+└───────────────────────────────────────────────────────────────┘
+ @query > _                                  status / command bar
 ```
+
+## Highlights
+
+- **Instant project navigation** — fuzzy file finder, repo-wide content grep,
+  and a live query bar that expands the file tree as you type.
+- **Real code intelligence** — LSP-backed autocomplete, diagnostics in the
+  gutter, go-to-definition / find-references, for Go, TypeScript/React, Python,
+  Ruby, Java, Kotlin, Vue. One command installs the servers.
+- **Find & replace with live preview** — see every replacement rendered in the
+  buffer *before* you commit it.
+- **Mouse support** — click anywhere in the file to place the cursor.
+- **Everything persists** — tabs, unsaved drafts, undo timeline, and session
+  are stored per-project in ntee-db and restored on relaunch.
+- **Built-in inspection dashboard** — see store disk usage and language-server
+  status, compact the database, and start/stop LSPs without leaving the editor.
 
 ## Install
 
-One command (macOS or Linux) — checks Go (installs it via brew/apt/dnf/pacman if
-missing), clones and builds the editor to `~/go/bin/ntee`, then installs the
-language servers for every supported language whose runtime is present:
+One command (macOS or Linux). It checks Go (installs via brew/apt/dnf/pacman if
+missing), builds `ntee` into `~/go/bin`, and installs language servers for every
+supported language whose runtime is present:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/nickooan/ntee-editor/main/install.sh | bash
 ```
 
-From a local checkout the same script builds in place:
-
-```sh
-./install.sh
-```
-
-**Updating** is the same command — re-running pulls the latest source
-(`git pull --ff-only`) and rebuilds.
+From a local checkout: `./install.sh`. **Updating** is the same command — it
+pulls the latest source and rebuilds.
 
 Make sure `~/go/bin` is on your PATH (the script prints the exact `export` line
-if it isn't), then use the editor globally:
+if it isn't). Knobs: `NTEE_INSTALL_DIR=<dir>` overrides the clone destination
+(default `~/.ntee-editor/src`); `NTEE_SKIP_LSP=1` skips the language-server step
+(run `ntee --prepare-lsp` later).
+
+## Quick start
 
 ```sh
-ntee <path>        # open a project (defaults to the current directory)
+ntee            # open the current directory
+ntee <path>     # open a project
 ```
 
-Knobs: `NTEE_INSTALL_DIR=<dir>` overrides the clone destination
-(default `~/.ntee-editor/src`); `NTEE_SKIP_LSP=1` skips the language-server
-step (run `ntee --prepare-lsp` later).
+Five things to know in your first five minutes:
 
-## Run
+1. **Type to navigate.** The `@query >` bar at the bottom drives the sidebar:
+   type a path fragment and directories expand, the best match highlights, and
+   a popup suggests completions. `Enter` opens a file **straight into edit
+   mode**.
+2. **`Ctrl+P` finds files, `Ctrl+G` greps contents** — anywhere, any time.
+3. **Click to place the cursor**, type to edit, `Ctrl+S` to save.
+4. **`Esc` walks you back out** — clears the selection, then leaves edit mode,
+   then goes up a directory.
+5. **`Ctrl+Q` quits.** Your tabs, drafts, and undo history will be there when
+   you come back.
 
-```sh
-ntee [project-root]                  # installed binary
-go run ./cmd/ntee [project-root]     # from a checkout; defaults to the current directory
-```
+---
 
 ## Keymap
 
-**Everywhere**
-| Key | Action |
-|---|---|
-| `Ctrl+P` | goto file (fuzzy finder; empty query lists recent files) |
-| `Ctrl+G` | search contents across the whole repo — tall overlay: colored preview of the selected hit on top (60%), query + result list (`name.go:LINE — dir`) below; ↑/↓ selects, Enter jumps. (Ctrl+Tab can't reach terminal apps, hence G for "grep".) Editing with unsaved changes asks you to save first. |
-| `Ctrl+Q` / `Ctrl+C` | quit (session saved) |
-
-**Query bar (home mode — r1quest-style)**
-
-Type in the bottom `@query >` bar; the sidebar follows live: directories in the
-typed path expand, the best match highlights, and a popup suggests
-exact/prefix/fuzzy completions (fuzzy reaches into collapsed directories).
+### Everywhere
 
 | Key | Action |
 |---|---|
-| type a path / fragment | expand + highlight + suggest |
-| `↑/↓` (popup open) | move popup selection — previews in the bar, highlights in the sidebar |
+| `Ctrl+P` | **Goto file** — fuzzy finder; empty query lists recent files |
+| `Ctrl+U` | Goto **uncommitted** file — same finder, limited to git-dirty paths |
+| `Ctrl+G` | **Grep the repo** — colored preview on top, results below; `↑/↓` + `Enter` jumps |
+| `Ctrl+T` | **Inspection dashboard** — store stats + LSP control ([below](#inspection-mode-ctrlt)) |
+| `Shift+Tab` | Cycle the focused tab (wraps) |
+| `Ctrl+Q` / `Ctrl+C` | Quit (session saved) |
+
+### Query bar (home)
+
+| Key | Action |
+|---|---|
+| type a path / fragment | expand directories · highlight best match · suggest completions |
+| `↑/↓` (popup open) | move the popup selection — previews in the bar, highlights in the sidebar |
 | `↑/↓` (no popup) | scroll the open file |
 | `Shift+↑/↓` | walk the sidebar tree row-by-row (never expands) |
-| `Enter` | directory → enter it · file → **open straight into edit mode** · `:cmd` → run command |
+| `Enter` | directory → enter it · file → open in edit mode · `:cmd` → run command |
+| `Tab` | edit the currently open file |
 | `Ctrl+F` | find in the open file |
 | `Esc` | go up one directory |
-| `Tab` | edit the open file |
 
-**Edit**
+### Edit mode
+
 | Key | Action |
 |---|---|
+| **mouse click** | move the cursor to the clicked position (gutter click → column 0). Hold `Shift` for native terminal text selection |
 | `Ctrl+S` | save (also clears the file's stashed draft) |
-| `Ctrl+Z` / `Ctrl+Y` | undo / redo (snapshot bursts, persisted in ntee-db) |
-| `Ctrl+A` | progressive select: word → line; then `Shift+↑/↓` extends the selection by whole lines |
-| `Ctrl+E` | open the `@exec >` editor-command bar: `copy [a-b\|all\|fpath]` · `jump <line\|top\|end>` (aliases `cp`, `jp`; jump lands ~30% from the top) · `tab <name\|cl\|cr>` |
-| `Ctrl+F` | find in file (`Enter` jumps the cursor to the match) |
-| `Ctrl+J` | jump to the file path under the cursor, or ask the language server for the definition — multiple hits open a picker (`name.go:LINE — dir`, ↑/↓ + Enter, with a 5-line colored code preview that follows the selection); **on a definition line it finds all references instead**. File types with no configured server report "no language server" |
-| `Ctrl+O` | jump back (restores file, cursor, and scroll; 20-deep trail) |
-| `Shift+Tab` | cycle the focused tab left→right (wraps) |
-| `PgUp` / `PgDn` | page with a one-line overlap (the old edge line carries over) |
-| `Esc` | clear selection, then discard unsaved edits (deletes the stashed draft) and return to the query bar |
+| `Ctrl+Z` / `Ctrl+Y` | undo / redo — snapshot bursts, persisted across relaunch |
+| `Ctrl+A` | progressive select: word → line; then `Shift+↑/↓` extends line-wise |
+| `Ctrl+F` | find in file ([below](#find--replace-ctrlf)) |
+| `Ctrl+J` | **jump to definition** (or the file path under the cursor); on a definition line it finds **references** instead. Multiple hits open a picker with a live code preview |
+| `Ctrl+O` | jump back (restores file, cursor, scroll; 20-deep trail) |
+| `Ctrl+E` | open the `@exec >` command bar ([below](#exec-bar-ctrle)) |
+| `PgUp` / `PgDn` | page with a one-line overlap |
+| `Home` / `End` | line start / end |
+| `Esc` | clear selection → then discard unsaved edits and return to the query bar |
 
-**Tabs & drafts** — every opened file becomes a tab at the top of the file pane
-(base filename; **red = unsaved**). Switching away from a dirty buffer stashes a
-draft in ntee-db (content + up to 15 undo steps); reopening the tab — or
-relaunching the editor — restores it, with undo stepping back to the on-disk
-version. `Ctrl+S` saves and drops the draft; `Esc` discards it. The tab list and
-active tab persist per project.
+**Autocomplete** pops up on its own as you type an identifier or `.` —
+`↑/↓` selects, `Tab`/`Enter` accepts, keep typing to filter, `Esc` dismisses.
+Powered by the file's language server.
 
-**Command bar (`:`)**
-`jump <line|top|end>` go to line (alias `jp`) · `tab <name|cl|cr>` switch to a
-tab / close-left / close-right (unsaved tabs refuse to close) · `revert`
-restore last saved snapshot · `recent` recent files.
+### Find & replace (`Ctrl+F`)
+
+Type to search — matches highlight live (case-insensitive; regex supported,
+falling back to literal). `↑/↓` cycles the focused match (orange), `Enter`
+jumps the cursor to it, `Esc` backs out.
+
+Press **`Ctrl+E` while matches are highlighted** to enter the replace bar:
+
+| Command | Action |
+|---|---|
+| `c <text>` | replace the **focused** match — then focus lands on the next one, so you can `c` again |
+| `mlc <text>` | **m**ulti-**l**ine **c**ursor: replace **all** matches at once |
+
+As you type the replacement, the buffer shows a **live preview** — target spans
+render in green exactly as they'll look after `Enter`. Only the matched span is
+touched (`search54321` + `c search123` → `search12354321`); a bare `c`/`mlc`
+deletes the match. Every replace — even `mlc` across a hundred lines — is one
+`Ctrl+Z` step.
+
+### Exec bar (`Ctrl+E`)
+
+Editor commands with Tab-completed suggestions:
+
+| Command | Action |
+|---|---|
+| `copy` (`cp`) `[a-b\|all\|fpath]` | copy the selection, a line range, the whole buffer, or the file's path |
+| `jump` (`jp`) `<line\|top\|end>` | go to a line (lands ~30% from the top) |
+| `git scf <head\|branch\|both>` | **s**olve **c**on**f**lict: resolve the git conflict block at the cursor/selection, keeping the named side (or both) — one undo step |
+| `tab <name\|cl\|cr>` | switch tab / close-left / close-right |
+
+### Command bar (`:`)
+
+`jump <line|top|end>` (alias `jp`) · `tab <name|cl|cr>` · `revert` (restore
+last saved snapshot) · `refresh` (re-scan the file tree).
+
+### Inspection mode (`Ctrl+T`)
+
+A dashboard for the editor's own machinery. `Shift+↑/↓` switches the left menu;
+`Esc` returns to where you were.
+
+- **ntee-db** — the project store's disk usage: live records, main-log size
+  with dead-space percentage, blob usage, orphaned bytes.
+- **lsp** — every configured language server with its live status:
+  **running** (green) · **stopped** (yellow — starts on demand) ·
+  **disabled** (gray, with the reason).
+
+The `@inspection >` bar takes:
+
+| Command | Action |
+|---|---|
+| `db compact` | drop dead records from the main log (runs in the background) |
+| `db relieve` | also rewrite the blob store, releasing orphaned blobs |
+| `lsp enable <lang\|all>` | start the server **now** and persist `enable: true` to your config |
+| `lsp disable <lang\|all>` | stop the server and persist `enable: false` |
+
+LSP commands act live *and* write `~/.config/ntee-editor/config.yaml` (previous
+file backed up to `config.yaml.bak`), so the change sticks across restarts. If a
+server fails to start (e.g. binary missing), the error shows right in the bar.
+
+---
+
+## Tabs & drafts
+
+Every opened file becomes a tab at the top of the pane (**red = unsaved**).
+Switching away from a dirty buffer stashes a draft — content plus up to 15 undo
+steps — in ntee-db. Reopening the tab, or relaunching the editor, restores it
+exactly, with undo stepping back to the on-disk version. `Ctrl+S` saves and
+drops the draft; `Esc` discards it. The tab list and active tab persist per
+project.
+
+## Code intelligence (LSP)
+
+Language servers start **lazily** — opening the first file of a language spawns
+its server, scoped to the file's nearest project root (so a monorepo frontend
+loads its ~300 files, not the repo's 15k). You get:
+
+- **Diagnostics** — colored `●` gutter markers, `✗N ⚠M` status counts, and the
+  cursor line's message in the status bar.
+- **Autocomplete** — as you type, server-ranked.
+- **Definition & references** — `Ctrl+J` / `Ctrl+O`, with UTF-16 column
+  bridging done for you.
+
+ntee is **LSP-strict**: when a language has a configured server, its answer is
+final — you'll see "still starting…" or "no definition found" rather than a
+guessed jump. File types with no server say so (a bare file path under the
+cursor still opens directly). A missing binary degrades to a one-time notice.
+
+A crashed server restarts on demand; a rapid crash-loop disables the language
+for the session with a note. Check or override any of this live in the
+[inspection dashboard](#inspection-mode-ctrlt).
+
+### Installing language servers
+
+```sh
+ntee --prepare-lsp        # prints a plan, asks, installs, writes config
+```
+
+Built-in recipes: **go** (gopls) · **typescript/js/react** (typescript-language-server) ·
+**python** (pyright) · **ruby** (ruby-lsp) · **java** (jdtls) · **kotlin**
+(kotlin-language-server) · **vue** (@vue/language-server). Installs use the
+platform's native tool (`brew` / `go install` / `npm` / `gem`), skip languages
+whose runtime is absent (telling you what to install), keep your tuned config
+entries, and back the old file up to `config.yaml.bak`. `--yes` skips the
+prompt; recipes can be overridden per language via an `install:` block.
+
+### Toggling LSP
+
+In-editor: `Ctrl+T`, then `lsp enable ruby`, `lsp disable all`, etc.
+
+From the shell:
+
+```sh
+ntee --disable-lsp typescript vue   # write enable: false for these languages
+ntee --disable-lsp all              # turn LSP off globally (lsp.enabled: false)
+ntee --enable-lsp typescript        # flip a language (or 'all') back on
+```
 
 ## Configuration
 
@@ -110,85 +241,52 @@ Defaults ← `~/.config/ntee-editor/config.yaml` ← `<project>/.ntee-editor.yam
 version: 1
 editor: { tab_width: 4, max_snapshots: 50, max_highlight_kb: 512 }
 tree:   { ignore: [".git"] }    # only .git is hidden; .gitignore'd paths show grayed
-theme:  { syntax: "gruvbox" }   # any chroma style name; default is gruvbox dark
+theme:  { syntax: "gruvbox" }   # any chroma style name (monokai, dracula, …)
 languages:
   go:         { extensions: [".go"], lsp: { command: "gopls" } }
-  # tsserver also handles JS; a config's `extensions` are UNIONED with these defaults.
-  typescript: { extensions: [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"], lsp: { command: "typescript-language-server", args: ["--stdio"] } }
-lsp: { enabled: true }    # gopls / typescript-language-server, started lazily
+  typescript: { extensions: [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"],
+                lsp: { command: "typescript-language-server", args: ["--stdio"] } }
+  # ruby: { enable: false }     # turn a server off without deleting its config
+lsp: { enabled: true }
 ```
 
-`languages.<name>.extensions` extend (union with) the built-in defaults rather than
-replacing them, so you can add a file type to an existing server without re-listing the
-defaults; `command`/`args`/`init` overlay the default when set. Each language also takes an
-`enable: true|false` toggle (omitted = on) — `typescript: { enable: false }` turns a server
-off without deleting its config.
+- `languages.<name>.extensions` are **unioned** with the built-in defaults, so
+  you can add a file type to an existing server without re-listing them.
+- `command` / `args` / `init` overlay the defaults when set (`init:` passes
+  LSP initializationOptions — e.g. `tsserver.path` for a globally installed
+  typescript ≤5.x; the TS 7 native preview has no `lib/tsserver.js` and won't
+  work).
+- `enable: true|false` per language (omitted = on).
+- The default theme is a tuned gruvbox dark; any chroma style name works,
+  rendered truecolor and auto-degraded on 256-color terminals.
 
-### Installing language servers
-
-`ntee-editor --prepare-lsp` installs the servers for the built-in recipes — **go** (gopls),
-**typescript/js** (typescript-language-server), **java** (jdtls), **kotlin**
-(kotlin-language-server), **ruby** (ruby-lsp), **python** (pyright), **vue**
-(@vue/language-server) — using the platform's native tool (`brew` / `go install` / `npm` /
-`gem`), then writes the resolved commands into `~/.config/ntee-editor/config.yaml`. It prints a
-plan and asks before running installers (`--yes` skips the prompt); it **adds only missing
-languages** (your tuned entries are kept, and the old file is backed up to `config.yaml.bak`),
-and skips servers whose runtime (Node/JDK/Ruby/Go) is absent, telling you what to install.
-Recipes can be overridden per language via an `install:` block in the config.
-
-### Toggling LSP from the command line
-
-```sh
-ntee --disable-lsp typescript vue   # write enable: false for these languages
-ntee --disable-lsp all              # turn LSP off globally (lsp.enabled: false)
-ntee --enable-lsp typescript        # flip a language (or 'all') back on
-```
-
-Both write to `~/.config/ntee-editor/config.yaml` (previous file backed up to
-`config.yaml.bak`; per-language tuning like a custom `command` is kept — only the
-`enable` flag changes). Unknown names error with the list of known languages.
-
-## Persistence
+## Persistence & maintenance
 
 Each project gets its own ntee-db store under
-`~/.ntee-editor/stores/<hash(project-root)>/`. ntee-db is single-writer
-(flock): opening the same project in a second instance falls back to in-memory
-state with a status notice (undo works, nothing persists).
+`~/.ntee-editor/stores/<hash(project-root)>/` holding recent files, undo
+snapshots, drafts, tabs, and the session. ntee-db is single-writer (flock):
+opening the same project twice falls back to in-memory state with a notice —
+undo still works, nothing persists.
+
+Old undo versions auto-evict per file, but dead space accumulates in the log
+over time. Press `Ctrl+T` to see exactly how much, and `db compact` /
+`db relieve` to reclaim it — no external tools needed.
 
 ## Architecture notes
 
 - `internal/view`, `internal/input`, `internal/filetree`, `internal/fuzzy` are
   pure (no Bubble Tea) and unit-tested; `internal/app` holds the single Model
-  with per-mode key handlers.
+  with per-mode key handlers (`keys_edit.go`, `keys_search.go`, …).
 - Highlighting is whole-buffer chroma tokenization cached per line, refreshed
-  at edit-burst boundaries. Grammar colors come from a chroma style — the
-  default is a tuned `gruvbox` dark (red keywords/operators, gold
-  types/functions, green strings, gray-italic comments, cream text); any
-  chroma style name works via `theme.syntax` (`monokai`, `dracula`, …) —
-  rendered as truecolor hex, auto-degraded on 256-color terminals. The UI
-  chrome is a matching gruvbox palette: `#282828` editor background,
-  `#3c3836` cursor-line highlight, `#504945` selections, gold/orange find
-  highlights, and a darker `#1d2021` status bar.
-- Undo is full-content snapshots keyed `versions:<seq>` with a `file`
-  secondary index (`MaxPerValue` auto-evicts the oldest per file).
-- The search view re-tokenizes the frozen content so matches overlay syntax
-  colors.
-- **LSP is live** (`internal/lsp`): a hand-rolled stdio JSON-RPC client
-  (Content-Length framing, ordered notifications) starts one server per
-  language lazily on first file open — `gopls` for Go,
-  `typescript-language-server` for TS (both resolvable from PATH, `~/go/bin`,
-  or an absolute `command` in config; `init:` passes initializationOptions,
-  e.g. `tsserver.path` for a globally installed typescript ≤5.x — the TS 7
-  native preview has no `lib/tsserver.js` and won't work). Diagnostics render
-  as colored `●` gutter markers + `✗N ⚠M` status counts + the cursor line's
-  message in edit mode. `Ctrl+J` asks the server for
-  `textDocument/definition` / `references` (UTF-16 columns bridged both
-  ways). **LSP-strict**: for languages with a configured server, its answer
-  is final ("still starting…" / "no definition found" rather than a guessed
-  jump); file types with no configured server report "no language server"
-  instead of guessing (a bare file path under the cursor still opens directly).
-  A missing binary degrades to a one-time notice with everything else
-  unchanged.
+  at edit-burst boundaries. The search view re-tokenizes its frozen snapshot so
+  matches (and replace previews) overlay syntax colors.
+- Undo is full-content snapshots keyed `versions:<seq>` in ntee-db, with a
+  `file` secondary index whose `MaxPerValue` auto-evicts the oldest per file.
+- `internal/lsp` is a hand-rolled stdio JSON-RPC client (Content-Length
+  framing, ordered notifications), one server per language, with a bridge
+  mechanism for hybrid servers (Vue → TypeScript).
+- Mouse hit-testing shares its layout math with the renderer (single
+  `sidebarWidth()` source of truth), so clicks can't drift from what's drawn.
 
 ## License
 

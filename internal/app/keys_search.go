@@ -15,16 +15,24 @@ import (
 // search view keeps syntax colors (same size gate as the file pane).
 func (m Model) enterSearch(prev mode, content string) Model {
 	m.searchPrevMode = prev
-	m.searchContent = content
 	m.searchInput = ""
 	m.searchFocused = 0
+	m = m.freezeSearchSnapshot(content)
+	m.mode = modeSearch
+	return m
+}
+
+// freezeSearchSnapshot (re)freezes the search view's content and re-tokenizes
+// its syntax colors — on search entry, and again after a searchReplace mutates
+// the buffer (the old snapshot would show pre-replace text and offsets).
+func (m Model) freezeSearchSnapshot(content string) Model {
+	m.searchContent = content
 	m.searchHl = nil
 	if m.openFile != nil {
 		if kb := m.cfg.Editor.MaxHighlightKB; kb <= 0 || len(content) <= kb*1024 {
 			m.searchHl = syntax.HighlightLines(m.openFile.FileName, content)
 		}
 	}
-	m.mode = modeSearch
 	return m
 }
 
@@ -38,6 +46,11 @@ func (m Model) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m = m.nextMatch(-1)
 	case tea.KeyDown, tea.KeyCtrlF:
 		m = m.nextMatch(1)
+	case tea.KeyCtrlE:
+		if m.searchInput != "" && len(view.FindSearchMatches(m.searchContent, m.searchInput)) > 0 {
+			return m.enterSearchExec(), nil
+		}
+		m.errText = "no matches to act on"
 	case tea.KeyBackspace:
 		if runes := []rune(m.searchInput); len(runes) > 0 {
 			m.searchInput = string(runes[:len(runes)-1])

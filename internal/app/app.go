@@ -29,8 +29,15 @@ const (
 	modeEdit
 	modeSearch
 	modeCommand
-	modeExec // "@exec >" editor-command bar (Ctrl+E from edit mode)
+	modeExec       // "@exec >" editor-command bar (Ctrl+E from edit mode)
+	modeSearchExec // "@search … >" replace-command bar (Ctrl+E from search mode)
 )
+
+// inBarMode reports whether keystrokes are feeding a text-input bar, where
+// global chords (Ctrl+P/U/G, Shift+Tab) must not fire.
+func (m Model) inBarMode() bool {
+	return m.mode == modeCommand || m.mode == modeSearch || m.mode == modeExec || m.mode == modeSearchExec
+}
 
 type Model struct {
 	cfg  config.Config
@@ -108,6 +115,12 @@ type Model struct {
 	searchInput    string
 	searchFocused  int
 	searchHl       [][]view.HighlightSegment
+
+	// Search-exec command bar (Ctrl+E from search mode): "c <text>" replaces the
+	// focused match's span, "mlc <text>" replaces every match. Always returns to
+	// modeSearch; searchPrevMode stays untouched for the eventual search exit.
+	searchExecInput  string
+	searchExecCursor int
 
 	// Jump trail (Ctrl+J/Ctrl+O in edit mode): origin frames to return to.
 	// Lives only within one continuous edit session.
@@ -482,16 +495,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.grepOpen {
 			return m.handleGrepKey(msg)
 		}
-		if msg.Type == tea.KeyCtrlP && m.mode != modeCommand && m.mode != modeSearch && m.mode != modeExec {
+		if msg.Type == tea.KeyCtrlP && !m.inBarMode() {
 			return m.openFuzzy()
 		}
-		if msg.Type == tea.KeyCtrlU && m.mode != modeCommand && m.mode != modeSearch && m.mode != modeExec {
+		if msg.Type == tea.KeyCtrlU && !m.inBarMode() {
 			return m.openUncommitted()
 		}
-		if msg.Type == tea.KeyCtrlG && m.mode != modeCommand && m.mode != modeSearch && m.mode != modeExec {
+		if msg.Type == tea.KeyCtrlG && !m.inBarMode() {
 			return m.openGrep()
 		}
-		if msg.Type == tea.KeyShiftTab && m.mode != modeCommand && m.mode != modeSearch && m.mode != modeExec {
+		if msg.Type == tea.KeyShiftTab && !m.inBarMode() {
 			return m.cycleTab(), nil
 		}
 
@@ -506,6 +519,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleCommandKey(msg)
 		case modeExec:
 			return m.handleExecKey(msg)
+		case modeSearchExec:
+			return m.handleSearchExecKey(msg)
 		}
 	}
 	return m, nil
@@ -615,7 +630,9 @@ func (m Model) refreshFileHighlights() Model {
 		return m
 	}
 	content := m.openFile.Content
-	if m.mode == modeEdit {
+	// Search modes always sit on top of a live edit session, so the buffer —
+	// not the on-disk snapshot — is the truth there too.
+	if m.mode == modeEdit || m.mode == modeSearch || m.mode == modeSearchExec {
 		content = m.edit.content()
 	}
 	m.fileLines = view.NormalizeLines(content)

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +29,7 @@ type Manager struct {
 	clients  map[string]*serverClient
 	disabled map[string]string // language → reason it is off ("" / absent = usable)
 	restarts map[string]int    // rapid dead-server replacements per language (capped)
+	override map[string]bool   // language → runtime enable overriding config (inspection mode)
 }
 
 // maxServerRestarts bounds how many times a language's crashed server is
@@ -43,13 +45,18 @@ const maxServerRestarts = 3
 const longLivedUptime = time.Minute
 
 func NewManager(cfg config.Config, root string) *Manager {
+	// extLang covers ALL configured languages and stays immutable afterwards
+	// (ClientFor/UnavailableReason read it lock-free). Config-disabled
+	// languages are gated by a seeded disabled reason instead, which runtime
+	// Enable can clear without touching the extension map.
 	extLang := map[string]string{}
+	disabled := map[string]string{}
 	for lang, lc := range cfg.Languages {
-		if !lc.IsEnabled() {
-			continue // disabled language: its files route to no server
-		}
 		for _, ext := range lc.Extensions {
 			extLang[strings.ToLower(ext)] = lang
+		}
+		if !lc.IsEnabled() {
+			disabled[lang] = "disabled in config"
 		}
 	}
 	return &Manager{
@@ -57,8 +64,9 @@ func NewManager(cfg config.Config, root string) *Manager {
 		root:     root,
 		extLang:  extLang,
 		clients:  map[string]*serverClient{},
-		disabled: map[string]string{},
+		disabled: disabled,
 		restarts: map[string]int{},
+		override: map[string]bool{},
 	}
 }
 
@@ -166,7 +174,8 @@ func (m *Manager) getOrStartLocked(lang, repoRoot string) (*serverClient, bool) 
 		m.emit(NoticeMsg{Text: "restarting " + lang + " lsp"})
 	}
 	lc, ok := m.cfg.Languages[lang]
-	if !ok || !lc.IsEnabled() || lc.LSP == nil || lc.LSP.Command == "" {
+	enabled := ok && (lc.IsEnabled() || m.override[lang])
+	if !enabled || lc.LSP == nil || lc.LSP.Command == "" {
 		m.disabled[lang] = "no language server configured for " + lang + " — try: ntee --prepare-lsp"
 		return nil, false
 	}
@@ -265,6 +274,60 @@ func unwrapBody(raw json.RawMessage) json.RawMessage {
 		}
 	}
 	return raw
+}
+
+// Statuses reports every configured language's server state for the
+// inspection pane. cfg.Languages is never mutated after construction, so
+// ranging it here is safe; the runtime maps are read under m.mu (calling
+// isDead under the lock is the established order — see getOrStartLocked).
+func (m *Manager) Statuses() []LangStatus {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]LangStatus, 0, len(m.cfg.Languages))
+	for lang := range m.cfg.Languages {
+		st := LangStatus{Lang: lang}
+		switch {
+		case m.disabled[lang] != "":
+			st.State, st.Reason = LangDisabled, m.disabled[lang]
+		case m.clients[lang] != nil && !m.clients[lang].isDead():
+			st.State = LangRunning
+		default:
+			st.State = LangStopped
+		}
+		out = append(out, st)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Lang < out[j].Lang })
+	return out
+}
+
+// Enable clears lang's disabled state (config or session) and eagerly starts
+// its server rooted at the project, so the inspection pane turns green now
+// rather than on the next file open. Sync-detectable failures (missing binary,
+// no command) come back in reason; async crashes arrive as NoticeMsg.
+func (m *Manager) Enable(lang string) (bool, string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.disabled, lang)
+	m.restarts[lang] = 0
+	m.override[lang] = true
+	if _, ok := m.getOrStartLocked(lang, m.root); !ok {
+		return false, m.disabled[lang]
+	}
+	return true, ""
+}
+
+// Disable stops lang's server (if running) and marks the language disabled
+// for the session. Safe when nothing is running.
+func (m *Manager) Disable(lang string) {
+	m.mu.Lock()
+	c := m.clients[lang]
+	delete(m.clients, lang)
+	m.override[lang] = false
+	m.disabled[lang] = "disabled in config"
+	m.mu.Unlock()
+	if c != nil {
+		c.stop() // outside m.mu, mirroring ShutdownAll
+	}
 }
 
 func (m *Manager) ShutdownAll() {

@@ -25,17 +25,21 @@ func (m Model) View() string {
 	status := m.padStatusRows(m.renderStatusLine())
 	bodyHeight := max(3, m.height-2-strings.Count(status, "\n"))
 
-	sidebarWidth := input.Clamp(m.width/4, 16, max(16, m.width-24))
+	sidebarWidth := m.sidebarWidth()
 	// Panes tile the full width — a spare column would show as a stripe of
 	// terminal-default background against the themed panes.
 	mainWidth := max(3, m.width-sidebarWidth)
 
-	sidebar := paneStyle.Width(sidebarWidth - 2).Height(bodyHeight - 2).
-		Render(m.renderSidebar(sidebarWidth-4, bodyHeight-2))
+	sidebarBody := m.renderSidebar(sidebarWidth-4, bodyHeight-2)
+	if m.mode == modeInspect {
+		// Inspection owns both panes: the file tree gives way to the menu.
+		sidebarBody = m.renderInspectMenu(sidebarWidth-4, bodyHeight-2)
+	}
+	sidebar := paneStyle.Width(sidebarWidth - 2).Height(bodyHeight - 2).Render(sidebarBody)
 
 	// Overlays own the whole pane; otherwise the tab strip steals the top row.
 	overlayOpen := m.fuzzyOpen || m.messageOverlay != "" || m.defPickOpen || m.grepOpen
-	showTabs := len(m.tabs) > 0 && !overlayOpen
+	showTabs := len(m.tabs) > 0 && !overlayOpen && m.mode != modeInspect
 	innerH := bodyHeight - 2
 	if showTabs {
 		innerH -= 2 // tab strip + divider row
@@ -51,7 +55,9 @@ func (m Model) View() string {
 		mainBody = m.renderDefPickOverlay(mainWidth-4, bodyHeight-2)
 	case m.grepOpen:
 		mainBody = m.renderGrepOverlay(mainWidth-4, bodyHeight-2)
-	case m.mode == modeSearch:
+	case m.mode == modeInspect:
+		mainBody = m.renderInspectMain(mainWidth-4, innerH)
+	case m.mode == modeSearch || m.mode == modeSearchExec:
 		mainBody = m.renderSearch(mainWidth-4, innerH)
 	case m.mode == modeQuery:
 		mainBody = m.renderQueryMain(mainWidth-4, innerH)
@@ -114,11 +120,50 @@ func (m Model) renderStatusLine() string {
 		if len(matches) > 0 {
 			summary = fmt.Sprintf("%d/%d", min(m.searchFocused+1, len(matches)), len(matches))
 		}
-		return promptStyle.Render("@search /") + statusTextStyle.Render(m.searchInput+"/   "+summary+"   ") +
-			hintStyle.Render("↑/↓ next · Enter jump · Esc back")
+		line := promptStyle.Render("@search /") + statusTextStyle.Render(m.searchInput+"/   "+summary)
+		return withNotice(m, line) + statusTextStyle.Render("   ") +
+			hintStyle.Render("↑/↓ next · Enter jump · Ctrl+E replace · Esc back")
+	case modeSearchExec:
+		// The replace bar keeps the search view (and its highlights) as the
+		// body; only the status line swaps.
+		bar := promptStyle.Render("@search /") + statusTextStyle.Render(m.searchInput+"/ ") +
+			execPromptStyle.Render(" > ") +
+			renderInputLineStyled(m.searchExecInput, m.searchExecCursor, execTextStyle) +
+			statusTextStyle.Render("   ")
+		if m.errText != "" {
+			bar += errStyle.Render(m.errText) + statusTextStyle.Render("   ")
+		}
+		if all, _, ok := m.searchExecPreview(); ok {
+			n := 1
+			if all {
+				n = len(view.FindSearchMatches(m.searchContent, m.searchInput))
+			}
+			bar += noticeStyle.Render(fmt.Sprintf("replacing %d", n)) + statusTextStyle.Render("   ")
+		}
+		return bar + hintStyle.Render("c <text> replace · mlc <text> replace all · Enter run · Esc back")
 	case modeCommand:
 		return promptStyle.Render(":") + renderInputLine(m.cmdInput, m.cmdCursor) +
 			statusTextStyle.Render("   ") + hintStyle.Render("jump <line|top|end> · tab <name|cl|cr> · revert")
+	case modeInspect:
+		bar := execPromptStyle.Render("@inspection >") +
+			renderInputLineStyled(m.inspectInput, m.inspectCursor, execTextStyle) +
+			execTextStyle.Render("   ")
+		if m.errText != "" {
+			bar += errStyle.Render(m.errText) + execTextStyle.Render("   ")
+		}
+		if m.notice != "" {
+			bar += noticeStyle.Render(m.notice) + execTextStyle.Render("   ")
+		}
+		if m.inspectBusy != "" {
+			bar += editingStyle.Render(m.inspectBusy+"…") + execTextStyle.Render("   ")
+		}
+		bar += hintStyle.Render("db compact|relieve · lsp enable|disable <lang|all> · Shift+↑/↓ pane · Esc back")
+		// Pre-pad in the exec background so padStatusRows leaves the row's
+		// color intact (same trick as the @exec bar).
+		if pad := m.width - lipgloss.Width(bar); pad > 0 {
+			bar += execTextStyle.Render(strings.Repeat(" ", pad))
+		}
+		return bar
 	}
 	return ""
 }
@@ -649,6 +694,21 @@ func (m Model) renderSearch(width, height int) string {
 		}
 	}
 
+	// Live replace preview while typing in the search-exec bar: target spans
+	// render as the typed replacement, surviving matches shift with the splice.
+	// Scroll anchoring above stays on the original focused match — the
+	// replacement starts at the same column, so the view holds still.
+	focused := m.searchFocused
+	var pspans map[int][][2]int
+	if m.mode == modeSearchExec {
+		if all, repl, ok := m.searchExecPreview(); ok {
+			var rest []view.SearchMatch
+			lines, pspans, rest = buildSearchPreview(lines, matches, m.searchFocused, all, repl)
+			byLine = view.BuildMatchesByLine(rest)
+			focused = -1 // no surviving match is "focused" during preview
+		}
+	}
+
 	rows := make([]string, 0, height)
 	for i := start; i < start+height; i++ {
 		if i >= len(lines) {
@@ -656,19 +716,21 @@ func (m Model) renderSearch(width, height int) string {
 			continue
 		}
 		var segs []view.HighlightSegment
-		if i < len(m.searchHl) {
+		// Previewed lines are spliced, so their frozen syntax segments are
+		// misaligned — render those plain apart from the styled spans.
+		if i < len(m.searchHl) && pspans[i] == nil {
 			segs = m.searchHl[i]
 		}
-		rows = append(rows, renderSearchLine(lines[i], segs, byLine[i], m.searchFocused, off, width))
+		rows = append(rows, renderSearchLine(lines[i], segs, byLine[i], pspans[i], focused, off, width))
 	}
 	return strings.Join(rows, "\n")
 }
 
 // renderSearchLine draws one content line for the search view, slicing a
-// width-wide window starting at rune column off. Matches (byte offsets,
-// converted to rune columns here) render with their background styles and win
-// over the line's syntax segments, which color everything else.
-func renderSearchLine(line string, segs []view.HighlightSegment, matches []view.LineMatch, focused, off, width int) string {
+// width-wide window starting at rune column off. Matches and preview spans
+// (byte offsets, converted to rune columns here) render with their background
+// styles and win over the line's syntax segments, which color everything else.
+func renderSearchLine(line string, segs []view.HighlightSegment, matches []view.LineMatch, previews [][2]int, focused, off, width int) string {
 	if width < 1 {
 		width = 1
 	}
@@ -686,6 +748,12 @@ func renderSearchLine(line string, segs []view.HighlightSegment, matches []view.
 		e := utf8.RuneCountInString(line[:clampByte(lm.End, len(line))])
 		mr = append(mr, mrange{s, e, lm.MatchIndex == focused})
 	}
+	pr := make([]mrange, 0, len(previews))
+	for _, p := range previews {
+		s := utf8.RuneCountInString(line[:clampByte(p[0], len(line))])
+		e := utf8.RuneCountInString(line[:clampByte(p[1], len(line))])
+		pr = append(pr, mrange{start: s, end: e})
+	}
 
 	// Flatten segments into a per-rune segment index so syntax colors survive
 	// the rune-window slicing.
@@ -699,10 +767,16 @@ func renderSearchLine(line string, segs []view.HighlightSegment, matches []view.
 		}
 	}
 
-	// Style key per visible column: -3 focused match, -2 match, -1 plain,
-	// >=0 index into segs. Matches win over syntax.
+	// Style key per visible column: -4 replace preview, -3 focused match,
+	// -2 match, -1 plain, >=0 index into segs. Preview wins over matches,
+	// matches win over syntax.
 	keyAt := func(idx int) int {
 		if idx < end {
+			for _, r := range pr {
+				if idx >= r.start && idx < r.end {
+					return -4
+				}
+			}
 			for _, r := range mr {
 				if idx >= r.start && idx < r.end {
 					if r.focused {
@@ -719,6 +793,8 @@ func renderSearchLine(line string, segs []view.HighlightSegment, matches []view.
 	}
 	styleFor := func(key int) lipgloss.Style {
 		switch {
+		case key == -4:
+			return searchPreviewStyle
 		case key == -3:
 			return searchFocusedStyle
 		case key == -2:
@@ -962,6 +1038,8 @@ var (
 
 	searchMatchStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#000000")).Background(colFindBg)
 	searchFocusedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#000000")).Background(colOrange).Bold(true)
+	// Live replace preview in the search-exec bar: green = what Enter commits.
+	searchPreviewStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#000000")).Background(colGreen).Bold(true)
 	selectionStyle     = lipgloss.NewStyle().Foreground(colFg).Background(colSelection)
 
 	previewStyle        = lipgloss.NewStyle().Foreground(colAqua).Background(colBgChrome)

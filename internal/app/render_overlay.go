@@ -167,7 +167,7 @@ func renderPreviewRows(lines []string, hl [][]view.HighlightSegment, re *regexp.
 			}
 		}
 		num := gutterStyle.Render(pad(strconv.Itoa(i+1), gutterW) + " │ ")
-		rows = append(rows, num+renderSearchLine(lines[i], segs, matches, 0, 0, contentW))
+		rows = append(rows, num+renderSearchLine(lines[i], segs, matches, nil, 0, 0, contentW))
 	}
 	return rows
 }

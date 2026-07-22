@@ -54,6 +54,9 @@ type stubRegistry struct{ client *stubClient }
 
 func (r stubRegistry) ClientFor(string) (lsp.Client, bool) { return r.client, true }
 func (r stubRegistry) UnavailableReason(string) string     { return "" }
+func (r stubRegistry) Statuses() []lsp.LangStatus          { return nil }
+func (r stubRegistry) Enable(string) (bool, string)        { return true, "" }
+func (r stubRegistry) Disable(string)                      {}
 func (r stubRegistry) ShutdownAll()                        {}
 
 func newLSPTestModel(t *testing.T) (Model, *stubClient) {

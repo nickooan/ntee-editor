@@ -17,6 +17,11 @@ type Memory struct {
 	corpus    *CorpusIndex
 }
 
+// The in-memory fallback has nothing on disk to inspect or maintain.
+func (m *Memory) Maintenance() (DBInfo, error) { return DBInfo{}, ErrNoStats }
+func (m *Memory) Compact() error               { return ErrNoStats }
+func (m *Memory) RelieveBlobs() error          { return ErrNoStats }
+
 func NewMemory() *Memory {
 	return &Memory{
 		opened:    map[string]OpenedFile{},

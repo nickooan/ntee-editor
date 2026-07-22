@@ -102,7 +102,7 @@ func main() {
 		reg = manager
 	}
 
-	program := tea.NewProgram(app.New(cfg, db, absRoot, notice, reg), tea.WithAltScreen())
+	program := tea.NewProgram(app.New(cfg, db, absRoot, notice, reg), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if manager != nil {
 		manager.SetSink(func(msg any) { program.Send(msg) })
 		defer manager.ShutdownAll()

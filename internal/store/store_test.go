@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -212,5 +213,51 @@ func TestDraftSurvivesSnapshotEviction(t *testing.T) {
 	}
 	if d, ok := s.LoadDraft("a.go"); !ok || d.Content != "precious" {
 		t.Fatalf("draft lost to snapshot eviction: %+v ok=%v", d, ok)
+	}
+}
+
+func TestMaintenanceAndCompact(t *testing.T) {
+	s := openTestStore(t)
+	// Overwrite the same key repeatedly so the main log holds dead versions.
+	for i := 0; i < 20; i++ {
+		if err := s.SaveSession(Session{Command: "cmd"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	info, err := s.Maintenance()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Records == 0 {
+		t.Fatal("expected live records")
+	}
+	if info.MainBytes <= info.LiveBytes {
+		t.Fatalf("expected dead space before compact: main=%d live=%d", info.MainBytes, info.LiveBytes)
+	}
+	if err := s.Compact(); err != nil {
+		t.Fatal(err)
+	}
+	after, err := s.Maintenance()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.MainBytes != after.LiveBytes {
+		t.Fatalf("compact should drop dead space: main=%d live=%d", after.MainBytes, after.LiveBytes)
+	}
+	if err := s.RelieveBlobs(); err != nil {
+		t.Fatalf("relieve on a healthy store should succeed: %v", err)
+	}
+}
+
+func TestMemoryMaintenanceUnavailable(t *testing.T) {
+	m := NewMemory()
+	if _, err := m.Maintenance(); !errors.Is(err, ErrNoStats) {
+		t.Fatalf("Maintenance err = %v, want ErrNoStats", err)
+	}
+	if err := m.Compact(); !errors.Is(err, ErrNoStats) {
+		t.Fatalf("Compact err = %v, want ErrNoStats", err)
+	}
+	if err := m.RelieveBlobs(); !errors.Is(err, ErrNoStats) {
+		t.Fatalf("RelieveBlobs err = %v, want ErrNoStats", err)
 	}
 }

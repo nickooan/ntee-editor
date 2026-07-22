@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -94,9 +95,28 @@ type CorpusIndex struct {
 	Truncated bool             `json:"truncated"` // the walk hit MaxIndexFiles
 }
 
+// ErrNoStats marks a backend without maintenance support (the in-memory
+// fallback has no on-disk store to inspect or compact).
+var ErrNoStats = errors.New("store statistics unavailable")
+
+// DBInfo is a point-in-time snapshot of the project store's disk usage.
+type DBInfo struct {
+	Records   int
+	MainBytes int64 // main log on disk, incl. dead records
+	LiveBytes int64 // what Compact would shrink the log to
+
+	BlobTotalBytes int64
+	BlobLiveBytes  int64
+	BlobOrphaned   int64
+	Generations    int // >1 means a crashed relieve left a stray file
+}
+
 // Backend is the persistence surface the app depends on. Store (ntee-db) and
 // Memory (fallback when the store's flock is held) both satisfy it.
 type Backend interface {
+	Maintenance() (DBInfo, error) // ErrNoStats when unsupported
+	Compact() error
+	RelieveBlobs() error
 	TouchOpened(f OpenedFile) error
 	RecentFiles(limit int) []OpenedFile
 	DeleteOpenedUnder(rel string) error
@@ -169,6 +189,23 @@ func Open(projectRoot string, maxSnapshotsPerFile int) (*Store, error) {
 }
 
 func (s *Store) Close() error { return s.db.Close() }
+
+// Maintenance gathers disk-usage statistics. BlobUsage does O(records) preads,
+// so this is only ever called from a tea.Cmd goroutine, never during render.
+func (s *Store) Maintenance() (DBInfo, error) {
+	st := s.db.Stats()
+	info := DBInfo{Records: st.Records, MainBytes: st.MainBytes, LiveBytes: s.db.LiveBytes()}
+	u, err := s.db.BlobUsage()
+	if err != nil {
+		return info, err
+	}
+	info.BlobTotalBytes, info.BlobLiveBytes = u.TotalBytes, u.LiveBytes
+	info.BlobOrphaned, info.Generations = u.OrphanedBytes, u.Generations
+	return info, nil
+}
+
+func (s *Store) Compact() error      { return s.db.Compact() }
+func (s *Store) RelieveBlobs() error { return s.db.BlobsRelieve() }
 
 func (s *Store) TouchOpened(f OpenedFile) error {
 	data, err := json.Marshal(f)

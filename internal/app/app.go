@@ -31,12 +31,14 @@ const (
 	modeCommand
 	modeExec       // "@exec >" editor-command bar (Ctrl+E from edit mode)
 	modeSearchExec // "@search … >" replace-command bar (Ctrl+E from search mode)
+	modeInspect    // "@inspection >" dashboard (Ctrl+T): store stats + lsp control
 )
 
 // inBarMode reports whether keystrokes are feeding a text-input bar, where
 // global chords (Ctrl+P/U/G, Shift+Tab) must not fire.
 func (m Model) inBarMode() bool {
-	return m.mode == modeCommand || m.mode == modeSearch || m.mode == modeExec || m.mode == modeSearchExec
+	return m.mode == modeCommand || m.mode == modeSearch || m.mode == modeExec ||
+		m.mode == modeSearchExec || m.mode == modeInspect
 }
 
 type Model struct {
@@ -141,6 +143,18 @@ type Model struct {
 	// execSugIndex is the ↑/↓-cycled candidate that Tab accepts.
 	execSugs     []string
 	execSugIndex int
+
+	// Inspection dashboard (Ctrl+T): left menu (ntee-db / lsp), right info
+	// pane, "@inspection >" command bar. Store stats are fetched async on
+	// entry and after maintenance ops (BlobUsage does I/O).
+	inspectPrevMode mode
+	inspectMenu     int // 0 = ntee-db, 1 = lsp
+	inspectInput    string
+	inspectCursor   int
+	inspectInfo     store.DBInfo
+	inspectInfoErr  error // store.ErrNoStats → in-memory fallback text
+	inspectLoading  bool  // stats fetch in flight
+	inspectBusy     string // "" | "compact" | "relieve" — blocks duplicate runs
 
 	// Fuzzy file finder overlay: Ctrl+P (whole project) and Ctrl+U (uncommitted
 	// files only) share it; fuzzyPrompt labels which source is showing.
@@ -418,6 +432,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.notice = msg.Text
 		return m, nil
 
+	case inspectStatsMsg:
+		m.inspectLoading = false
+		m.inspectInfo, m.inspectInfoErr = msg.info, msg.err
+		return m, nil
+
+	case inspectMaintMsg:
+		// Landing after Esc is harmless: only cached fields and the transient
+		// notice are touched (same contract as lsp.NoticeMsg).
+		m.inspectBusy = ""
+		if msg.err != nil {
+			m.errText = "db " + msg.op + ": " + msg.err.Error()
+			return m, nil
+		}
+		m.notice = "db " + msg.op + " done"
+		m.inspectLoading = true
+		return m, m.fetchDBInfoCmd() // re-fetch so the pane shows the shrink
+
 	case corpusMsg:
 		// A background rebuild landed: swap in the fresh corpus and the reloaded
 		// .gitignore (keeps the sidebar's graying consistent with the corpus),
@@ -504,6 +535,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Type == tea.KeyCtrlG && !m.inBarMode() {
 			return m.openGrep()
 		}
+		if msg.Type == tea.KeyCtrlT && !m.inBarMode() {
+			return m.enterInspect()
+		}
 		if msg.Type == tea.KeyShiftTab && !m.inBarMode() {
 			return m.cycleTab(), nil
 		}
@@ -521,6 +555,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleExecKey(msg)
 		case modeSearchExec:
 			return m.handleSearchExecKey(msg)
+		case modeInspect:
+			return m.handleInspectKey(msg)
 		}
 	}
 	return m, nil

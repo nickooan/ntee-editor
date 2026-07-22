@@ -30,12 +30,16 @@ func (m Model) View() string {
 	// terminal-default background against the themed panes.
 	mainWidth := max(3, m.width-sidebarWidth)
 
-	sidebar := paneStyle.Width(sidebarWidth - 2).Height(bodyHeight - 2).
-		Render(m.renderSidebar(sidebarWidth-4, bodyHeight-2))
+	sidebarBody := m.renderSidebar(sidebarWidth-4, bodyHeight-2)
+	if m.mode == modeInspect {
+		// Inspection owns both panes: the file tree gives way to the menu.
+		sidebarBody = m.renderInspectMenu(sidebarWidth-4, bodyHeight-2)
+	}
+	sidebar := paneStyle.Width(sidebarWidth - 2).Height(bodyHeight - 2).Render(sidebarBody)
 
 	// Overlays own the whole pane; otherwise the tab strip steals the top row.
 	overlayOpen := m.fuzzyOpen || m.messageOverlay != "" || m.defPickOpen || m.grepOpen
-	showTabs := len(m.tabs) > 0 && !overlayOpen
+	showTabs := len(m.tabs) > 0 && !overlayOpen && m.mode != modeInspect
 	innerH := bodyHeight - 2
 	if showTabs {
 		innerH -= 2 // tab strip + divider row
@@ -51,6 +55,8 @@ func (m Model) View() string {
 		mainBody = m.renderDefPickOverlay(mainWidth-4, bodyHeight-2)
 	case m.grepOpen:
 		mainBody = m.renderGrepOverlay(mainWidth-4, bodyHeight-2)
+	case m.mode == modeInspect:
+		mainBody = m.renderInspectMain(mainWidth-4, innerH)
 	case m.mode == modeSearch || m.mode == modeSearchExec:
 		mainBody = m.renderSearch(mainWidth-4, innerH)
 	case m.mode == modeQuery:
@@ -138,6 +144,26 @@ func (m Model) renderStatusLine() string {
 	case modeCommand:
 		return promptStyle.Render(":") + renderInputLine(m.cmdInput, m.cmdCursor) +
 			statusTextStyle.Render("   ") + hintStyle.Render("jump <line|top|end> · tab <name|cl|cr> · revert")
+	case modeInspect:
+		bar := execPromptStyle.Render("@inspection >") +
+			renderInputLineStyled(m.inspectInput, m.inspectCursor, execTextStyle) +
+			execTextStyle.Render("   ")
+		if m.errText != "" {
+			bar += errStyle.Render(m.errText) + execTextStyle.Render("   ")
+		}
+		if m.notice != "" {
+			bar += noticeStyle.Render(m.notice) + execTextStyle.Render("   ")
+		}
+		if m.inspectBusy != "" {
+			bar += editingStyle.Render(m.inspectBusy+"…") + execTextStyle.Render("   ")
+		}
+		bar += hintStyle.Render("db compact|relieve · lsp enable|disable <lang|all> · Shift+↑/↓ pane · Esc back")
+		// Pre-pad in the exec background so padStatusRows leaves the row's
+		// color intact (same trick as the @exec bar).
+		if pad := m.width - lipgloss.Width(bar); pad > 0 {
+			bar += execTextStyle.Render(strings.Repeat(" ", pad))
+		}
+		return bar
 	}
 	return ""
 }

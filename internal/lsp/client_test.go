@@ -471,8 +471,17 @@ func TestNewManagerHonorsEnable(t *testing.T) {
 	if m.extLang[".go"] != "go" {
 		t.Fatalf("enabled language should route: %v", m.extLang)
 	}
-	if _, ok := m.extLang[".ts"]; ok {
-		t.Fatal("disabled language must not be in extLang")
+	// Disabled languages keep their extension mapping (extLang is immutable so
+	// runtime Enable can work without touching it); they are gated by a seeded
+	// disabled reason instead, so no client resolves and the reason surfaces.
+	if m.extLang[".ts"] != "typescript" {
+		t.Fatalf("disabled language should still map its extension: %v", m.extLang)
+	}
+	if _, ok := m.ClientFor("/x/a.ts"); ok {
+		t.Fatal("disabled language must not resolve a client")
+	}
+	if reason := m.UnavailableReason("/x/a.ts"); reason != "disabled in config" {
+		t.Fatalf("UnavailableReason = %q", reason)
 	}
 }
 

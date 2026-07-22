@@ -23,6 +23,11 @@ func click(m Model, x, y int) Model {
 	return next.(Model)
 }
 
+func wheel(m Model, button tea.MouseButton) Model {
+	next, _ := m.Update(tea.MouseMsg{X: testTextX, Y: testTextY, Action: tea.MouseActionPress, Button: button})
+	return next.(Model)
+}
+
 func mouseFixture(t *testing.T) Model {
 	t.Helper()
 	m, _ := newTestModel(t, nil)
@@ -103,6 +108,92 @@ func TestClickOnScrolledCursorLine(t *testing.T) {
 	}
 }
 
+func TestWheelScrollsCursorInEditMode(t *testing.T) {
+	m, root := newTestModel(t, nil)
+	var b strings.Builder
+	for i := 0; i < 30; i++ {
+		b.WriteString("line\n")
+	}
+	must(t, os.WriteFile(filepath.Join(root, "tall.txt"), []byte(b.String()), 0o644))
+	m = m.openFileAt("tall.txt")
+	m.edit.cy, m.edit.cx = 10, 0
+
+	m = wheel(m, tea.MouseButtonWheelDown)
+	if m.edit.cy != 10+wheelScrollLines {
+		t.Fatalf("wheel down: cy = %d, want %d", m.edit.cy, 10+wheelScrollLines)
+	}
+	m = wheel(m, tea.MouseButtonWheelUp)
+	if m.edit.cy != 10 {
+		t.Fatalf("wheel up: cy = %d, want 10", m.edit.cy)
+	}
+
+	// Clamps at the top and bottom.
+	m.edit.cy = 1
+	m = wheel(m, tea.MouseButtonWheelUp)
+	if m.edit.cy != 0 {
+		t.Fatalf("wheel up should clamp at 0, got %d", m.edit.cy)
+	}
+	last := len(m.edit.lines) - 1
+	m.edit.cy = last - 1
+	m = wheel(m, tea.MouseButtonWheelDown)
+	if m.edit.cy != last {
+		t.Fatalf("wheel down should clamp at last line %d, got %d", last, m.edit.cy)
+	}
+}
+
+func TestHorizontalWheelDoesNothing(t *testing.T) {
+	m := mouseFixture(t)
+	m.edit.cy, m.edit.cx = 2, 4
+	before := m.edit.content()
+	for _, btn := range []tea.MouseButton{tea.MouseButtonWheelLeft, tea.MouseButtonWheelRight} {
+		m = wheel(m, btn)
+		if m.edit.cy != 2 || m.edit.cx != 4 {
+			t.Fatalf("horizontal wheel %v moved the cursor to (%d,%d)", btn, m.edit.cy, m.edit.cx)
+		}
+		if m.edit.content() != before {
+			t.Fatalf("horizontal wheel %v changed the buffer", btn)
+		}
+	}
+}
+
+func TestWheelScrollsFileInQueryMode(t *testing.T) {
+	m, root := newTestModel(t, nil)
+	var b strings.Builder
+	for i := 0; i < 30; i++ {
+		b.WriteString("line\n")
+	}
+	must(t, os.WriteFile(filepath.Join(root, "tall.txt"), []byte(b.String()), 0o644))
+	m = m.openFileAt("tall.txt") // opens in edit mode
+	m = ctrl(m, tea.KeyEsc)      // back to query mode, file still shown
+	if m.mode != modeQuery {
+		t.Fatalf("expected query mode, got %v", m.mode)
+	}
+	before := m.edit.cy
+	m = wheel(m, tea.MouseButtonWheelDown)
+	if m.fileScrollY != wheelScrollLines {
+		t.Fatalf("query wheel down: fileScrollY = %d, want %d", m.fileScrollY, wheelScrollLines)
+	}
+	if m.edit.cy != before {
+		t.Fatal("query-mode scroll must not move the edit cursor")
+	}
+}
+
+func TestWheelIgnoredWithOverlayOrNoFile(t *testing.T) {
+	// Overlay open: wheel is a no-op.
+	m := mouseFixture(t)
+	m.edit.cy = 5
+	m.fuzzyOpen = true
+	if got := wheel(m, tea.MouseButtonWheelDown); got.edit.cy != 5 {
+		t.Fatalf("wheel with overlay open moved cursor to %d", got.edit.cy)
+	}
+
+	// Query mode, no open file: no panic, no-op.
+	m2, _ := newTestModel(t, nil)
+	if got := wheel(m2, tea.MouseButtonWheelDown); got.fileScrollY != 0 {
+		t.Fatalf("wheel with no file scrolled to %d", got.fileScrollY)
+	}
+}
+
 func TestClickIgnoredOutsideEditMode(t *testing.T) {
 	m, _ := newTestModel(t, nil) // query mode
 	before := m
@@ -116,7 +207,6 @@ func TestNonLeftClickIgnored(t *testing.T) {
 	m := mouseFixture(t)
 	m.edit.cy, m.edit.cx = 2, 4
 	for _, ev := range []tea.MouseMsg{
-		{X: testTextX, Y: testTextY, Action: tea.MouseActionPress, Button: tea.MouseButtonWheelUp},
 		{X: testTextX, Y: testTextY, Action: tea.MouseActionPress, Button: tea.MouseButtonRight},
 		{X: testTextX, Y: testTextY, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft},
 		{X: testTextX, Y: testTextY, Action: tea.MouseActionMotion, Button: tea.MouseButtonLeft},

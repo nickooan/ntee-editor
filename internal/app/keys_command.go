@@ -139,6 +139,9 @@ func (m Model) openFuzzy() (Model, tea.Cmd) {
 			ordered = append(ordered, rel)
 		}
 	}
+	// Directories ("/"-suffixed) go last so the empty-query view stays a file
+	// list; typed queries mix them in by score.
+	ordered = append(ordered, m.dirCorpus...)
 
 	m.fuzzyOpen = true
 	m.fuzzyQuery = ""
@@ -205,6 +208,12 @@ func (m Model) handleFuzzyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		idx := input.Clamp(m.fuzzyIndex, 0, len(m.fuzzyMatches)-1)
 		rel := m.fuzzyCorpus[m.fuzzyMatches[idx].Index].Text
+		if strings.HasSuffix(rel, "/") {
+			// Directory: drill down inside the finder instead of opening.
+			m.fuzzyQuery = rel
+			m = m.refreshFuzzy()
+			break
+		}
 		m = m.closeFuzzy()
 		if m.mode == modeEdit {
 			m = m.flushBurst() // keep the abandoned buffer reachable in history
@@ -231,6 +240,19 @@ func (m Model) handleFuzzyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) refreshFuzzy() Model {
 	m.fuzzyMatches = fuzzy.Filter(m.fuzzyQuery, m.fuzzyCorpus)
+	// After Enter-on-a-directory sets the query to that directory, the dir
+	// itself would rank first (exact, shortest) and Enter would loop on it;
+	// a dir candidate equal to the query offers nothing, so drop it.
+	if q := strings.ToLower(m.fuzzyQuery); strings.HasSuffix(q, "/") {
+		kept := m.fuzzyMatches[:0]
+		for _, match := range m.fuzzyMatches {
+			if strings.ToLower(m.fuzzyCorpus[match.Index].Text) == q {
+				continue
+			}
+			kept = append(kept, match)
+		}
+		m.fuzzyMatches = kept
+	}
 	m.fuzzyIndex = 0
 	return m
 }

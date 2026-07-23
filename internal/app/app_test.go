@@ -271,6 +271,43 @@ func TestFuzzyOverlayOpensFile(t *testing.T) {
 	}
 }
 
+func TestFuzzyOverlayDirDrillDown(t *testing.T) {
+	m, _ := newTestModel(t, nil)
+	m = key(m, tea.KeyMsg{Type: tea.KeyCtrlP})
+	m = runes(m, "lib")
+	dirIdx := -1
+	for i, match := range m.fuzzyMatches {
+		if m.fuzzyCorpus[match.Index].Text == "lib/" {
+			dirIdx = i
+		}
+	}
+	if dirIdx < 0 {
+		t.Fatalf("dir candidate lib/ missing from matches")
+	}
+	m.fuzzyIndex = dirIdx
+	m = key(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if !m.fuzzyOpen || m.fuzzyQuery != "lib/" {
+		t.Fatalf("enter on a dir should drill down in place: open=%v query=%q", m.fuzzyOpen, m.fuzzyQuery)
+	}
+	// The dir itself is dropped from its own drill-down so Enter can't loop.
+	sawFile := false
+	for _, match := range m.fuzzyMatches {
+		switch m.fuzzyCorpus[match.Index].Text {
+		case "lib/":
+			t.Fatal("the drilled dir should not list itself")
+		case "lib/util.ts":
+			sawFile = true
+		}
+	}
+	if !sawFile {
+		t.Fatalf("drill-down should list the dir's files")
+	}
+	m = key(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.fuzzyOpen || m.openRel != "lib/util.ts" {
+		t.Fatalf("second enter should open the file, got %q", m.openRel)
+	}
+}
+
 func TestHighlightCacheStaysAlignedAcrossNewline(t *testing.T) {
 	m, _ := newTestModel(t, nil)
 	m = m.openFileAt("main.go")

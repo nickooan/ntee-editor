@@ -32,9 +32,11 @@ func suggestionFor(e FileTreeEntry) InputSuggestion {
 // BuildInputSuggestions completes a typed query-bar path. Exact and prefix
 // stages run over the VISIBLE entries (the current expanded tree), preserving
 // directory-path navigation; the fuzzy stage runs score-ranked over the full
-// file corpus so keywords find files inside collapsed directories. Results are
+// file and directory corpus so keywords find entries inside collapsed
+// directories. Directory candidates in allDirs carry a trailing "/" (the tree's
+// CommandValue convention) and mix into the fuzzy ranking by score. Results are
 // deduped by path, ordered exact ++ prefix ++ fuzzy, capped at limit.
-func BuildInputSuggestions(visible []FileTreeEntry, allFiles []string, command string, limit int) []InputSuggestion {
+func BuildInputSuggestions(visible []FileTreeEntry, allFiles, allDirs []string, command string, limit int) []InputSuggestion {
 	trimmed := strings.TrimSpace(command)
 	if trimmed == "" || strings.HasPrefix(trimmed, ":") {
 		return nil
@@ -53,18 +55,25 @@ func BuildInputSuggestions(visible []FileTreeEntry, allFiles []string, command s
 		}
 	}
 
+	candidates := make([]string, 0, len(allFiles)+len(allDirs))
+	candidates = append(candidates, allFiles...)
+	candidates = append(candidates, allDirs...)
 	fz := make([]InputSuggestion, 0, limit)
-	for _, m := range fuzzy.Filter(normalized, fuzzy.Prepare(allFiles)) {
-		rel := allFiles[m.Index]
+	for _, m := range fuzzy.Filter(normalized, fuzzy.Prepare(candidates)) {
+		cv := candidates[m.Index]
+		rel, typ := cv, "file"
+		if m.Index >= len(allFiles) {
+			rel, typ = strings.TrimSuffix(cv, "/"), "directory"
+		}
 		fz = append(fz, InputSuggestion{
-			Label:      rel,
-			InsertText: rel,
-			Source:     "file",
+			Label:      cv,
+			InsertText: cv,
+			Source:     typ,
 			Entry: FileTreeEntry{
 				Name:         path.Base(rel),
 				RelativePath: rel,
-				CommandValue: rel,
-				Type:         "file",
+				CommandValue: cv,
+				Type:         typ,
 			},
 		})
 		if len(fz) >= limit {

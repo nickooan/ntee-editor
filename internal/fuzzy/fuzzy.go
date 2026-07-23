@@ -32,8 +32,10 @@ type Prepared struct {
 func Prepare(candidates []string) []Prepared {
 	out := make([]Prepared, len(candidates))
 	for i, c := range candidates {
+		// Directory candidates carry a trailing "/"; anchor their basename on
+		// the last real segment so the basename bonuses can still apply.
 		base, ci := 0, 0
-		for _, r := range c {
+		for _, r := range strings.TrimSuffix(c, "/") {
 			if r == '/' {
 				base = ci + 1
 			}

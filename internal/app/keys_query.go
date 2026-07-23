@@ -17,7 +17,7 @@ import (
 func (m Model) queryInputSuggestions(entries []filetree.FileTreeEntry) []filetree.InputSuggestion {
 	// Reads the cached corpus (populated by ensureCorpus in the key handler);
 	// never walks the tree here, so this is cheap on every keystroke and render.
-	return filetree.BuildInputSuggestions(entries, m.corpus, m.command, filetree.MaxInputSuggestions)
+	return filetree.BuildInputSuggestions(entries, m.corpus, m.dirCorpus, m.command, filetree.MaxInputSuggestions)
 }
 
 // handleQueryKey is the home-mode handler: the bottom input bar drives the

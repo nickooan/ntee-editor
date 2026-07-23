@@ -402,3 +402,53 @@ func TestGrepParallelDeterministic(t *testing.T) {
 		prev = got
 	}
 }
+
+// Ctrl+J inserts a newline; pasted CR/CRLF line endings normalize to \n so a
+// multi-line literal matches the snapshot's normalized content end-to-end.
+func TestGrepMultilineQuery(t *testing.T) {
+	m := grepFixture(t)
+	m = key(m, tea.KeyMsg{Type: tea.KeyCtrlG})
+	m = grepLoad(t, m)
+
+	m = runes(m, "here")
+	m = key(m, tea.KeyMsg{Type: tea.KeyCtrlJ})
+	m = runes(m, "func")
+	if m.grepQuery != "here\nfunc" {
+		t.Fatalf("ctrl+j should insert a newline: %q", m.grepQuery)
+	}
+	m = grepSettle(t, m)
+	if len(m.grepResults) != 1 || m.grepResults[0].rel != "alpha.go" || m.grepResults[0].line != 2 {
+		t.Fatalf("multi-line literal should hit alpha.go at its start line: %+v", m.grepResults)
+	}
+
+	// Bracketed paste delivers one KeyRunes message with raw CR/CRLF endings.
+	m = key(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m = key(m, tea.KeyMsg{Type: tea.KeyCtrlG})
+	m = grepLoad(t, m)
+	m = key(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("here\r\nfunc")})
+	if m.grepQuery != "here\nfunc" {
+		t.Fatalf("pasted CRLF should normalize: %q", m.grepQuery)
+	}
+	m = key(m, tea.KeyMsg{Type: tea.KeyBackspace})
+	if m.grepQuery != "here\nfun" {
+		t.Fatalf("backspace should cross into the last line: %q", m.grepQuery)
+	}
+}
+
+// The overlay box height must not change as the query grows lines, including
+// past the grepMaxInputRows display cap.
+func TestGrepOverlayMultilineInputHeightStable(t *testing.T) {
+	m := grepFixture(t)
+	m = key(m, tea.KeyMsg{Type: tea.KeyCtrlG})
+	m = grepLoad(t, m)
+	m = runes(m, "grepNeedle")
+	m = grepSettle(t, m)
+	base := strings.Count(m.renderGrepOverlay(100, 30), "\n")
+	for lines := 2; lines <= 5; lines++ {
+		m = key(m, tea.KeyMsg{Type: tea.KeyCtrlJ})
+		m = runes(m, "x")
+		if got := strings.Count(m.renderGrepOverlay(100, 30), "\n"); got != base {
+			t.Fatalf("%d-line query changed overlay height: %d != %d", lines, got, base)
+		}
+	}
+}

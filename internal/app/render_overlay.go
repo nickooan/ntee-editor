@@ -172,6 +172,57 @@ func renderPreviewRows(lines []string, hl [][]view.HighlightSegment, re *regexp.
 	return rows
 }
 
+// grepMaxInputRows caps how many rows of a multi-line query the grep overlay
+// displays; the cursor lives at the end, so the last lines are the ones shown.
+const grepMaxInputRows = 3
+
+// renderGrepInputRows renders the grep query one row per line: prompt and
+// right-aligned count on the first row, aligned padding on continuations,
+// cursor at the end of the last line. Queries over grepMaxInputRows lines show
+// their last lines behind a "…" marker.
+func renderGrepInputRows(query, count string, innerW int) []string {
+	lines := strings.Split(query, "\n")
+	clipped := false
+	if len(lines) > grepMaxInputRows {
+		lines = lines[len(lines)-grepMaxInputRows:]
+		clipped = true
+	}
+	promptW := lipgloss.Width("grep ")
+	avail := max(1, innerW-promptW)
+	rows := make([]string, 0, len(lines))
+	for i, line := range lines {
+		if i == 0 && clipped {
+			line = "…" + line
+		}
+		var body string
+		if i == len(lines)-1 {
+			// The cursor row: keep the tail (where the cursor is) visible,
+			// reserving one cell for the cursor itself.
+			if runes := []rune(line); len(runes) > avail-1 {
+				line = string(runes[len(runes)-(avail-1):])
+			}
+			body = renderInputLine(line, len([]rune(line)))
+		} else {
+			body = statusTextStyle.Render(truncateRunes(line, avail))
+		}
+		var row string
+		if i == 0 {
+			row = promptStyle.Render("grep ") + body
+			if pad := innerW - lipgloss.Width(row) - lipgloss.Width(count); pad > 0 {
+				row += statusTextStyle.Render(strings.Repeat(" ", pad)) + overlayHintStyle.Render(count)
+			}
+		} else {
+			row = statusTextStyle.Render(strings.Repeat(" ", promptW)) + body
+		}
+		// Fill the bar background to the full row width.
+		if pad := innerW - lipgloss.Width(row); pad > 0 {
+			row += statusTextStyle.Render(strings.Repeat(" ", pad))
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
 // renderGrepOverlay draws the repo-wide content search: top ~60% is a
 // syntax-colored preview of the selected hit (match highlighted), bottom ~40%
 // is the query input plus the result list.
@@ -187,7 +238,14 @@ func (m Model) renderGrepOverlay(width, height int) string {
 	rows := make([]string, 0, innerH)
 
 	// --- top: preview of the selected hit ---
-	re := view.CreateMultilineSearchRegex(m.grepQuery)
+	// The preview highlights per line, so a pattern containing a literal
+	// newline can never match there; highlight the first query line instead
+	// so the hit's start line still lights up.
+	previewQuery := m.grepQuery
+	if i := strings.IndexByte(previewQuery, '\n'); i >= 0 {
+		previewQuery = previewQuery[:i]
+	}
+	re := view.CreateMultilineSearchRegex(previewQuery)
 	_, hit, ok := m.grepSelectedFile()
 	if ok && m.grepPrevLines != nil {
 		rows = append(rows, renderPreviewRows(m.grepPrevLines, m.grepHl, re, hit.line, previewH, innerW)...)
@@ -217,13 +275,10 @@ func (m Model) renderGrepOverlay(width, height int) string {
 	case m.grepResultsGen != m.grepSearchGen:
 		count = "searching…"
 	}
-	inputRow := promptStyle.Render("grep ") + renderInputLine(m.grepQuery, len([]rune(m.grepQuery)))
-	if pad := innerW - lipgloss.Width(inputRow) - lipgloss.Width(count); pad > 0 {
-		inputRow += statusTextStyle.Render(strings.Repeat(" ", pad)) + overlayHintStyle.Render(count)
-	}
-	rows = append(rows, inputRow)
+	inputRows := renderGrepInputRows(m.grepQuery, count, innerW)
+	rows = append(rows, inputRows...)
 
-	visible := min(len(m.grepResults), listH-1)
+	visible := min(len(m.grepResults), max(0, listH-len(inputRows)))
 	selected := input.Clamp(m.grepIndex, 0, max(0, len(m.grepResults)-1))
 	start := 0
 	if selected >= visible && visible > 0 {
@@ -256,10 +311,15 @@ func (m Model) renderGrepOverlay(width, height int) string {
 }
 
 // renderFuzzyRow renders one candidate path, bolding the matched rune
-// positions; the selected row is reversed whole.
+// positions; the selected row is reversed whole. Directory candidates (trailing
+// "/") render in the tree's directory color.
 func renderFuzzyRow(path string, positions []int, width int, selected bool) string {
 	if selected {
 		return selectedEntryStyle.Render(padTo(truncateRunes(" "+path, width), width))
+	}
+	textStyle := baseStyle
+	if strings.HasSuffix(path, "/") {
+		textStyle = dirStyle
 	}
 	matched := make(map[int]bool, len(positions))
 	for _, p := range positions {
@@ -276,7 +336,7 @@ func renderFuzzyRow(path string, positions []int, width int, selected bool) stri
 		if matched[i] {
 			b.WriteString(fuzzyBoldStyle.Render(string(r)))
 		} else {
-			b.WriteString(baseStyle.Render(string(r)))
+			b.WriteString(textStyle.Render(string(r)))
 		}
 		rendered++
 	}

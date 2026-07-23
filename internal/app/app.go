@@ -171,6 +171,7 @@ type Model struct {
 	// external changes by a background rebuild (see ensureCorpus/rebuildCorpusCmd).
 	// corpusBuiltAt zero means "never built" (cold cache).
 	corpus           []string
+	dirCorpus        []string // "/"-suffixed rel dirs from the same walk (dirMtimes keys)
 	corpusBuiltAt    time.Time
 	corpusRebuilding bool
 	corpusTruncated  bool // the walk hit Tree.MaxIndexFiles — index is partial
@@ -273,6 +274,7 @@ func New(cfg config.Config, db store.Backend, root, notice string, reg lsp.Regis
 	// matches the tree (a cheap stat-sweep), skipping the full walk entirely.
 	if idx, ok := db.LoadCorpus(); ok && idx.Version == store.CorpusVersion && m.signatureValid(idx) {
 		m.corpus = idx.Files
+		m.dirCorpus = filetree.DirsFromMtimes(idx.DirMtimes)
 		m.corpusTruncated = idx.Truncated
 		m.corpusBuiltAt = time.Now()
 	}
@@ -362,8 +364,9 @@ type corpusMsg struct {
 // corpusMsg handler — the in-flight Init/TTL rebuild reconciles and stores.)
 func (m Model) ensureCorpus() (Model, tea.Cmd) {
 	if m.corpusBuiltAt.IsZero() {
-		files, _, truncated := filetree.BuildAllEntries(m.root, m.cfg.Tree.Ignore, m.gitignore, m.cfg.Tree.MaxIndexFiles)
+		files, dirMtimes, truncated := filetree.BuildAllEntries(m.root, m.cfg.Tree.Ignore, m.gitignore, m.cfg.Tree.MaxIndexFiles)
 		m.corpus = files
+		m.dirCorpus = filetree.DirsFromMtimes(dirMtimes)
 		m.corpusTruncated = truncated
 		m.corpusBuiltAt = time.Now()
 		if truncated {
@@ -455,6 +458,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// then persist it so the next launch is a warm start. Persisting here (on
 		// the main goroutine) keeps all DB writes off the rebuild goroutine.
 		m.corpus = msg.files
+		m.dirCorpus = filetree.DirsFromMtimes(msg.dirMtimes)
 		m.gitignore = msg.gi
 		m.corpusBuiltAt = msg.builtAt
 		m.corpusRebuilding = false

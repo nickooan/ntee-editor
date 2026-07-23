@@ -375,8 +375,15 @@ func (m Model) handleGrepKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeySpace:
 		m.grepQuery += " "
 		m, cmd = m.queueGrepSearch()
+	case tea.KeyCtrlJ:
+		m.grepQuery += "\n"
+		m, cmd = m.queueGrepSearch()
 	case tea.KeyRunes:
-		m.grepQuery += string(msg.Runes)
+		// Bracketed paste delivers newlines inside one KeyRunes message, and
+		// terminals send them as CR; normalize to \n so the query matches the
+		// snapshot's CRLF-normalized content.
+		s := strings.ReplaceAll(string(msg.Runes), "\r\n", "\n")
+		m.grepQuery += strings.ReplaceAll(s, "\r", "\n")
 		m, cmd = m.queueGrepSearch()
 	}
 	return m, cmd

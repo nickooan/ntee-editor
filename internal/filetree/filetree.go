@@ -490,6 +490,25 @@ func BuildAllEntries(root string, ignore []string, gi *Gitignore, maxFiles int) 
 	return files, dirMtimes, truncated
 }
 
+// DirsFromMtimes returns the visited directories of a walk signature as sorted
+// root-relative paths with a trailing "/", root ("") excluded. The keys of
+// dirMtimes are exactly the non-ignored directories BuildAllEntries descended,
+// so the result matches the file corpus' ignore semantics for free.
+func DirsFromMtimes(dirMtimes map[string]int64) []string {
+	if len(dirMtimes) == 0 {
+		return nil
+	}
+	dirs := make([]string, 0, len(dirMtimes))
+	for dir := range dirMtimes {
+		if dir == "" {
+			continue
+		}
+		dirs = append(dirs, dir+"/")
+	}
+	sort.Strings(dirs)
+	return dirs
+}
+
 // FileTreeViewport is the visible window of the tree.
 type FileTreeViewport struct {
 	Entries     []FileTreeEntry

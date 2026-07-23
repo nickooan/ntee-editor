@@ -73,3 +73,16 @@ func TestPrefilterRejectsOutOfOrder(t *testing.T) {
 		t.Fatalf("in-order subsequence must match: %+v", got)
 	}
 }
+
+func TestPrepareDirBaseStart(t *testing.T) {
+	p := Prepare([]string{"src/app/", "src/app/main.go", "top/"})
+	if p[0].baseStart != 4 {
+		t.Fatalf("dir basename should anchor on the last segment: %d", p[0].baseStart)
+	}
+	if p[1].baseStart != 8 {
+		t.Fatalf("file basename unchanged: %d", p[1].baseStart)
+	}
+	if p[2].baseStart != 0 {
+		t.Fatalf("top-level dir basename: %d", p[2].baseStart)
+	}
+}

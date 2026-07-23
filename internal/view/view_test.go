@@ -38,8 +38,17 @@ func TestCreateSearchRegexLiteralFallback(t *testing.T) {
 	if re == nil || !re.MatchString("call foo(") {
 		t.Fatal("literal fallback failed")
 	}
-	if re := CreateSearchRegex("f.o"); re == nil || !re.MatchString("FAO") == false && !re.MatchString("foo") {
+	if re := CreateSearchRegex("f.o"); re == nil || !re.MatchString("foo") {
 		t.Fatal("regex mode failed")
+	}
+}
+
+func TestSearchIsCaseSensitive(t *testing.T) {
+	if re := CreateSearchRegex("foo"); re == nil || re.MatchString("FOO") {
+		t.Fatal("in-file search must not case-fold")
+	}
+	if matches := FindSearchMatches("Foo foo FOO", "foo"); len(matches) != 1 || matches[0].Start != 4 {
+		t.Fatalf("want exactly the lowercase match, got %+v", matches)
 	}
 }
 

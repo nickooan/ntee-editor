@@ -21,16 +21,16 @@ type LineMatch struct {
 	MatchIndex int
 }
 
-// CreateSearchRegex builds a case-insensitive regex from the query, falling
+// CreateSearchRegex builds a case-sensitive regex from the query, falling
 // back to a literal match when the query is not valid regex.
 func CreateSearchRegex(query string) *regexp.Regexp {
 	if query == "" {
 		return nil
 	}
-	if re, err := regexp.Compile("(?i)" + query); err == nil {
+	if re, err := regexp.Compile(query); err == nil {
 		return re
 	}
-	re, _ := regexp.Compile("(?i)" + regexp.QuoteMeta(query))
+	re, _ := regexp.Compile(regexp.QuoteMeta(query))
 	return re
 }
 

@@ -28,7 +28,7 @@ const version = "0.1.0"
 
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
-	prepareLSP := flag.Bool("prepare-lsp", false, "install language servers and write config, then exit")
+	prepareLSP := flag.Bool("prepare-lsp", false, "install language servers (optionally only the named languages) and write config, then exit")
 	assumeYes := flag.Bool("yes", false, "skip the confirmation prompt for --prepare-lsp")
 	disableLSP := flag.Bool("disable-lsp", false, "disable LSP for the named languages (or 'all'); writes the user config")
 	enableLSP := flag.Bool("enable-lsp", false, "re-enable LSP for the named languages (or 'all'); writes the user config")
@@ -57,7 +57,7 @@ func main() {
 			_, _ = fmt.Scanln(&answer)
 			return answer == "y" || answer == "Y" || answer == "yes"
 		}
-		if err := lspsetup.Prepare(os.Stdout, confirm); err != nil {
+		if err := lspsetup.Prepare(os.Stdout, confirm, flag.Args()...); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}

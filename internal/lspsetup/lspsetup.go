@@ -194,9 +194,44 @@ func defaultResolvePlugin(vueServer string) (string, error) {
 	return plugin, nil
 }
 
-// Prepare runs the full flow: plan → confirm → install → write config.
-func Prepare(out io.Writer, confirm func() bool) error {
-	return NewPreparer(out).Execute(confirm)
+// Prepare runs the full flow: plan → confirm → install → write config. When
+// language names are given, only those recipes are prepared; unknown names
+// are an error.
+func Prepare(out io.Writer, confirm func() bool, only ...string) error {
+	p := NewPreparer(out)
+	if len(only) > 0 {
+		filtered, err := filterRecipes(p.Recipes, only)
+		if err != nil {
+			return err
+		}
+		p.Recipes = filtered
+	}
+	return p.Execute(confirm)
+}
+
+// filterRecipes returns the subset of recipes named in only
+// (case-insensitive); an unknown name is an error listing the valid languages.
+func filterRecipes(recipes map[string]config.LanguageConfig, only []string) (map[string]config.LanguageConfig, error) {
+	filtered := make(map[string]config.LanguageConfig, len(only))
+	for _, name := range only {
+		name = strings.ToLower(name)
+		lc, ok := recipes[name]
+		if !ok {
+			return nil, fmt.Errorf("unknown language %q\nknown languages: %s", name, strings.Join(recipeNames(recipes), ", "))
+		}
+		filtered[name] = lc
+	}
+	return filtered, nil
+}
+
+// recipeNames returns the registry's language keys, sorted.
+func recipeNames(recipes map[string]config.LanguageConfig) []string {
+	names := make([]string, 0, len(recipes))
+	for n := range recipes {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
 }
 
 type status int
@@ -218,12 +253,7 @@ type entry struct {
 
 // Plan classifies each recipe language without making changes.
 func (p *Preparer) Plan() []entry {
-	names := make([]string, 0, len(p.Recipes))
-	for n := range p.Recipes {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-
+	names := recipeNames(p.Recipes)
 	out := make([]entry, 0, len(names))
 	for _, name := range names {
 		lc := p.Recipes[name]

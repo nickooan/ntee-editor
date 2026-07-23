@@ -33,15 +33,21 @@ undo history, and session all survive relaunch.
 ## Install
 
 One command (macOS or Linux). It checks Go (installs via brew/apt/dnf/pacman if
-missing), builds `ntee` into `~/go/bin`, and installs language servers for every
-supported language whose runtime is present:
+missing), builds the **latest release tag** of `ntee` into `~/go/bin` (never an
+untagged commit — while the repo has no tags yet it warns and builds the
+default branch), and installs language servers for **TypeScript, Vue, and
+Kotlin** when their runtimes are present:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/nickooan/ntee-editor/main/install.sh | bash
 ```
 
-From a local checkout: `./install.sh`. **Updating** is the same command — it
-pulls the latest source and rebuilds.
+Other languages (Go, Python, Ruby, Java) are one command away — see
+[Installing language servers](#installing-language-servers).
+
+From a local checkout: `./install.sh` (builds the checkout as-is, for
+development). **Updating** is the same curl command — it fetches tags and
+rebuilds the newest release.
 
 Make sure `~/go/bin` is on your PATH (the script prints the exact `export` line
 if it isn't). Knobs: `NTEE_INSTALL_DIR=<dir>` overrides the clone destination
@@ -212,16 +218,20 @@ for the session with a note. Check or override any of this live in the
 ### Installing language servers
 
 ```sh
-ntee --prepare-lsp        # prints a plan, asks, installs, writes config
+ntee --prepare-lsp                        # all languages: plan, ask, install, write config
+ntee --prepare-lsp python ruby            # only the named languages
+ntee --prepare-lsp --yes go java          # skip the prompt (flags before names)
 ```
 
 Built-in recipes: **go** (gopls) · **typescript/js/react** (typescript-language-server) ·
 **python** (pyright) · **ruby** (ruby-lsp) · **java** (jdtls) · **kotlin**
-(kotlin-language-server) · **vue** (@vue/language-server). Installs use the
-platform's native tool (`brew` / `go install` / `npm` / `gem`), skip languages
-whose runtime is absent (telling you what to install), keep your tuned config
-entries, and back the old file up to `config.yaml.bak`. `--yes` skips the
-prompt; recipes can be overridden per language via an `install:` block.
+(kotlin-language-server) · **vue** (@vue/language-server). `install.sh` runs
+only the typescript/vue/kotlin recipes; install the rest with the commands
+above whenever you need them. Installs use the platform's native tool
+(`brew` / `go install` / `npm` / `gem`), skip languages whose runtime is
+absent (telling you what to install), keep your tuned config entries, and back
+the old file up to `config.yaml.bak`. Recipes can be overridden per language
+via an `install:` block.
 
 ### Toggling LSP
 

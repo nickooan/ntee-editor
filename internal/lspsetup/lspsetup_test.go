@@ -344,3 +344,43 @@ func TestExecuteSkipsExistingConfig(t *testing.T) {
 		t.Fatal("expected a .bak backup")
 	}
 }
+
+func TestFilterRecipes(t *testing.T) {
+	got, err := filterRecipes(Recipes(), []string{"typescript", "VUE", "kotlin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("want 3 recipes, got %d", len(got))
+	}
+	for _, name := range []string{"typescript", "vue", "kotlin"} {
+		if _, ok := got[name]; !ok {
+			t.Fatalf("missing %q in filtered recipes", name)
+		}
+	}
+	if _, err := filterRecipes(Recipes(), []string{"rust"}); err == nil ||
+		!strings.Contains(err.Error(), "known languages") {
+		t.Fatalf("unknown language should error with the known list, got %v", err)
+	}
+}
+
+// A filtered Preparer plans exactly the requested languages.
+func TestPlanRespectsFilteredRecipes(t *testing.T) {
+	var out bytes.Buffer
+	var ran []string
+	p := stubPreparer("darwin", map[string]bool{"npm": true, "node": true}, nil, nil, &out, &ran)
+	filtered, err := filterRecipes(p.Recipes, []string{"typescript", "vue", "kotlin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Recipes = filtered
+	plan := p.Plan()
+	if len(plan) != 3 {
+		t.Fatalf("want 3 planned languages, got %d", len(plan))
+	}
+	for _, e := range plan {
+		if e.lang != "typescript" && e.lang != "vue" && e.lang != "kotlin" {
+			t.Fatalf("unexpected language in filtered plan: %q", e.lang)
+		}
+	}
+}

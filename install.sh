@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # ntee-editor bootstrap: checks Go (installing via the platform's package
-# manager if missing), clones/builds the editor, and prepares language servers
-# for every supported language whose runtime is present. Re-running updates an
-# existing install (git pull + rebuild).
+# manager if missing), clones the repo and builds the **latest release tag**
+# (never an untagged default-branch commit), and prepares language servers for
+# typescript, vue, and kotlin. Other languages are left to the user:
+# `ntee --prepare-lsp` (all) or `ntee --prepare-lsp <language>...`.
+# Re-running updates an existing install (fetch tags + rebuild newest release).
 #
 #   ./install.sh                       # from inside a checkout: build in place
 #   curl -fsSL .../install.sh | bash   # standalone: clones to ~/.ntee-editor/src
@@ -61,6 +63,27 @@ else
     command -v go >/dev/null 2>&1 || die "Go installation failed (go still not on PATH) — install from https://go.dev/dl/ and re-run"
 fi
 
+# checkout_latest_tag pins the clone to the newest release tag so installs
+# never pick up unreleased default-branch commits. Falls back (with a warning)
+# to the remote default branch while the repo has no tags yet.
+checkout_latest_tag() {
+    local dir="$1" tag
+    tag="$(git -C "$dir" tag --sort=-v:refname | head -n1)"
+    if [[ -n "$tag" ]]; then
+        info "building release $tag"
+        git -C "$dir" checkout -q "$tag"
+    else
+        info "no release tags found — building the default branch (may include unreleased changes)"
+        local branch
+        branch="$(git -C "$dir" symbolic-ref -q --short HEAD || true)"
+        if [[ -z "$branch" ]]; then
+            branch="$(git -C "$dir" ls-remote --symref origin HEAD | awk '/^ref:/ {sub("refs/heads/", "", $2); print $2}')"
+            git -C "$dir" checkout -q "${branch:-main}"
+        fi
+        git -C "$dir" pull --ff-only
+    fi
+}
+
 # --- source: in-place checkout or clone -------------------------------------
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-.}")" >/dev/null 2>&1 && pwd)"
 if [[ -f "$script_dir/go.mod" ]] && head -1 "$script_dir/go.mod" | grep -q "^$MODULE$"; then
@@ -68,12 +91,14 @@ if [[ -f "$script_dir/go.mod" ]] && head -1 "$script_dir/go.mod" | grep -q "^$MO
     info "building from existing checkout: $src"
 elif [[ -d "$INSTALL_DIR/.git" ]]; then
     info "updating existing clone: $INSTALL_DIR"
-    git -C "$INSTALL_DIR" pull --ff-only
+    git -C "$INSTALL_DIR" fetch --tags --force --prune origin
+    checkout_latest_tag "$INSTALL_DIR"
     src="$INSTALL_DIR"
 else
     info "cloning $REPO_URL → $INSTALL_DIR"
     mkdir -p "$(dirname "$INSTALL_DIR")"
     git clone "$REPO_URL" "$INSTALL_DIR"
+    checkout_latest_tag "$INSTALL_DIR"
     src="$INSTALL_DIR"
 fi
 
@@ -94,8 +119,9 @@ esac
 if [[ "${NTEE_SKIP_LSP:-}" == "1" ]]; then
     info "skipping language server setup (NTEE_SKIP_LSP=1) — run later: ntee --prepare-lsp"
 else
-    info "preparing language servers (all supported languages with a runtime present)"
-    "$BIN_DIR/ntee" --prepare-lsp --yes
+    info "preparing language servers for typescript, vue, kotlin (runtime permitting)"
+    "$BIN_DIR/ntee" --prepare-lsp --yes typescript vue kotlin
+    echo "  other languages (go, python, ruby, java): ntee --prepare-lsp <language>...  (or no names for all)"
 fi
 
 # path_hint prints copy-paste instructions for putting the binary on PATH,

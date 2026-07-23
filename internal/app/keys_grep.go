@@ -89,6 +89,7 @@ func (m Model) openGrep() (Model, tea.Cmd) {
 	m, corpusCmd := m.ensureCorpus()
 	m.grepOpen = true
 	m.grepQuery = ""
+	m.grepCursor = 0
 	m.grepIndex = 0
 	m.grepResults = nil
 	m.grepFiles = nil
@@ -350,11 +351,32 @@ func (m Model) handleGrepKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyEsc:
 		m = m.closeGrep()
 	case tea.KeyUp:
+		// Inside a multi-line query the arrow moves the cursor; from the first
+		// line it falls through to the result list (single-line queries keep
+		// their old behavior).
+		if next, ok := m.grepMoveCursorLine(-1); ok {
+			m = next
+			break
+		}
 		m.grepIndex = max(0, m.grepIndex-1)
 		m = m.refreshGrepPreview()
 	case tea.KeyDown:
+		if next, ok := m.grepMoveCursorLine(1); ok {
+			m = next
+			break
+		}
 		m.grepIndex = min(max(0, len(m.grepResults)-1), m.grepIndex+1)
 		m = m.refreshGrepPreview()
+	case tea.KeyLeft:
+		m.grepCursor = input.MoveCursor(m.grepQuery, m.grepCursor, -1)
+	case tea.KeyRight:
+		m.grepCursor = input.MoveCursor(m.grepQuery, m.grepCursor, 1)
+	case tea.KeyHome:
+		line, _ := grepLineCol(m.grepQuery, m.grepCursor)
+		m.grepCursor = grepOffsetAt(m.grepQuery, line, 0)
+	case tea.KeyEnd:
+		line, _ := grepLineCol(m.grepQuery, m.grepCursor)
+		m.grepCursor = grepOffsetAt(m.grepQuery, line, -1)
 	case tea.KeyEnter:
 		_, hit, ok := m.grepSelectedFile()
 		m = m.closeGrep()
@@ -368,25 +390,81 @@ func (m Model) handleGrepKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m = m.anchorCursorLine()
 		}
 	case tea.KeyBackspace:
-		if runes := []rune(m.grepQuery); len(runes) > 0 {
-			m.grepQuery = string(runes[:len(runes)-1])
+		if q, at, ok := input.RemoveBeforeCursor(m.grepQuery, m.grepCursor); ok {
+			m.grepQuery, m.grepCursor = q, at
+			m, cmd = m.queueGrepSearch()
+		}
+	case tea.KeyDelete:
+		if runes := []rune(m.grepQuery); m.grepCursor < len(runes) {
+			m.grepQuery = string(runes[:m.grepCursor]) + string(runes[m.grepCursor+1:])
 			m, cmd = m.queueGrepSearch()
 		}
 	case tea.KeySpace:
-		m.grepQuery += " "
+		m = m.grepInsert(" ")
 		m, cmd = m.queueGrepSearch()
 	case tea.KeyCtrlJ:
-		m.grepQuery += "\n"
+		m = m.grepInsert("\n")
 		m, cmd = m.queueGrepSearch()
 	case tea.KeyRunes:
 		// Bracketed paste delivers newlines inside one KeyRunes message, and
 		// terminals send them as CR; normalize to \n so the query matches the
 		// snapshot's CRLF-normalized content.
 		s := strings.ReplaceAll(string(msg.Runes), "\r\n", "\n")
-		m.grepQuery += strings.ReplaceAll(s, "\r", "\n")
+		m = m.grepInsert(strings.ReplaceAll(s, "\r", "\n"))
 		m, cmd = m.queueGrepSearch()
 	}
 	return m, cmd
+}
+
+// grepInsert inserts text at the query cursor.
+func (m Model) grepInsert(s string) Model {
+	m.grepQuery, m.grepCursor = input.InsertAtCursor(m.grepQuery, m.grepCursor, s)
+	return m
+}
+
+// grepLineCol converts the query cursor's rune offset into (line, column).
+func grepLineCol(query string, cursor int) (line, col int) {
+	at := input.Clamp(cursor, 0, len([]rune(query)))
+	for _, r := range []rune(query)[:at] {
+		if r == '\n' {
+			line++
+			col = 0
+			continue
+		}
+		col++
+	}
+	return line, col
+}
+
+// grepOffsetAt returns the rune offset of (line, col) in the query, clamping
+// col to the line's length like the editor's vertical move; col < 0 means the
+// line's end.
+func grepOffsetAt(query string, line, col int) int {
+	lines := strings.Split(query, "\n")
+	line = input.Clamp(line, 0, len(lines)-1)
+	off := 0
+	for i := 0; i < line; i++ {
+		off += len([]rune(lines[i])) + 1 // +1 for the newline
+	}
+	n := len([]rune(lines[line]))
+	if col < 0 || col > n {
+		col = n
+	}
+	return off + col
+}
+
+// grepMoveCursorLine moves the query cursor one line up or down, keeping the
+// column clamped to the target line (editor semantics). Reports false when the
+// cursor is already on the boundary line, so the caller can fall through to
+// result-list navigation.
+func (m Model) grepMoveCursorLine(dy int) (Model, bool) {
+	line, col := grepLineCol(m.grepQuery, m.grepCursor)
+	target := line + dy
+	if target < 0 || target > strings.Count(m.grepQuery, "\n") {
+		return m, false
+	}
+	m.grepCursor = grepOffsetAt(m.grepQuery, target, col)
+	return m, true
 }
 
 // refreshGrepPreview keeps the selected hit's preview lines and syntax

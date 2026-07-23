@@ -452,3 +452,49 @@ func TestGrepOverlayMultilineInputHeightStable(t *testing.T) {
 		}
 	}
 }
+
+// Arrows move the query cursor with editor semantics (vertical moves clamp the
+// column; up/down fall through to result navigation at the boundary lines),
+// and insert/backspace/delete work at the cursor position.
+func TestGrepQueryCursorEditing(t *testing.T) {
+	m := grepFixture(t)
+	m = key(m, tea.KeyMsg{Type: tea.KeyCtrlG})
+	m = grepLoad(t, m)
+	m = runes(m, "abc")
+	m = key(m, tea.KeyMsg{Type: tea.KeyCtrlJ})
+	m = runes(m, "xyz")
+
+	m = key(m, tea.KeyMsg{Type: tea.KeyLeft})
+	m = key(m, tea.KeyMsg{Type: tea.KeyUp})
+	if m.grepCursor != 2 {
+		t.Fatalf("left+up should land on line 0 col 2: %d", m.grepCursor)
+	}
+	m = runes(m, "Q")
+	if m.grepQuery != "abQc\nxyz" || m.grepCursor != 3 {
+		t.Fatalf("insert at cursor: %q cur=%d", m.grepQuery, m.grepCursor)
+	}
+	m = key(m, tea.KeyMsg{Type: tea.KeyDelete})
+	if m.grepQuery != "abQ\nxyz" || m.grepCursor != 3 {
+		t.Fatalf("forward delete at cursor: %q cur=%d", m.grepQuery, m.grepCursor)
+	}
+	m = key(m, tea.KeyMsg{Type: tea.KeyDown})
+	if m.grepCursor != len([]rune(m.grepQuery)) {
+		t.Fatalf("down should clamp the column to the target line end: %d", m.grepCursor)
+	}
+	m = key(m, tea.KeyMsg{Type: tea.KeyHome})
+	if m.grepCursor != 4 {
+		t.Fatalf("home should go to the line start: %d", m.grepCursor)
+	}
+	m = key(m, tea.KeyMsg{Type: tea.KeyBackspace})
+	if m.grepQuery != "abQxyz" || m.grepCursor != 3 {
+		t.Fatalf("backspace at line start should join lines: %q cur=%d", m.grepQuery, m.grepCursor)
+	}
+
+	// Single-line again: up/down fall through to the result list.
+	before := m.grepCursor
+	m = key(m, tea.KeyMsg{Type: tea.KeyUp})
+	m = key(m, tea.KeyMsg{Type: tea.KeyDown})
+	if m.grepCursor != before {
+		t.Fatalf("boundary up/down must not move the cursor: %d", m.grepCursor)
+	}
+}

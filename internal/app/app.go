@@ -214,6 +214,7 @@ type Model struct {
 	// results are current.
 	grepOpen       bool
 	grepQuery      string
+	grepCursor     int // rune offset into grepQuery
 	grepIndex      int
 	grepResults    []grepHit
 	grepFiles      []grepFile // streams in per grepBatchMsg; released on close

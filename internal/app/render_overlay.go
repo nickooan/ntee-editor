@@ -173,41 +173,49 @@ func renderPreviewRows(lines []string, hl [][]view.HighlightSegment, re *regexp.
 }
 
 // grepMaxInputRows caps how many rows of a multi-line query the grep overlay
-// displays; the cursor lives at the end, so the last lines are the ones shown.
+// displays; the window follows the cursor line, preferring the tail.
 const grepMaxInputRows = 3
 
 // renderGrepInputRows renders the grep query one row per line: prompt and
-// right-aligned count on the first row, aligned padding on continuations,
-// cursor at the end of the last line. Queries over grepMaxInputRows lines show
-// their last lines behind a "…" marker.
-func renderGrepInputRows(query, count string, innerW int) []string {
+// right-aligned count on the first row, aligned padding on continuations, the
+// cursor on its own line/column. Queries over grepMaxInputRows lines window
+// around the cursor; lines clipped above show as a "grep…" prompt marker.
+func renderGrepInputRows(query string, cursor int, count string, innerW int) []string {
 	lines := strings.Split(query, "\n")
-	clipped := false
-	if len(lines) > grepMaxInputRows {
-		lines = lines[len(lines)-grepMaxInputRows:]
-		clipped = true
+	curLine, curCol := grepLineCol(query, cursor)
+	start := max(0, len(lines)-grepMaxInputRows)
+	if curLine < start {
+		start = curLine
 	}
+	end := min(len(lines), start+grepMaxInputRows)
 	promptW := lipgloss.Width("grep ")
 	avail := max(1, innerW-promptW)
-	rows := make([]string, 0, len(lines))
-	for i, line := range lines {
-		if i == 0 && clipped {
-			line = "…" + line
-		}
+	rows := make([]string, 0, end-start)
+	for i := start; i < end; i++ {
 		var body string
-		if i == len(lines)-1 {
-			// The cursor row: keep the tail (where the cursor is) visible,
-			// reserving one cell for the cursor itself.
-			if runes := []rune(line); len(runes) > avail-1 {
-				line = string(runes[len(runes)-(avail-1):])
+		if i == curLine {
+			// The cursor row: keep the cursor column visible when the line
+			// overflows, reserving one cell for the cursor itself.
+			runes, col := []rune(lines[i]), curCol
+			if len(runes) > avail-1 {
+				from := 0
+				if col > avail-1 {
+					from = col - (avail - 1)
+				}
+				to := min(len(runes), from+avail-1)
+				runes, col = runes[from:to], col-from
 			}
-			body = renderInputLine(line, len([]rune(line)))
+			body = renderInputLine(string(runes), col)
 		} else {
-			body = statusTextStyle.Render(truncateRunes(line, avail))
+			body = statusTextStyle.Render(truncateRunes(lines[i], avail))
 		}
 		var row string
-		if i == 0 {
-			row = promptStyle.Render("grep ") + body
+		if i == start {
+			prompt := "grep "
+			if start > 0 {
+				prompt = "grep…" // same width — earlier lines are clipped
+			}
+			row = promptStyle.Render(prompt) + body
 			if pad := innerW - lipgloss.Width(row) - lipgloss.Width(count); pad > 0 {
 				row += statusTextStyle.Render(strings.Repeat(" ", pad)) + overlayHintStyle.Render(count)
 			}
@@ -275,7 +283,7 @@ func (m Model) renderGrepOverlay(width, height int) string {
 	case m.grepResultsGen != m.grepSearchGen:
 		count = "searching…"
 	}
-	inputRows := renderGrepInputRows(m.grepQuery, count, innerW)
+	inputRows := renderGrepInputRows(m.grepQuery, m.grepCursor, count, innerW)
 	rows = append(rows, inputRows...)
 
 	visible := min(len(m.grepResults), max(0, listH-len(inputRows)))

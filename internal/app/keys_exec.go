@@ -86,6 +86,14 @@ func (m Model) runExecCommand(cmd string) (tea.Model, tea.Cmd) {
 		m = m.execJump(arg)
 	case "git":
 		m = m.execGit(arg)
+	case "cpfp":
+		m = m.execCopyPath(m.openRel)
+	case "cpafp":
+		var abs string
+		if m.openFile != nil {
+			abs = m.openFile.Path
+		}
+		m = m.execCopyPath(abs)
 	case "tab":
 		next, ok := m.tabCommand(arg)
 		if ok && next.mode == modeExec {
@@ -130,6 +138,24 @@ func (m Model) execCopy(arg string) Model {
 		return m
 	}
 	m.notice = "copied"
+	m.mode = m.execPrevMode
+	return m
+}
+
+// execCopyPath copies the given open-file path to the clipboard ("cpfp" passes
+// the root-relative path, "cpafp" the absolute one). An empty path means no
+// file is open. Follows the exec conventions: success flashes a notice and
+// returns to the previous mode; errors stay in exec mode.
+func (m Model) execCopyPath(path string) Model {
+	if path == "" {
+		m.errText = "no file open"
+		return m
+	}
+	if err := m.copyClipboard(path); err != nil {
+		m.errText = "copy failed: " + err.Error()
+		return m
+	}
+	m.notice = "copied " + path
 	m.mode = m.execPrevMode
 	return m
 }

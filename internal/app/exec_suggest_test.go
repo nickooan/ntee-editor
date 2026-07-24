@@ -16,7 +16,7 @@ func TestExecSuggestionsTable(t *testing.T) {
 		input string
 		want  []string
 	}{
-		{"", []string{"copy", "cp", "jump", "jp", "tab", "git"}},
+		{"", []string{"copy", "cp", "cpfp", "cpafp", "jump", "jp", "tab", "git"}},
 		{"g", []string{"git"}},
 		{"ju", []string{"jump"}}, // jp does not start with "ju"
 		{"copy ", []string{"all", "fpath"}},
@@ -98,12 +98,14 @@ func TestExecTabCompletionChain(t *testing.T) {
 func TestExecSuggestionCycle(t *testing.T) {
 	m := execLineFixture(t, 3) // Ctrl+E is bound in edit mode
 	m = ctrl(m, tea.KeyCtrlE)
-	if len(m.execSugs) != 6 {
+	if len(m.execSugs) != 8 {
 		t.Fatalf("empty bar must offer all verbs, got %v", m.execSugs)
 	}
 
 	m = ctrl(m, tea.KeyDown) // copy → cp
-	m = ctrl(m, tea.KeyDown) // cp → jump
+	m = ctrl(m, tea.KeyDown) // cp → cpfp
+	m = ctrl(m, tea.KeyDown) // cpfp → cpafp
+	m = ctrl(m, tea.KeyDown) // cpafp → jump
 	m = ctrl(m, tea.KeyTab)
 	if m.execInput != "jump " {
 		t.Fatalf("Tab after two Downs should accept jump, got %q", m.execInput)

@@ -6,7 +6,7 @@ import (
 )
 
 // execVerbs are the @exec bar's built-in commands, in display order.
-var execVerbs = []string{"copy", "cp", "jump", "jp", "tab", "git"}
+var execVerbs = []string{"copy", "cp", "cpfp", "cpafp", "jump", "jp", "tab", "git"}
 
 // execSuggestions returns completion candidates for the bar input's trailing
 // token (the text after the last space; an empty trailing token offers every

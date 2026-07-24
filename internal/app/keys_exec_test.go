@@ -227,6 +227,71 @@ func TestExecCopyFpath(t *testing.T) {
 	}
 }
 
+func TestExecCpfp(t *testing.T) {
+	m := execLineFixture(t, 3)
+	var captured string
+	m.copyClipboard = func(s string) error { captured = s; return nil }
+	m = ctrl(m, tea.KeyCtrlE)
+	m = runes(m, "cpfp")
+	m = ctrl(m, tea.KeyEnter)
+	if captured != "big.go" {
+		t.Fatalf("cpfp = %q, want %q", captured, "big.go")
+	}
+	if m.notice != "copied big.go" {
+		t.Fatalf("notice = %q", m.notice)
+	}
+	if m.mode != modeEdit {
+		t.Fatalf("cpfp should return to edit mode, got %v", m.mode)
+	}
+}
+
+func TestExecCpafp(t *testing.T) {
+	m := execLineFixture(t, 3)
+	var captured string
+	m.copyClipboard = func(s string) error { captured = s; return nil }
+	want := filepath.Join(m.root, "big.go")
+	m = ctrl(m, tea.KeyCtrlE)
+	m = runes(m, "cpafp")
+	m = ctrl(m, tea.KeyEnter)
+	if captured != want {
+		t.Fatalf("cpafp = %q, want %q", captured, want)
+	}
+	if m.mode != modeEdit {
+		t.Fatalf("cpafp should return to edit mode, got %v", m.mode)
+	}
+}
+
+func TestExecCopyPathNoFile(t *testing.T) {
+	m, _ := newTestModel(t, nil)
+	called := false
+	m.copyClipboard = func(string) error { called = true; return nil }
+
+	for _, cmd := range []string{"cpfp", "cpafp"} {
+		res, _ := m.runExecCommand(cmd)
+		got := res.(Model)
+		if called {
+			t.Fatalf("%s must not copy without an open file", cmd)
+		}
+		if got.errText != "no file open" {
+			t.Fatalf("%s errText = %q", cmd, got.errText)
+		}
+	}
+}
+
+func TestExecCopyPathClipboardError(t *testing.T) {
+	m := execLineFixture(t, 3)
+	m.copyClipboard = func(string) error { return fmt.Errorf("boom") }
+	m = ctrl(m, tea.KeyCtrlE)
+	m = runes(m, "cpfp")
+	m = ctrl(m, tea.KeyEnter)
+	if m.errText != "copy failed: boom" {
+		t.Fatalf("errText = %q", m.errText)
+	}
+	if m.mode != modeExec {
+		t.Fatal("clipboard error should stay in exec mode")
+	}
+}
+
 func TestExecCopyBadRange(t *testing.T) {
 	m := execLineFixture(t, 5)
 	called := false

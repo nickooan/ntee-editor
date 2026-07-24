@@ -17,16 +17,33 @@ import (
 // explicitLexers pins the first-class languages; everything else falls back to
 // chroma's filename matcher.
 var explicitLexers = map[string]string{
-	".go":  "go",
-	".ts":  "typescript",
-	".tsx": "tsx",
+	".go":   "go",
+	".ts":   "typescript",
+	".tsx":  "tsx",
+	".json": "json",
+	".yaml": "yaml",
+	".yml":  "yaml",
+	".sh":   "bash",
+	".bash": "bash",
+	".zsh":  "bash",
+}
+
+// customLexers are app-defined chroma lexers (ntee-r1quest's request and data
+// languages), resolved before the built-in registry.
+var customLexers = map[string]chroma.Lexer{
+	".nts": ntsLexer,
+	".ntd": ntdLexer,
 }
 
 // LexerFor resolves the lexer for a filename, nil when the file should render
 // plain.
 func LexerFor(filename string) chroma.Lexer {
+	ext := strings.ToLower(filepath.Ext(filename))
+	if lexer, ok := customLexers[ext]; ok {
+		return chroma.Coalesce(lexer)
+	}
 	var lexer chroma.Lexer
-	if name, ok := explicitLexers[strings.ToLower(filepath.Ext(filename))]; ok {
+	if name, ok := explicitLexers[ext]; ok {
 		lexer = lexers.Get(name)
 	} else {
 		lexer = lexers.Match(filepath.Base(filename))

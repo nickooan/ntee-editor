@@ -181,14 +181,93 @@ func TestClickOnScrolledCursorLine(t *testing.T) {
 	}
 }
 
-func TestWheelScrollsCursorInEditMode(t *testing.T) {
+// tallFixture opens a file of n "line" rows (plus the trailing empty line), tall
+// enough to scroll — for viewport-follow tests.
+func tallFixture(t *testing.T, n int) Model {
+	t.Helper()
 	m, root := newTestModel(t, nil)
 	var b strings.Builder
-	for i := 0; i < 30; i++ {
+	for i := 0; i < n; i++ {
 		b.WriteString("line\n")
 	}
 	must(t, os.WriteFile(filepath.Join(root, "tall.txt"), []byte(b.String()), 0o644))
-	m = m.openFileAt("tall.txt")
+	return m.openFileAt("tall.txt")
+}
+
+// Click-driven viewport rules: an ordinary click never scrolls the view; only a
+// click on the top visible line pages up (that line re-renders at the bottom
+// row) and a click on the bottom visible line pages down (it re-renders at the
+// top row).
+
+func TestClickMidPaneDoesNotScroll(t *testing.T) {
+	m := tallFixture(t, 100)
+	h := m.contentHeight() + 1
+	total := len(m.edit.lines)
+	// Wheel/arrow navigation moves only the cursor, leaving fileScrollY stale.
+	m.edit.cy = 50
+	top := fileViewportTop(m.edit.cy, m.fileScrollY, h, total)
+	m = click(m, testTextX, testTextY+10)
+	if m.edit.cy != top+10 {
+		t.Fatalf("cy = %d, want %d (the line visible at the clicked row)", m.edit.cy, top+10)
+	}
+	if got := fileViewportTop(m.edit.cy, m.fileScrollY, h, total); got != top {
+		t.Fatalf("mid-pane click scrolled the view: top %d → %d", top, got)
+	}
+}
+
+func TestClickTopLinePagesUp(t *testing.T) {
+	m := tallFixture(t, 100)
+	h := m.contentHeight() + 1
+	total := len(m.edit.lines)
+	m.edit.cy = 50
+	top := fileViewportTop(m.edit.cy, m.fileScrollY, h, total)
+	m = click(m, testTextX, testTextY) // top visible row
+	if m.edit.cy != top {
+		t.Fatalf("cy = %d, want the clicked top line %d", m.edit.cy, top)
+	}
+	newTop := fileViewportTop(m.edit.cy, m.fileScrollY, h, total)
+	if newTop != top-h+1 || m.edit.cy-newTop != h-1 {
+		t.Fatalf("top-line click should render it at the bottom row: top %d → %d", top, newTop)
+	}
+}
+
+func TestClickBottomLinePagesDown(t *testing.T) {
+	m := tallFixture(t, 100)
+	h := m.contentHeight() + 1
+	total := len(m.edit.lines)
+	m.edit.cy = 50
+	top := fileViewportTop(m.edit.cy, m.fileScrollY, h, total)
+	bottom := top + h - 1
+	m = click(m, testTextX, testTextY+h-1) // bottom visible row
+	if m.edit.cy != bottom {
+		t.Fatalf("cy = %d, want the clicked bottom line %d", m.edit.cy, bottom)
+	}
+	if got := fileViewportTop(m.edit.cy, m.fileScrollY, h, total); got != bottom {
+		t.Fatalf("bottom-line click should render it at the top row: top %d → %d", top, got)
+	}
+}
+
+func TestClickEdgeLinesWithoutRoomDoNotScroll(t *testing.T) {
+	m := tallFixture(t, 100)
+	h := m.contentHeight() + 1
+	total := len(m.edit.lines)
+
+	// Top row while line 0 is already visible → nothing above, no page-up.
+	m = click(m, testTextX, testTextY)
+	if m.edit.cy != 0 || m.fileScrollY != 0 {
+		t.Fatalf("top click at top of file: cy=%d scrollY=%d, want 0,0", m.edit.cy, m.fileScrollY)
+	}
+
+	// Bottom row while the last line is already visible → nothing below.
+	m.edit.cy, m.fileScrollY = total-1, total-h
+	m = click(m, testTextX, testTextY+h-1)
+	if m.edit.cy != total-1 || m.fileScrollY != total-h {
+		t.Fatalf("bottom click at EOF: cy=%d scrollY=%d, want %d,%d", m.edit.cy, m.fileScrollY, total-1, total-h)
+	}
+}
+
+func TestWheelScrollsCursorInEditMode(t *testing.T) {
+	m := tallFixture(t, 30)
 	m.edit.cy, m.edit.cx = 10, 0
 
 	m = wheel(m, tea.MouseButtonWheelDown)
@@ -230,14 +309,8 @@ func TestHorizontalWheelDoesNothing(t *testing.T) {
 }
 
 func TestWheelScrollsFileInQueryMode(t *testing.T) {
-	m, root := newTestModel(t, nil)
-	var b strings.Builder
-	for i := 0; i < 30; i++ {
-		b.WriteString("line\n")
-	}
-	must(t, os.WriteFile(filepath.Join(root, "tall.txt"), []byte(b.String()), 0o644))
-	m = m.openFileAt("tall.txt") // opens in edit mode
-	m = ctrl(m, tea.KeyEsc)      // back to query mode, file still shown
+	m := tallFixture(t, 30) // opens in edit mode
+	m = ctrl(m, tea.KeyEsc) // back to query mode, file still shown
 	if m.mode != modeQuery {
 		t.Fatalf("expected query mode, got %v", m.mode)
 	}

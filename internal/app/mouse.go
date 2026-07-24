@@ -21,7 +21,7 @@ func (m Model) sidebarWidth() int {
 // line's horizontal window. ok=false when the click lands outside the file
 // content area (sidebar, chrome, below EOF).
 func (m Model) editClickTarget(x, y int) (int, int, bool) {
-	height := m.contentHeight()
+	height := m.contentHeight() + 1 // rendered file rows in edit mode (single-line status)
 	total := len(m.edit.lines)
 	if total == 0 {
 		return 0, 0, false
@@ -101,6 +101,11 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 // handleEditClick moves the edit cursor to a clicked position in the file pane.
 // hit=false when the click misses the file content area (or we're not in edit
 // mode), so callers can tell a real landing from a no-op.
+//
+// The viewport is anchored explicitly so a click never drags the view along
+// with the cursor: an ordinary click freezes the window where it was, while
+// clicking the top visible line pages up (that line re-renders at the bottom)
+// and clicking the bottom visible line pages down (it re-renders at the top).
 func (m Model) handleEditClick(msg tea.MouseMsg) (Model, bool) {
 	if m.mode != modeEdit || m.openFile == nil {
 		return m, false
@@ -108,6 +113,18 @@ func (m Model) handleEditClick(msg tea.MouseMsg) (Model, bool) {
 	line, col, ok := m.editClickTarget(msg.X, msg.Y)
 	if !ok {
 		return m, false
+	}
+	h := m.contentHeight() + 1
+	total := len(m.edit.lines)
+	top := fileViewportTop(m.edit.cy, m.fileScrollY, h, total) // window rendered when the user clicked
+	bottom := min(top+h-1, total-1)
+	switch {
+	case line == top && top > 0:
+		m.fileScrollY = max(0, line-h+1) // clicked top row → page up, line lands at the bottom
+	case line == bottom && bottom < total-1:
+		m.fileScrollY = line // clicked bottom row → page down, line lands at the top
+	default:
+		m.fileScrollY = top // ordinary click: the viewport stays put
 	}
 	if line != m.edit.cy {
 		m = m.flushBurst() // undo boundary on line change, like moveEditCursor

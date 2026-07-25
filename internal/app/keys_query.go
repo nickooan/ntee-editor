@@ -92,9 +92,9 @@ func (m Model) handleQueryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.inputSuggestIndex = 0
 		m.keyboardSelectedCommand = ""
 	default:
-		if msg.Text != "" && msg.Mod == 0 {
+		if t := keyText(msg); t != "" {
 			m = m.adoptPreview()
-			m.command, m.qCursor = input.InsertAtCursor(m.command, m.qCursor, msg.Text)
+			m.command, m.qCursor = input.InsertAtCursor(m.command, m.qCursor, t)
 			m.inputSuggestIndex = 0
 			m.keyboardSelectedCommand = ""
 		}

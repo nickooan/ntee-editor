@@ -614,6 +614,18 @@ func (m Model) handlePaste(text string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// keyText returns the printable text of a key press, or "" when the press is
+// a chord rather than typing. Shift and the lock states count as typing —
+// under the enhanced keyboard protocol Shift+d arrives as Text "D" with
+// ModShift set, and CapsLock/NumLock report as modifiers too. Ctrl, Alt, and
+// the other real chord modifiers do not produce text input.
+func keyText(msg tea.KeyPressMsg) string {
+	if msg.Mod&^(tea.ModShift|tea.ModCapsLock|tea.ModNumLock|tea.ModScrollLock) != 0 {
+		return ""
+	}
+	return msg.Text
+}
+
 // pasteLine flattens pasted text for the single-line input bars: CR/CRLF
 // normalize to \n, then newlines collapse to single spaces.
 func pasteLine(text string) string {

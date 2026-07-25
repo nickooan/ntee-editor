@@ -406,8 +406,8 @@ func (m Model) handleGrepKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m = m.grepInsert("\n")
 		m, cmd = m.queueGrepSearch()
 	default:
-		if msg.Text != "" && msg.Mod == 0 {
-			m = m.grepInsert(msg.Text)
+		if t := keyText(msg); t != "" {
+			m = m.grepInsert(t)
 			m, cmd = m.queueGrepSearch()
 		}
 	}

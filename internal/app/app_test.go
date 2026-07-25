@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -52,6 +53,14 @@ func ctrlKey(r rune) tea.KeyPressMsg { return tea.KeyPressMsg{Code: r, Mod: tea.
 
 // shiftKey is a Shift+<named key> chord (v1's KeyShiftUp/Down/Tab constants).
 func shiftKey(code rune) tea.KeyPressMsg { return tea.KeyPressMsg{Code: code, Mod: tea.ModShift} }
+
+// shiftRune is Shift+<letter> as the enhanced keyboard protocol reports it:
+// base code, shifted text, ModShift set. Legacy terminals send the same
+// keystroke as plain typeRune of the capital; both must type the capital.
+func shiftRune(r rune) tea.KeyPressMsg {
+	u := unicode.ToUpper(r)
+	return tea.KeyPressMsg{Code: r, ShiftedCode: u, Text: string(u), Mod: tea.ModShift}
+}
 
 func runes(m Model, s string) Model {
 	for _, r := range s {
@@ -432,5 +441,51 @@ func TestSearchEnterAnchorsLineAtThirtyPercent(t *testing.T) {
 	want := 51 - m.contentHeight()*3/10
 	if m.fileScrollY != want {
 		t.Fatalf("scroll anchor: got %d want %d (contentHeight %d)", m.fileScrollY, want, m.contentHeight())
+	}
+}
+
+// Shift+letter must type the capital in every text input — under the enhanced
+// keyboard protocol the press carries ModShift, which must not be mistaken for
+// a chord (regression: the v2 migration's Mod==0 guard swallowed capitals).
+func TestShiftedLettersTypeCapitals(t *testing.T) {
+	// Edit buffer.
+	m, _ := newTestModel(t, nil)
+	m = m.openFileAt("main.go")
+	m = key(m, shiftRune('d'))
+	if !strings.HasPrefix(m.edit.lines[0], "D") {
+		t.Fatalf("edit mode swallowed Shift+D: %q", m.edit.lines[0])
+	}
+
+	// Search bar.
+	m = key(m, ctrlKey('f'))
+	m = key(m, shiftRune('d'))
+	if m.searchInput != "D" {
+		t.Fatalf("search mode swallowed Shift+D: %q", m.searchInput)
+	}
+	m = key(m, keyPress(tea.KeyEsc))
+
+	// Query bar (Esc from search returns to edit; Esc again to query).
+	m = key(m, keyPress(tea.KeyEsc))
+	if m.mode != modeQuery {
+		t.Fatalf("expected query mode, got %d", m.mode)
+	}
+	m = key(m, shiftRune('l'))
+	if m.command != "L" {
+		t.Fatalf("query bar swallowed Shift+L: %q", m.command)
+	}
+
+	// Fuzzy finder.
+	m, _ = m.openFuzzy()
+	m = key(m, shiftRune('u'))
+	if m.fuzzyQuery != "U" {
+		t.Fatalf("fuzzy finder swallowed Shift+U: %q", m.fuzzyQuery)
+	}
+
+	// A real chord must still not type: Ctrl+D inserts nothing anywhere.
+	m2, _ := newTestModel(t, nil)
+	m2 = m2.openFileAt("main.go")
+	m2 = key(m2, ctrlKey('d'))
+	if strings.HasPrefix(m2.edit.lines[0], "d") || strings.HasPrefix(m2.edit.lines[0], "D") {
+		t.Fatalf("ctrl+d must not type: %q", m2.edit.lines[0])
 	}
 }

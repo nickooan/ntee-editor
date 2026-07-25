@@ -32,7 +32,8 @@ func (m Model) handleEditKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 
 	k := msg.String()
-	isText := msg.Text != "" && msg.Mod == 0 && k != "space"
+	t := keyText(msg)
+	isText := t != "" && k != "space"
 
 	// The completion popup, when open, consumes its navigation/accept/dismiss
 	// keys; any other key (except typing/backspace, which manage the popup
@@ -184,10 +185,10 @@ func (m Model) handleEditKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	default:
 		if isText {
-			m.edit.insert(msg.Text)
+			m.edit.insert(t)
 			m = m.hlMarkLine(m.edit.cy)
 			m.snapDirty = true
-			return m.afterEditType(msg.Text)
+			return m.afterEditType(t)
 		}
 	}
 	return m, nil

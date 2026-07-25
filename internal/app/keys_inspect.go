@@ -90,8 +90,8 @@ func (m Model) handleInspectKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "space":
 		m.inspectInput, m.inspectCursor = input.InsertAtCursor(m.inspectInput, m.inspectCursor, " ")
 	default:
-		if msg.Text != "" && msg.Mod == 0 {
-			m.inspectInput, m.inspectCursor = input.InsertAtCursor(m.inspectInput, m.inspectCursor, msg.Text)
+		if t := keyText(msg); t != "" {
+			m.inspectInput, m.inspectCursor = input.InsertAtCursor(m.inspectInput, m.inspectCursor, t)
 		}
 	}
 	return m, nil

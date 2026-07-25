@@ -60,8 +60,8 @@ func (m Model) handleSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.searchInput += " "
 		m = m.focusNearestMatch()
 	default:
-		if msg.Text != "" && msg.Mod == 0 {
-			m.searchInput += msg.Text
+		if t := keyText(msg); t != "" {
+			m.searchInput += t
 			m = m.focusNearestMatch()
 		}
 	}

@@ -41,8 +41,8 @@ func (m Model) handleSearchExecKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "space":
 		m.searchExecInput, m.searchExecCursor = input.InsertAtCursor(m.searchExecInput, m.searchExecCursor, " ")
 	default:
-		if msg.Text != "" && msg.Mod == 0 {
-			m.searchExecInput, m.searchExecCursor = input.InsertAtCursor(m.searchExecInput, m.searchExecCursor, msg.Text)
+		if t := keyText(msg); t != "" {
+			m.searchExecInput, m.searchExecCursor = input.InsertAtCursor(m.searchExecInput, m.searchExecCursor, t)
 		}
 	}
 	return m, nil

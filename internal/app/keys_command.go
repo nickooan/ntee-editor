@@ -34,8 +34,8 @@ func (m Model) handleCommandKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "space":
 		m.cmdInput, m.cmdCursor = input.InsertAtCursor(m.cmdInput, m.cmdCursor, " ")
 	default:
-		if msg.Text != "" && msg.Mod == 0 {
-			m.cmdInput, m.cmdCursor = input.InsertAtCursor(m.cmdInput, m.cmdCursor, msg.Text)
+		if t := keyText(msg); t != "" {
+			m.cmdInput, m.cmdCursor = input.InsertAtCursor(m.cmdInput, m.cmdCursor, t)
 		}
 	}
 	return m, nil
@@ -234,8 +234,8 @@ func (m Model) handleFuzzyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.fuzzyQuery += " "
 		m = m.refreshFuzzy()
 	default:
-		if msg.Text != "" && msg.Mod == 0 {
-			m.fuzzyQuery += msg.Text
+		if t := keyText(msg); t != "" {
+			m.fuzzyQuery += t
 			m = m.refreshFuzzy()
 		}
 	}

@@ -63,8 +63,8 @@ func (m Model) handleExecKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.execInput, m.execCursor = input.InsertAtCursor(m.execInput, m.execCursor, " ")
 		m = m.refreshExecSugs()
 	default:
-		if msg.Text != "" && msg.Mod == 0 {
-			m.execInput, m.execCursor = input.InsertAtCursor(m.execInput, m.execCursor, msg.Text)
+		if t := keyText(msg); t != "" {
+			m.execInput, m.execCursor = input.InsertAtCursor(m.execInput, m.execCursor, t)
 			m = m.refreshExecSugs()
 		}
 	}

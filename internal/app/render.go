@@ -703,6 +703,12 @@ func (m Model) renderSearch(width, height int) string {
 		if fcol >= width {
 			off = max(0, fcol-width/2)
 		}
+	} else if m.searchPrevMode == modeEdit {
+		// No matches yet: keep the view where the user was editing (~30% from
+		// the top, the same anchor Enter uses when landing back in the buffer).
+		start = input.Clamp(anchorScroll(m.edit.cy, height, len(lines)), 0, maxScrollY)
+	} else {
+		start = input.Clamp(m.fileScrollY, 0, maxScrollY) // non-edit entry: keep the view scroll
 	}
 
 	// Live replace preview while typing in the search-exec bar: target spans

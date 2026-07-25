@@ -54,18 +54,35 @@ func (m Model) handleSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "backspace":
 		if runes := []rune(m.searchInput); len(runes) > 0 {
 			m.searchInput = string(runes[:len(runes)-1])
-			m.searchFocused = 0
+			m = m.focusNearestMatch()
 		}
 	case "space":
 		m.searchInput += " "
-		m.searchFocused = 0
+		m = m.focusNearestMatch()
 	default:
 		if msg.Text != "" && msg.Mod == 0 {
 			m.searchInput += msg.Text
-			m.searchFocused = 0
+			m = m.focusNearestMatch()
 		}
 	}
 	return m, nil
+}
+
+// focusNearestMatch focuses the first match at/after the edit cursor line
+// (wrapping to the file's first match), so a typed search starts near the
+// editing position instead of the top of the file.
+func (m Model) focusNearestMatch() Model {
+	m.searchFocused = 0
+	if m.searchPrevMode != modeEdit {
+		return m
+	}
+	for i, mt := range view.FindSearchMatches(m.searchContent, m.searchInput) {
+		if mt.LineIndex >= m.edit.cy {
+			m.searchFocused = i
+			break
+		}
+	}
+	return m
 }
 
 // nextMatch cycles the focused match (wrapping) in either direction.

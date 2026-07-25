@@ -600,7 +600,7 @@ func (m Model) handlePaste(text string) (tea.Model, tea.Cmd) {
 		return m.editPaste(text)
 	case modeSearch:
 		m.searchInput += pasteLine(text)
-		m.searchFocused = 0
+		m = m.focusNearestMatch()
 	case modeCommand:
 		m.cmdInput, m.cmdCursor = input.InsertAtCursor(m.cmdInput, m.cmdCursor, pasteLine(text))
 	case modeExec:

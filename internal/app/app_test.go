@@ -27,7 +27,20 @@ func newTestModel(t *testing.T, db store.Backend) (Model, string) {
 	}
 	m := New(config.Default(), db, root, "", nil)
 	m.width, m.height, m.ready = 100, 30, true
+	// The suite runs "warm": deliver the cold-start index build synchronously
+	// (Init would fire it in the background) so suggestion/fuzzy/grep tests see
+	// a populated corpus, and skip the opening splash.
+	m = rebuildCorpusNow(m)
+	m.splash = false
 	return m, root
+}
+
+// rebuildCorpusNow runs the background index build synchronously and delivers
+// its corpusMsg — for tests that add files after the model was built and need
+// the corpus to see them (the real app rebuilds via Init or the TTL refresh).
+func rebuildCorpusNow(m Model) Model {
+	next, _ := m.Update(m.rebuildCorpusCmd()())
+	return next.(Model)
 }
 
 func must(t *testing.T, err error) {

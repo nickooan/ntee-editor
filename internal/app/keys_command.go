@@ -164,6 +164,12 @@ func (m Model) openUncommitted() (Model, tea.Cmd) {
 		m.errText = "not a git repository"
 		return m, nil
 	}
+	if m.corpusBuiltAt.IsZero() {
+		// The corpus ∩ gitDirty intersection is empty until the index lands.
+		m, cmd := m.ensureCorpus() // make sure the build is in flight
+		m.errText = "index building — try again shortly"
+		return m, cmd
+	}
 	m = m.closeCompletion()
 	m, cmd := m.ensureCorpus()
 	var ordered []string

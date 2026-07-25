@@ -20,7 +20,7 @@ func grepFixture(t *testing.T) Model {
 		"package main\n\n// grepNeedle here\nfunc a() {}\n"), 0o644))
 	must(t, os.WriteFile(filepath.Join(root, "beta.go"), []byte(
 		"package main\n\nfunc b() {\n\t_ = \"grepNeedle too\"\n}\n"), 0o644))
-	return m
+	return rebuildCorpusNow(m) // the fixture's files postdate newTestModel's warm-up
 }
 
 // deliver feeds an async message to Update and returns the model + follow-up Cmd.
@@ -123,6 +123,7 @@ func TestGrepLiteralFallbackAndCase(t *testing.T) {
 	m := grepFixture(t)
 	root := m.root
 	must(t, os.WriteFile(filepath.Join(root, "paren.go"), []byte("package main\n\n// call foo(bar\n"), 0o644))
+	m = rebuildCorpusNow(m)
 	m = key(m, ctrlKey('g'))
 	m = grepLoad(t, m)
 
@@ -380,6 +381,7 @@ func TestGrepParallelDeterministic(t *testing.T) {
 		must(t, os.WriteFile(filepath.Join(root, fmt.Sprintf("f%03d.go", i)),
 			[]byte(fmt.Sprintf("package main\n// parNeedle %d\n", i)), 0o644))
 	}
+	m = rebuildCorpusNow(m)
 	m = key(m, ctrlKey('g'))
 	m = grepLoad(t, m)
 	m = runes(m, "parNeedle")

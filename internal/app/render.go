@@ -29,6 +29,9 @@ func (m Model) render() string {
 	if !m.ready {
 		return "starting…"
 	}
+	if m.splash {
+		return m.renderSplash()
+	}
 
 	header := headerStyle.Width(m.width).Render("ntee-editor  ·  " + m.root)
 	status := m.padStatusRows(m.renderStatusLine())

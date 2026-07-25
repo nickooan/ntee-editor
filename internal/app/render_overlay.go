@@ -25,6 +25,28 @@ var (
 	whitespaceStyle = lipgloss.NewStyle().Background(colBg)
 )
 
+// splashSpinner holds the opening page's animation frames, indexed by
+// splashFrame.
+var splashSpinner = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+// renderSplash is the cold-start opening page: name, version, and an animated
+// indexing line, centered in the full frame while the file-tree index builds
+// in the background. Any key skips it (see Update's splash guard).
+func (m Model) renderSplash() string {
+	title := modalTitleStyle.Foreground(colAqua).Render("ntee-editor")
+	version := overlayHintStyle.Render("v" + Version)
+	spinner := splashSpinner[m.splashFrame%len(splashSpinner)]
+	loading := modalTitleStyle.Render(spinner) + overlayHintStyle.Render(" building file tree…")
+	root := overlayHintStyle.Render(truncateRunes(m.root, 48))
+
+	boxWidth := input.Clamp(max(lipgloss.Width(loading), lipgloss.Width(root))+4, 24, max(24, m.width-2))
+	box := modalStyle.Width(boxWidth + 2).Render(
+		title + "\n" + version + "\n\n" + loading + "\n" + root,
+	)
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box,
+		lipgloss.WithWhitespaceStyle(whitespaceStyle))
+}
+
 // renderMessageOverlay centers a dismissible message box in the main pane.
 func (m Model) renderMessageOverlay(width, height int) string {
 	title := m.messageOverlay
@@ -49,7 +71,11 @@ func (m Model) renderFuzzyOverlay(width, height int) string {
 	b.WriteString(promptStyle.Render(m.fuzzyPrompt) + renderInputLine(m.fuzzyQuery, len([]rune(m.fuzzyQuery))) + "\n")
 
 	if len(m.fuzzyMatches) == 0 {
-		b.WriteString(overlayHintStyle.Render("(no matches)"))
+		if m.corpusRebuilding && m.corpusBuiltAt.IsZero() {
+			b.WriteString(overlayHintStyle.Render("(indexing repository…)"))
+		} else {
+			b.WriteString(overlayHintStyle.Render("(no matches)"))
+		}
 	}
 
 	visible := min(len(m.fuzzyMatches), maxRows)

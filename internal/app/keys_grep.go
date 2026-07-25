@@ -86,6 +86,13 @@ func (m Model) openGrep() (Model, tea.Cmd) {
 		m.errText = "unsaved changes — save (Ctrl+S) before repo search"
 		return m, nil
 	}
+	if m.corpusBuiltAt.IsZero() {
+		// Grep snapshots the corpus at open; an empty cold corpus would
+		// silently search nothing.
+		m, cmd := m.ensureCorpus() // make sure the build is in flight
+		m.errText = "index building — try repo search again shortly"
+		return m, cmd
+	}
 	m, corpusCmd := m.ensureCorpus()
 	m.grepOpen = true
 	m.grepQuery = ""

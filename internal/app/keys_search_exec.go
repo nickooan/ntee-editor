@@ -6,7 +6,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/nickooan/ntee-editor/internal/input"
 	"github.com/nickooan/ntee-editor/internal/view"
@@ -25,23 +25,25 @@ func (m Model) enterSearchExec() Model {
 // handleSearchExecKey drives the search-exec bar. Text editing mirrors the
 // @exec bar (handleExecKey) without suggestions; Enter runs the typed replace
 // command and Esc returns to search mode untouched.
-func (m Model) handleSearchExecKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyEsc:
+func (m Model) handleSearchExecKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
 		m.mode = modeSearch
-	case tea.KeyEnter:
+	case "enter":
 		// TrimLeft only: trailing spaces belong to the replacement text.
 		return m.runSearchExecCommand(strings.TrimLeft(m.searchExecInput, " "))
-	case tea.KeyLeft:
+	case "left":
 		m.searchExecCursor = input.MoveCursor(m.searchExecInput, m.searchExecCursor, -1)
-	case tea.KeyRight:
+	case "right":
 		m.searchExecCursor = input.MoveCursor(m.searchExecInput, m.searchExecCursor, 1)
-	case tea.KeyBackspace:
+	case "backspace":
 		m.searchExecInput, m.searchExecCursor, _ = input.RemoveBeforeCursor(m.searchExecInput, m.searchExecCursor)
-	case tea.KeySpace:
+	case "space":
 		m.searchExecInput, m.searchExecCursor = input.InsertAtCursor(m.searchExecInput, m.searchExecCursor, " ")
-	case tea.KeyRunes:
-		m.searchExecInput, m.searchExecCursor = input.InsertAtCursor(m.searchExecInput, m.searchExecCursor, string(msg.Runes))
+	default:
+		if msg.Text != "" && msg.Mod == 0 {
+			m.searchExecInput, m.searchExecCursor = input.InsertAtCursor(m.searchExecInput, m.searchExecCursor, msg.Text)
+		}
 	}
 	return m, nil
 }

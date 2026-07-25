@@ -3,7 +3,7 @@ package app
 import (
 	"strconv"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/nickooan/ntee-editor/internal/input"
 )
@@ -74,26 +74,34 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if m.fuzzyOpen || m.messageOverlay != "" || m.defPickOpen || m.grepOpen {
 		return m, nil
 	}
-	switch msg.Button {
-	case tea.MouseButtonLeft, tea.MouseButtonRight:
-		if msg.Action != tea.MouseActionPress { // ignore drag-motion / release
-			return m, nil
+	// Only clicks and wheel notches act; motion (drag) and release messages
+	// fall through untouched so a trackpad swipe never moves the cursor.
+	switch msg := msg.(type) {
+	case tea.MouseClickMsg:
+		mo := msg.Mouse()
+		switch mo.Button {
+		case tea.MouseLeft, tea.MouseRight:
+			ctrl := mo.Mod.Contains(tea.ModCtrl)
+			// Bare right-click (no Ctrl) is reserved — nothing yet. It's only
+			// handled as a safety net for terminals that map a physical
+			// Ctrl+click to the right button while still forwarding the Ctrl
+			// modifier.
+			if mo.Button == tea.MouseRight && !ctrl {
+				return m, nil
+			}
+			next, hit := m.handleEditClick(mo.X, mo.Y)
+			if hit && ctrl {
+				return next.jumpToReference() // Ctrl+click = jump to definition
+			}
+			return next, nil
 		}
-		// Bare right-click (no Ctrl) is reserved — nothing yet. It's only
-		// handled as a safety net for terminals that map a physical Ctrl+click
-		// to the right button while still forwarding the Ctrl modifier.
-		if msg.Button == tea.MouseButtonRight && !msg.Ctrl {
-			return m, nil
+	case tea.MouseWheelMsg:
+		switch msg.Mouse().Button {
+		case tea.MouseWheelUp:
+			return m.wheelScroll(-1), nil
+		case tea.MouseWheelDown:
+			return m.wheelScroll(1), nil
 		}
-		next, hit := m.handleEditClick(msg)
-		if hit && msg.Ctrl {
-			return next.jumpToReference() // Ctrl+click = jump to definition
-		}
-		return next, nil
-	case tea.MouseButtonWheelUp:
-		return m.wheelScroll(-1), nil
-	case tea.MouseButtonWheelDown:
-		return m.wheelScroll(1), nil
 	}
 	return m, nil
 }
@@ -106,11 +114,11 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 // with the cursor: an ordinary click freezes the window where it was, while
 // clicking the top visible line pages up (that line re-renders at the bottom)
 // and clicking the bottom visible line pages down (it re-renders at the top).
-func (m Model) handleEditClick(msg tea.MouseMsg) (Model, bool) {
+func (m Model) handleEditClick(x, y int) (Model, bool) {
 	if m.mode != modeEdit || m.openFile == nil {
 		return m, false
 	}
-	line, col, ok := m.editClickTarget(msg.X, msg.Y)
+	line, col, ok := m.editClickTarget(x, y)
 	if !ok {
 		return m, false
 	}

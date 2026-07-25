@@ -14,7 +14,7 @@ import (
 	"sort"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"gopkg.in/yaml.v3"
 
 	"github.com/nickooan/ntee-editor/internal/app"
@@ -102,7 +102,7 @@ func main() {
 		reg = manager
 	}
 
-	program := tea.NewProgram(app.New(cfg, db, absRoot, notice, reg), tea.WithAltScreen(), tea.WithMouseCellMotion())
+	program := tea.NewProgram(app.New(cfg, db, absRoot, notice, reg))
 	if manager != nil {
 		manager.SetSink(func(msg any) { program.Send(msg) })
 		defer manager.ShutdownAll()

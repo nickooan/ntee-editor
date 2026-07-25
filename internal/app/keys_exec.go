@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/nickooan/ntee-editor/internal/input"
 )
@@ -31,40 +31,42 @@ func (m Model) refreshExecSugs() Model {
 // handleExecKey drives the @exec command bar. Text editing mirrors the : command
 // bar (handleCommandKey); Enter runs the typed editor command; Tab accepts the
 // highlighted inline suggestion and ↑/↓ cycle it.
-func (m Model) handleExecKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyEsc:
+func (m Model) handleExecKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
 		m.mode = m.execPrevMode
-	case tea.KeyEnter:
+	case "enter":
 		return m.runExecCommand(strings.TrimSpace(m.execInput))
-	case tea.KeyTab:
+	case "tab":
 		if len(m.execSugs) > 0 {
 			sel := m.execSugs[input.Clamp(m.execSugIndex, 0, len(m.execSugs)-1)]
 			m.execInput = acceptExecSuggestion(m.execInput, sel)
 			m.execCursor = len([]rune(m.execInput))
 			m = m.refreshExecSugs()
 		}
-	case tea.KeyDown:
+	case "down":
 		if n := len(m.execSugs); n > 0 {
 			m.execSugIndex = (m.execSugIndex + 1) % n
 		}
-	case tea.KeyUp:
+	case "up":
 		if n := len(m.execSugs); n > 0 {
 			m.execSugIndex = (m.execSugIndex + n - 1) % n
 		}
-	case tea.KeyLeft:
+	case "left":
 		m.execCursor = input.MoveCursor(m.execInput, m.execCursor, -1)
-	case tea.KeyRight:
+	case "right":
 		m.execCursor = input.MoveCursor(m.execInput, m.execCursor, 1)
-	case tea.KeyBackspace:
+	case "backspace":
 		m.execInput, m.execCursor, _ = input.RemoveBeforeCursor(m.execInput, m.execCursor)
 		m = m.refreshExecSugs()
-	case tea.KeySpace:
+	case "space":
 		m.execInput, m.execCursor = input.InsertAtCursor(m.execInput, m.execCursor, " ")
 		m = m.refreshExecSugs()
-	case tea.KeyRunes:
-		m.execInput, m.execCursor = input.InsertAtCursor(m.execInput, m.execCursor, string(msg.Runes))
-		m = m.refreshExecSugs()
+	default:
+		if msg.Text != "" && msg.Mod == 0 {
+			m.execInput, m.execCursor = input.InsertAtCursor(m.execInput, m.execCursor, msg.Text)
+			m = m.refreshExecSugs()
+		}
 	}
 	return m, nil
 }

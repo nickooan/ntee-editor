@@ -3,7 +3,7 @@ package app
 import (
 	"unicode/utf8"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/nickooan/ntee-editor/internal/input"
 	"github.com/nickooan/ntee-editor/internal/syntax"
@@ -36,32 +36,34 @@ func (m Model) freezeSearchSnapshot(content string) Model {
 	return m
 }
 
-func (m Model) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyEsc:
+func (m Model) handleSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
 		m.mode = m.searchPrevMode
-	case tea.KeyEnter:
+	case "enter":
 		m = m.acceptSearch()
-	case tea.KeyUp:
+	case "up":
 		m = m.nextMatch(-1)
-	case tea.KeyDown, tea.KeyCtrlF:
+	case "down", "ctrl+f":
 		m = m.nextMatch(1)
-	case tea.KeyCtrlE:
+	case "ctrl+e":
 		if m.searchInput != "" && len(view.FindSearchMatches(m.searchContent, m.searchInput)) > 0 {
 			return m.enterSearchExec(), nil
 		}
 		m.errText = "no matches to act on"
-	case tea.KeyBackspace:
+	case "backspace":
 		if runes := []rune(m.searchInput); len(runes) > 0 {
 			m.searchInput = string(runes[:len(runes)-1])
 			m.searchFocused = 0
 		}
-	case tea.KeySpace:
+	case "space":
 		m.searchInput += " "
 		m.searchFocused = 0
-	case tea.KeyRunes:
-		m.searchInput += string(msg.Runes)
-		m.searchFocused = 0
+	default:
+		if msg.Text != "" && msg.Mod == 0 {
+			m.searchInput += msg.Text
+			m.searchFocused = 0
+		}
 	}
 	return m, nil
 }

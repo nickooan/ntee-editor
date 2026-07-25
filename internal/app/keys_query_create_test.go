@@ -5,13 +5,13 @@ import (
 	"path/filepath"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // queryEnter types s into the query bar and presses Enter.
 func queryEnter(m Model, s string) Model {
 	m = runes(m, s)
-	return ctrl(m, tea.KeyEnter)
+	return key(m, keyPress(tea.KeyEnter))
 }
 
 func TestQueryMkdirCreatesAndEnters(t *testing.T) {
@@ -91,7 +91,7 @@ func TestQueryMkdirEscapeRejected(t *testing.T) {
 func TestQueryColonStillRoutesToExecuteCommand(t *testing.T) {
 	m, _ := newTestModel(t, nil)
 	m = runes(m, ":recent")
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next, _ := m.Update(keyPress(tea.KeyEnter))
 	m = next.(Model)
 	if m.fuzzyOpen {
 		t.Fatal(":recent verb was removed and must not open the finder")

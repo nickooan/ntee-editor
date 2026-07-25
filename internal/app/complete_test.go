@@ -3,7 +3,7 @@ package app
 import (
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/nickooan/ntee-editor/internal/lsp"
 )
@@ -71,7 +71,7 @@ func TestCompletionEscDismissesAndSuppresses(t *testing.T) {
 	m.completionOpen = true
 	m.completionItems = []lsp.CompletionItem{{Label: "Println"}}
 
-	nm, _, done := m.completionKey(tea.KeyMsg{Type: tea.KeyEsc})
+	nm, _, done := m.completionKey(keyPress(tea.KeyEsc))
 	if !done || nm.completionOpen || !nm.completionDismissed {
 		t.Fatalf("Esc should dismiss and suppress: open=%v dismissed=%v done=%v", nm.completionOpen, nm.completionDismissed, done)
 	}
@@ -89,17 +89,17 @@ func TestCompletionEscDismissesAndSuppresses(t *testing.T) {
 // flag used to survive Space/Enter, leaving completion dead on new lines until
 // a punctuation rune happened to be typed.
 func TestCompletionDismissalLiftsAtWordBoundary(t *testing.T) {
-	for _, boundary := range []tea.KeyType{tea.KeySpace, tea.KeyEnter, tea.KeyLeft} {
+	for _, boundary := range []tea.KeyPressMsg{keyPress(tea.KeySpace), keyPress(tea.KeyEnter), keyPress(tea.KeyLeft)} {
 		m, _ := newLSPTestModel(t)
 		m = m.openFileAt("main.go")
 		m.completionOpen = true
 		m.completionItems = []lsp.CompletionItem{{Label: "Println"}}
-		m, _, _ = m.completionKey(tea.KeyMsg{Type: tea.KeyEsc})
+		m, _, _ = m.completionKey(keyPress(tea.KeyEsc))
 		if !m.completionDismissed {
 			t.Fatal("Esc must set the dismissal flag")
 		}
 
-		next, _ := m.handleEditKey(tea.KeyMsg{Type: boundary})
+		next, _ := m.handleEditKey(boundary)
 		m = next.(Model)
 		if m.completionDismissed {
 			t.Fatalf("%v must lift the Esc dismissal (word boundary)", boundary)
@@ -113,9 +113,9 @@ func TestCompletionDismissalPersistsMidWord(t *testing.T) {
 	m = m.openFileAt("main.go")
 	m.completionOpen = true
 	m.completionItems = []lsp.CompletionItem{{Label: "Println"}}
-	m, _, _ = m.completionKey(tea.KeyMsg{Type: tea.KeyEsc})
+	m, _, _ = m.completionKey(keyPress(tea.KeyEsc))
 
-	next, _ := m.handleEditKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	next, _ := m.handleEditKey(typeRune('x'))
 	m = next.(Model)
 	if !m.completionDismissed {
 		t.Fatal("typing an identifier rune must keep the dismissal")
@@ -128,7 +128,7 @@ func TestCompletionViewSmoke(t *testing.T) {
 	m.completionOpen = true
 	m.completionItems = []lsp.CompletionItem{{Label: "Println"}, {Label: "Printf"}}
 	m.completionIndex = 1
-	if out := m.View(); out == "" {
+	if out := m.render(); out == "" {
 		t.Fatal("View with completion open should render")
 	}
 }

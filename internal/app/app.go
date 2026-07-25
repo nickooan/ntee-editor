@@ -7,9 +7,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/nickooan/ntee-editor/internal/clipboard"
 	"github.com/nickooan/ntee-editor/internal/config"
@@ -512,15 +513,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMsg:
 		return m.handleMouse(msg)
 
-	case tea.KeyMsg:
-		if msg.Type == tea.KeyCtrlC || msg.Type == tea.KeyCtrlQ {
+	case tea.PasteMsg:
+		return m.handlePaste(msg.Content)
+
+	case tea.KeyPressMsg:
+		k := msg.String()
+		if k == "ctrl+c" || k == "ctrl+q" {
 			return m.quit()
 		}
 		m.notice = ""
 		m.errText = ""
 
 		if m.messageOverlay != "" {
-			if msg.Type == tea.KeyEnter || msg.Type == tea.KeyEsc {
+			if k == "enter" || k == "esc" {
 				m.messageOverlay = ""
 			}
 			return m, nil
@@ -534,19 +539,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.grepOpen {
 			return m.handleGrepKey(msg)
 		}
-		if msg.Type == tea.KeyCtrlP && !m.inBarMode() {
+		if k == "ctrl+p" && !m.inBarMode() {
 			return m.openFuzzy()
 		}
-		if msg.Type == tea.KeyCtrlU && !m.inBarMode() {
+		if k == "ctrl+u" && !m.inBarMode() {
 			return m.openUncommitted()
 		}
-		if msg.Type == tea.KeyCtrlG && !m.inBarMode() {
+		if k == "ctrl+g" && !m.inBarMode() {
 			return m.openGrep()
 		}
-		if msg.Type == tea.KeyCtrlT && !m.inBarMode() {
+		if k == "ctrl+t" && !m.inBarMode() {
 			return m.enterInspect()
 		}
-		if msg.Type == tea.KeyShiftTab && !m.inBarMode() {
+		if k == "shift+tab" && !m.inBarMode() {
 			return m.cycleTab(), nil
 		}
 
@@ -568,6 +573,53 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// handlePaste routes bracketed-paste text to whichever input has focus (v1
+// delivered pastes as one multi-rune KeyRunes message; v2 sends tea.PasteMsg).
+// Only the grep query and the edit buffer are multi-line — the single-line
+// bars take the paste with newlines collapsed to spaces.
+func (m Model) handlePaste(text string) (tea.Model, tea.Cmd) {
+	if m.messageOverlay != "" || m.defPickOpen {
+		return m, nil
+	}
+	if m.fuzzyOpen {
+		m.fuzzyQuery += pasteLine(text)
+		return m.refreshFuzzy(), nil
+	}
+	if m.grepOpen {
+		return m.grepPaste(text)
+	}
+	switch m.mode {
+	case modeQuery:
+		m = m.adoptPreview()
+		m.command, m.qCursor = input.InsertAtCursor(m.command, m.qCursor, pasteLine(text))
+		m.inputSuggestIndex = 0
+		m.keyboardSelectedCommand = ""
+	case modeEdit:
+		return m.editPaste(text)
+	case modeSearch:
+		m.searchInput += pasteLine(text)
+		m.searchFocused = 0
+	case modeCommand:
+		m.cmdInput, m.cmdCursor = input.InsertAtCursor(m.cmdInput, m.cmdCursor, pasteLine(text))
+	case modeExec:
+		m.execInput, m.execCursor = input.InsertAtCursor(m.execInput, m.execCursor, pasteLine(text))
+		m = m.refreshExecSugs()
+	case modeSearchExec:
+		m.searchExecInput, m.searchExecCursor = input.InsertAtCursor(m.searchExecInput, m.searchExecCursor, pasteLine(text))
+	case modeInspect:
+		m.inspectInput, m.inspectCursor = input.InsertAtCursor(m.inspectInput, m.inspectCursor, pasteLine(text))
+	}
+	return m, nil
+}
+
+// pasteLine flattens pasted text for the single-line input bars: CR/CRLF
+// normalize to \n, then newlines collapse to single spaces.
+func pasteLine(text string) string {
+	s := strings.ReplaceAll(text, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	return strings.ReplaceAll(s, "\n", " ")
 }
 
 func (m Model) quit() (tea.Model, tea.Cmd) {

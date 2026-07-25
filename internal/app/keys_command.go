@@ -3,7 +3,7 @@ package app
 import (
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/nickooan/ntee-editor/internal/filetree"
 	"github.com/nickooan/ntee-editor/internal/fuzzy"
@@ -19,22 +19,24 @@ func (m Model) enterCommand() Model {
 	return m
 }
 
-func (m Model) handleCommandKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyEsc:
+func (m Model) handleCommandKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
 		m.mode = m.cmdPrevMode
-	case tea.KeyEnter:
+	case "enter":
 		return m.executeCommand(strings.TrimSpace(m.cmdInput))
-	case tea.KeyLeft:
+	case "left":
 		m.cmdCursor = input.MoveCursor(m.cmdInput, m.cmdCursor, -1)
-	case tea.KeyRight:
+	case "right":
 		m.cmdCursor = input.MoveCursor(m.cmdInput, m.cmdCursor, 1)
-	case tea.KeyBackspace:
+	case "backspace":
 		m.cmdInput, m.cmdCursor, _ = input.RemoveBeforeCursor(m.cmdInput, m.cmdCursor)
-	case tea.KeySpace:
+	case "space":
 		m.cmdInput, m.cmdCursor = input.InsertAtCursor(m.cmdInput, m.cmdCursor, " ")
-	case tea.KeyRunes:
-		m.cmdInput, m.cmdCursor = input.InsertAtCursor(m.cmdInput, m.cmdCursor, string(msg.Runes))
+	default:
+		if msg.Text != "" && msg.Mod == 0 {
+			m.cmdInput, m.cmdCursor = input.InsertAtCursor(m.cmdInput, m.cmdCursor, msg.Text)
+		}
 	}
 	return m, nil
 }
@@ -197,11 +199,11 @@ func (m Model) closeFuzzy() Model {
 	return m
 }
 
-func (m Model) handleFuzzyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyEsc, tea.KeyCtrlP, tea.KeyCtrlU:
+func (m Model) handleFuzzyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "ctrl+p", "ctrl+u":
 		m = m.closeFuzzy()
-	case tea.KeyEnter:
+	case "enter":
 		if len(m.fuzzyMatches) == 0 {
 			m = m.closeFuzzy()
 			break
@@ -219,21 +221,23 @@ func (m Model) handleFuzzyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m = m.flushBurst() // keep the abandoned buffer reachable in history
 		}
 		m = m.openFileAt(rel)
-	case tea.KeyUp:
+	case "up":
 		m.fuzzyIndex = max(0, m.fuzzyIndex-1)
-	case tea.KeyDown:
+	case "down":
 		m.fuzzyIndex = min(max(0, len(m.fuzzyMatches)-1), m.fuzzyIndex+1)
-	case tea.KeyBackspace:
+	case "backspace":
 		if runes := []rune(m.fuzzyQuery); len(runes) > 0 {
 			m.fuzzyQuery = string(runes[:len(runes)-1])
 			m = m.refreshFuzzy()
 		}
-	case tea.KeySpace:
+	case "space":
 		m.fuzzyQuery += " "
 		m = m.refreshFuzzy()
-	case tea.KeyRunes:
-		m.fuzzyQuery += string(msg.Runes)
-		m = m.refreshFuzzy()
+	default:
+		if msg.Text != "" && msg.Mod == 0 {
+			m.fuzzyQuery += msg.Text
+			m = m.refreshFuzzy()
+		}
 	}
 	return m, nil
 }

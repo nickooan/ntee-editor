@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/nickooan/ntee-editor/internal/filetree"
 	"github.com/nickooan/ntee-editor/internal/input"
@@ -176,17 +176,17 @@ func (m Model) refreshDefPickPreview() Model {
 }
 
 // handleDefPickKey drives the multi-definition picker overlay.
-func (m Model) handleDefPickKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyEsc:
+func (m Model) handleDefPickKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
 		m.defPickOpen = false
-	case tea.KeyUp:
+	case "up":
 		m.defPickIndex = max(0, m.defPickIndex-1)
 		m = m.refreshDefPickPreview()
-	case tea.KeyDown:
+	case "down":
 		m.defPickIndex = min(len(m.defPickItems)-1, m.defPickIndex+1)
 		m = m.refreshDefPickPreview()
-	case tea.KeyEnter:
+	case "enter":
 		m.defPickOpen = false
 		if len(m.defPickItems) > 0 {
 			c := m.defPickItems[input.Clamp(m.defPickIndex, 0, len(m.defPickItems)-1)]

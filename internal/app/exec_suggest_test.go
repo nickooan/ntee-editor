@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 func TestExecSuggestionsTable(t *testing.T) {
@@ -69,24 +69,24 @@ func TestExecSuggestionsConflictLabels(t *testing.T) {
 // label pick + Enter resolves the conflict.
 func TestExecTabCompletionChain(t *testing.T) {
 	m := conflictFixture(t, 2)
-	m = ctrl(m, tea.KeyCtrlE)
+	m = key(m, ctrlKey('e'))
 
 	m = runes(m, "g")
-	m = ctrl(m, tea.KeyTab)
+	m = key(m, keyPress(tea.KeyTab))
 	if m.execInput != "git " {
 		t.Fatalf("after g<Tab>: %q", m.execInput)
 	}
 	m = runes(m, "s")
-	m = ctrl(m, tea.KeyTab)
+	m = key(m, keyPress(tea.KeyTab))
 	if m.execInput != "git scf " {
 		t.Fatalf("after s<Tab>: %q", m.execInput)
 	}
 	// First candidate is the ours label (HEAD in the fixture).
-	m = ctrl(m, tea.KeyTab)
+	m = key(m, keyPress(tea.KeyTab))
 	if m.execInput != "git scf HEAD " {
 		t.Fatalf("after label<Tab>: %q", m.execInput)
 	}
-	m = ctrl(m, tea.KeyEnter)
+	m = key(m, keyPress(tea.KeyEnter))
 	if m.mode != modeEdit {
 		t.Fatalf("resolve should land in edit mode, got %v (err=%q)", m.mode, m.errText)
 	}
@@ -97,21 +97,21 @@ func TestExecTabCompletionChain(t *testing.T) {
 
 func TestExecSuggestionCycle(t *testing.T) {
 	m := execLineFixture(t, 3) // Ctrl+E is bound in edit mode
-	m = ctrl(m, tea.KeyCtrlE)
+	m = key(m, ctrlKey('e'))
 	if len(m.execSugs) != 8 {
 		t.Fatalf("empty bar must offer all verbs, got %v", m.execSugs)
 	}
 
-	m = ctrl(m, tea.KeyDown) // copy → cp
-	m = ctrl(m, tea.KeyDown) // cp → cpfp
-	m = ctrl(m, tea.KeyDown) // cpfp → cpafp
-	m = ctrl(m, tea.KeyDown) // cpafp → jump
-	m = ctrl(m, tea.KeyTab)
+	m = key(m, keyPress(tea.KeyDown)) // copy → cp
+	m = key(m, keyPress(tea.KeyDown)) // cp → cpfp
+	m = key(m, keyPress(tea.KeyDown)) // cpfp → cpafp
+	m = key(m, keyPress(tea.KeyDown)) // cpafp → jump
+	m = key(m, keyPress(tea.KeyTab))
 	if m.execInput != "jump " {
 		t.Fatalf("Tab after two Downs should accept jump, got %q", m.execInput)
 	}
 
-	m = ctrl(m, tea.KeyUp) // wrap: top → end (last candidate)
+	m = key(m, keyPress(tea.KeyUp)) // wrap: top → end (last candidate)
 	if m.execSugIndex != len(m.execSugs)-1 {
 		t.Fatalf("Up from 0 must wrap to last, got %d of %v", m.execSugIndex, m.execSugs)
 	}
@@ -119,12 +119,12 @@ func TestExecSuggestionCycle(t *testing.T) {
 
 func TestExecTabNoopWithoutSuggestions(t *testing.T) {
 	m := execLineFixture(t, 3)
-	m = ctrl(m, tea.KeyCtrlE)
+	m = key(m, ctrlKey('e'))
 	m = runes(m, "zz")
 	if len(m.execSugs) != 0 {
 		t.Fatalf("unknown prefix must have no suggestions: %v", m.execSugs)
 	}
-	m = ctrl(m, tea.KeyTab)
+	m = key(m, keyPress(tea.KeyTab))
 	if m.execInput != "zz" {
 		t.Fatalf("Tab with no suggestions must not change input: %q", m.execInput)
 	}

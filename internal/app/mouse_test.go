@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // Test geometry (newTestModel: width=100, height=30, main.go fixture opened):
@@ -19,17 +19,17 @@ const (
 )
 
 func click(m Model, x, y int) Model {
-	next, _ := m.Update(tea.MouseMsg{X: x, Y: y, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	next, _ := m.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 	return next.(Model)
 }
 
 func wheel(m Model, button tea.MouseButton) Model {
-	next, _ := m.Update(tea.MouseMsg{X: testTextX, Y: testTextY, Action: tea.MouseActionPress, Button: button})
+	next, _ := m.Update(tea.MouseWheelMsg{X: testTextX, Y: testTextY, Button: button})
 	return next.(Model)
 }
 
 func ctrlClick(m Model, x, y int) (Model, tea.Cmd) {
-	next, cmd := m.Update(tea.MouseMsg{X: x, Y: y, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, Ctrl: true})
+	next, cmd := m.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft, Mod: tea.ModCtrl})
 	return next.(Model), cmd
 }
 
@@ -59,7 +59,7 @@ func TestPlainClickDoesNotJump(t *testing.T) {
 	m, client := newLSPTestModel(t)
 	m = m.openFileAt("main.go")
 	client.locs = selfLoc(m, 2)
-	next, cmd := m.Update(tea.MouseMsg{X: testIdentX, Y: testTextY, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	next, cmd := m.Update(tea.MouseClickMsg{X: testIdentX, Y: testTextY, Button: tea.MouseLeft})
 	m = next.(Model)
 	if m.edit.cy != 0 || m.edit.cx != 8 {
 		t.Fatalf("plain click should still move the cursor, got (%d,%d)", m.edit.cy, m.edit.cx)
@@ -73,7 +73,7 @@ func TestCtrlRightClickJumps(t *testing.T) {
 	m, client := newLSPTestModel(t)
 	m = m.openFileAt("main.go")
 	client.locs = selfLoc(m, 2)
-	next, cmd := m.Update(tea.MouseMsg{X: testIdentX, Y: testTextY, Action: tea.MouseActionPress, Button: tea.MouseButtonRight, Ctrl: true})
+	next, cmd := m.Update(tea.MouseClickMsg{X: testIdentX, Y: testTextY, Button: tea.MouseRight, Mod: tea.ModCtrl})
 	m = next.(Model)
 	if cmd == nil || m.edit.cy != 0 || m.edit.cx != 8 {
 		t.Fatalf("ctrl+right-click should move cursor and jump: (%d,%d) cmd=%v", m.edit.cy, m.edit.cx, cmd)
@@ -83,7 +83,7 @@ func TestCtrlRightClickJumps(t *testing.T) {
 func TestBareRightClickIgnored(t *testing.T) {
 	m := mouseFixture(t)
 	m.edit.cy, m.edit.cx = 2, 1
-	next, cmd := m.Update(tea.MouseMsg{X: testIdentX, Y: testTextY, Action: tea.MouseActionPress, Button: tea.MouseButtonRight})
+	next, cmd := m.Update(tea.MouseClickMsg{X: testIdentX, Y: testTextY, Button: tea.MouseRight})
 	m = next.(Model)
 	if m.edit.cy != 2 || m.edit.cx != 1 || cmd != nil {
 		t.Fatalf("bare right-click should be a no-op: (%d,%d) cmd=%v", m.edit.cy, m.edit.cx, cmd)
@@ -152,7 +152,7 @@ func TestClickOutsideContentIgnored(t *testing.T) {
 func TestClickClearsSelection(t *testing.T) {
 	m := mouseFixture(t)
 	m.edit.cy, m.edit.cx = 0, 0
-	m = ctrl(m, tea.KeyCtrlA)
+	m = key(m, ctrlKey('a'))
 	if m.edit.sel == nil {
 		t.Fatal("expected a selection")
 	}
@@ -270,24 +270,24 @@ func TestWheelScrollsCursorInEditMode(t *testing.T) {
 	m := tallFixture(t, 30)
 	m.edit.cy, m.edit.cx = 10, 0
 
-	m = wheel(m, tea.MouseButtonWheelDown)
+	m = wheel(m, tea.MouseWheelDown)
 	if m.edit.cy != 10+wheelScrollLines {
 		t.Fatalf("wheel down: cy = %d, want %d", m.edit.cy, 10+wheelScrollLines)
 	}
-	m = wheel(m, tea.MouseButtonWheelUp)
+	m = wheel(m, tea.MouseWheelUp)
 	if m.edit.cy != 10 {
 		t.Fatalf("wheel up: cy = %d, want 10", m.edit.cy)
 	}
 
 	// Clamps at the top and bottom.
 	m.edit.cy = 1
-	m = wheel(m, tea.MouseButtonWheelUp)
+	m = wheel(m, tea.MouseWheelUp)
 	if m.edit.cy != 0 {
 		t.Fatalf("wheel up should clamp at 0, got %d", m.edit.cy)
 	}
 	last := len(m.edit.lines) - 1
 	m.edit.cy = last - 1
-	m = wheel(m, tea.MouseButtonWheelDown)
+	m = wheel(m, tea.MouseWheelDown)
 	if m.edit.cy != last {
 		t.Fatalf("wheel down should clamp at last line %d, got %d", last, m.edit.cy)
 	}
@@ -297,7 +297,7 @@ func TestHorizontalWheelDoesNothing(t *testing.T) {
 	m := mouseFixture(t)
 	m.edit.cy, m.edit.cx = 2, 4
 	before := m.edit.content()
-	for _, btn := range []tea.MouseButton{tea.MouseButtonWheelLeft, tea.MouseButtonWheelRight} {
+	for _, btn := range []tea.MouseButton{tea.MouseWheelLeft, tea.MouseWheelRight} {
 		m = wheel(m, btn)
 		if m.edit.cy != 2 || m.edit.cx != 4 {
 			t.Fatalf("horizontal wheel %v moved the cursor to (%d,%d)", btn, m.edit.cy, m.edit.cx)
@@ -310,12 +310,12 @@ func TestHorizontalWheelDoesNothing(t *testing.T) {
 
 func TestWheelScrollsFileInQueryMode(t *testing.T) {
 	m := tallFixture(t, 30) // opens in edit mode
-	m = ctrl(m, tea.KeyEsc) // back to query mode, file still shown
+	m = key(m, keyPress(tea.KeyEsc)) // back to query mode, file still shown
 	if m.mode != modeQuery {
 		t.Fatalf("expected query mode, got %v", m.mode)
 	}
 	before := m.edit.cy
-	m = wheel(m, tea.MouseButtonWheelDown)
+	m = wheel(m, tea.MouseWheelDown)
 	if m.fileScrollY != wheelScrollLines {
 		t.Fatalf("query wheel down: fileScrollY = %d, want %d", m.fileScrollY, wheelScrollLines)
 	}
@@ -329,13 +329,13 @@ func TestWheelIgnoredWithOverlayOrNoFile(t *testing.T) {
 	m := mouseFixture(t)
 	m.edit.cy = 5
 	m.fuzzyOpen = true
-	if got := wheel(m, tea.MouseButtonWheelDown); got.edit.cy != 5 {
+	if got := wheel(m, tea.MouseWheelDown); got.edit.cy != 5 {
 		t.Fatalf("wheel with overlay open moved cursor to %d", got.edit.cy)
 	}
 
 	// Query mode, no open file: no panic, no-op.
 	m2, _ := newTestModel(t, nil)
-	if got := wheel(m2, tea.MouseButtonWheelDown); got.fileScrollY != 0 {
+	if got := wheel(m2, tea.MouseWheelDown); got.fileScrollY != 0 {
 		t.Fatalf("wheel with no file scrolled to %d", got.fileScrollY)
 	}
 }
@@ -352,10 +352,10 @@ func TestClickIgnoredOutsideEditMode(t *testing.T) {
 func TestNonLeftClickIgnored(t *testing.T) {
 	m := mouseFixture(t)
 	m.edit.cy, m.edit.cx = 2, 4
-	for _, ev := range []tea.MouseMsg{
-		{X: testTextX, Y: testTextY, Action: tea.MouseActionPress, Button: tea.MouseButtonRight},
-		{X: testTextX, Y: testTextY, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft},
-		{X: testTextX, Y: testTextY, Action: tea.MouseActionMotion, Button: tea.MouseButtonLeft},
+	for _, ev := range []tea.Msg{
+		tea.MouseClickMsg{X: testTextX, Y: testTextY, Button: tea.MouseRight},
+		tea.MouseReleaseMsg{X: testTextX, Y: testTextY, Button: tea.MouseLeft},
+		tea.MouseMotionMsg{X: testTextX, Y: testTextY, Button: tea.MouseLeft},
 	} {
 		next, _ := m.Update(ev)
 		m = next.(Model)

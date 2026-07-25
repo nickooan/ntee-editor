@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 
 	"github.com/nickooan/ntee-editor/internal/fuzzy"
 	"github.com/nickooan/ntee-editor/internal/input"
@@ -20,18 +20,43 @@ var (
 	modalTitleStyle  = lipgloss.NewStyle().Bold(true).Foreground(colFg).Background(colBg)
 	overlayHintStyle = lipgloss.NewStyle().Foreground(colComment).Background(colBg)
 	fuzzyBoldStyle   = lipgloss.NewStyle().Bold(true).Foreground(colOrange).Background(colBg)
+	// whitespaceStyle fills the empty area around a Placed overlay box with the
+	// theme background (v2 replaces WithWhitespaceBackground with a style).
+	whitespaceStyle = lipgloss.NewStyle().Background(colBg)
 )
+
+// splashSpinner holds the opening page's animation frames, indexed by
+// splashFrame.
+var splashSpinner = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+// renderSplash is the cold-start opening page: name, version, and an animated
+// indexing line, centered in the full frame while the file-tree index builds
+// in the background. Any key skips it (see Update's splash guard).
+func (m Model) renderSplash() string {
+	title := modalTitleStyle.Foreground(colAqua).Render("ntee-editor")
+	version := overlayHintStyle.Render("v" + Version)
+	spinner := splashSpinner[m.splashFrame%len(splashSpinner)]
+	loading := modalTitleStyle.Render(spinner) + overlayHintStyle.Render(" building file tree…")
+	root := overlayHintStyle.Render(truncateRunes(m.root, 48))
+
+	boxWidth := input.Clamp(max(lipgloss.Width(loading), lipgloss.Width(root))+4, 24, max(24, m.width-2))
+	box := modalStyle.Width(boxWidth + 2).Render(
+		title + "\n" + version + "\n\n" + loading + "\n" + root,
+	)
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box,
+		lipgloss.WithWhitespaceStyle(whitespaceStyle))
+}
 
 // renderMessageOverlay centers a dismissible message box in the main pane.
 func (m Model) renderMessageOverlay(width, height int) string {
 	title := m.messageOverlay
 	hint := "[enter] dismiss"
 	boxWidth := input.Clamp(max(len([]rune(title)), len([]rune(hint)))+4, 20, max(20, width-2))
-	box := modalStyle.Width(boxWidth).Render(
+	box := modalStyle.Width(boxWidth + 2).Render(
 		modalTitleStyle.Render(title) + "\n\n" + overlayHintStyle.Render(hint),
 	)
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box,
-		lipgloss.WithWhitespaceBackground(colBg))
+		lipgloss.WithWhitespaceStyle(whitespaceStyle))
 }
 
 // renderFuzzyOverlay draws the fuzzy file finder (Ctrl+P goto / Ctrl+U
@@ -46,7 +71,11 @@ func (m Model) renderFuzzyOverlay(width, height int) string {
 	b.WriteString(promptStyle.Render(m.fuzzyPrompt) + renderInputLine(m.fuzzyQuery, len([]rune(m.fuzzyQuery))) + "\n")
 
 	if len(m.fuzzyMatches) == 0 {
-		b.WriteString(overlayHintStyle.Render("(no matches)"))
+		if m.corpusRebuilding && m.corpusBuiltAt.IsZero() {
+			b.WriteString(overlayHintStyle.Render("(indexing repository…)"))
+		} else {
+			b.WriteString(overlayHintStyle.Render("(no matches)"))
+		}
 	}
 
 	visible := min(len(m.fuzzyMatches), maxRows)
@@ -65,9 +94,9 @@ func (m Model) renderFuzzyOverlay(width, height int) string {
 		b.WriteString("\n" + row)
 	}
 
-	box := modalStyle.Width(boxWidth).Render(b.String())
+	box := modalStyle.Width(boxWidth + 2).Render(b.String())
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box,
-		lipgloss.WithWhitespaceBackground(colBg))
+		lipgloss.WithWhitespaceStyle(whitespaceStyle))
 }
 
 // renderDefPickOverlay lists multiple definition hits: `name.ext:LINE` with
@@ -125,9 +154,9 @@ func (m Model) renderDefPickOverlay(width, height int) string {
 		}
 	}
 
-	box := modalStyle.Width(boxWidth).Render(b.String())
+	box := modalStyle.Width(boxWidth + 2).Render(b.String())
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box,
-		lipgloss.WithWhitespaceBackground(colBg))
+		lipgloss.WithWhitespaceStyle(whitespaceStyle))
 }
 
 // renderPreviewRows renders a syntax-colored window of lines with the target
@@ -313,9 +342,9 @@ func (m Model) renderGrepOverlay(width, height int) string {
 		rows = append(rows, blank)
 	}
 
-	box := modalStyle.Width(boxWidth).Render(strings.Join(rows[:innerH], "\n"))
+	box := modalStyle.Width(boxWidth + 2).Render(strings.Join(rows[:innerH], "\n"))
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box,
-		lipgloss.WithWhitespaceBackground(colBg))
+		lipgloss.WithWhitespaceStyle(whitespaceStyle))
 }
 
 // renderFuzzyRow renders one candidate path, bolding the matched rune

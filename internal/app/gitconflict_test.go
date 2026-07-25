@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 func TestFindConflictBlocksSimple(t *testing.T) {
@@ -175,9 +175,9 @@ func conflictFixture(t *testing.T, cursorLine int) Model {
 
 func TestExecGitScfKeepsOurs(t *testing.T) {
 	m := conflictFixture(t, 2) // cursor on the <<<<<<< line, no selection
-	m = ctrl(m, tea.KeyCtrlE)
+	m = key(m, ctrlKey('e'))
 	m = runes(m, "git scf head")
-	m = ctrl(m, tea.KeyEnter)
+	m = key(m, keyPress(tea.KeyEnter))
 
 	got := m.edit.content()
 	if !strings.Contains(got, `const databaseUrl = "prod"`) {
@@ -202,14 +202,14 @@ func TestExecGitScfKeepsTheirsBySelection(t *testing.T) {
 	m := conflictFixture(t, 2)
 	// Line-wise select the whole block: Ctrl+A twice, then extend down to the
 	// closing marker (lines 2..6).
-	m = ctrl(m, tea.KeyCtrlA)
-	m = ctrl(m, tea.KeyCtrlA)
+	m = key(m, ctrlKey('a'))
+	m = key(m, ctrlKey('a'))
 	for i := 0; i < 4; i++ {
-		m = ctrl(m, tea.KeyShiftDown)
+		m = key(m, shiftKey(tea.KeyDown))
 	}
-	m = ctrl(m, tea.KeyCtrlE)
+	m = key(m, ctrlKey('e'))
 	m = runes(m, "git scf feature/login")
-	m = ctrl(m, tea.KeyEnter)
+	m = key(m, keyPress(tea.KeyEnter))
 
 	got := m.edit.content()
 	if !strings.Contains(got, `"dev"`) || strings.Contains(got, `"prod"`) {
@@ -222,9 +222,9 @@ func TestExecGitScfKeepsTheirsBySelection(t *testing.T) {
 
 func TestExecGitScfBothKeepsBothSides(t *testing.T) {
 	m := conflictFixture(t, 2) // cursor on the <<<<<<< line
-	m = ctrl(m, tea.KeyCtrlE)
+	m = key(m, ctrlKey('e'))
 	m = runes(m, "git scf both")
-	m = ctrl(m, tea.KeyEnter)
+	m = key(m, keyPress(tea.KeyEnter))
 
 	got := m.edit.content()
 	if !strings.Contains(got, `"prod"`) || !strings.Contains(got, `"dev"`) {
@@ -245,9 +245,9 @@ func TestExecGitScfBothKeepsBothSides(t *testing.T) {
 func TestExecGitScfBadLabelStaysInExec(t *testing.T) {
 	m := conflictFixture(t, 2)
 	before := m.edit.content()
-	m = ctrl(m, tea.KeyCtrlE)
+	m = key(m, ctrlKey('e'))
 	m = runes(m, "git scf nope")
-	m = ctrl(m, tea.KeyEnter)
+	m = key(m, keyPress(tea.KeyEnter))
 
 	if m.mode != modeExec {
 		t.Fatalf("bad label should stay in exec, got %v", m.mode)
@@ -265,13 +265,13 @@ func TestExecGitScfPartialSelectionErrors(t *testing.T) {
 	before := m.edit.content()
 	// Select from the <<<<<<< line down to only the ======= line (2..4): the
 	// closing >>>>>>> at line 6 is left out, so the block is partially selected.
-	m = ctrl(m, tea.KeyCtrlA)
-	m = ctrl(m, tea.KeyCtrlA)
-	m = ctrl(m, tea.KeyShiftDown)
-	m = ctrl(m, tea.KeyShiftDown)
-	m = ctrl(m, tea.KeyCtrlE)
+	m = key(m, ctrlKey('a'))
+	m = key(m, ctrlKey('a'))
+	m = key(m, shiftKey(tea.KeyDown))
+	m = key(m, shiftKey(tea.KeyDown))
+	m = key(m, ctrlKey('e'))
 	m = runes(m, "git scf head")
-	m = ctrl(m, tea.KeyEnter)
+	m = key(m, keyPress(tea.KeyEnter))
 
 	if m.mode != modeExec {
 		t.Fatalf("partial selection should stay in exec, got %v", m.mode)
@@ -287,9 +287,9 @@ func TestExecGitScfPartialSelectionErrors(t *testing.T) {
 func TestExecGitScfNoConflictInRegion(t *testing.T) {
 	m := conflictFixture(t, 0) // cursor on "package main", away from the block
 	before := m.edit.content()
-	m = ctrl(m, tea.KeyCtrlE)
+	m = key(m, ctrlKey('e'))
 	m = runes(m, "git scf head")
-	m = ctrl(m, tea.KeyEnter)
+	m = key(m, keyPress(tea.KeyEnter))
 
 	if m.mode != modeExec {
 		t.Fatal("should stay in exec when no block is in the region")
@@ -305,13 +305,13 @@ func TestExecGitScfNoConflictInRegion(t *testing.T) {
 func TestExecGitScfUndoRestoresConflict(t *testing.T) {
 	m := conflictFixture(t, 2)
 	before := m.edit.content()
-	m = ctrl(m, tea.KeyCtrlE)
+	m = key(m, ctrlKey('e'))
 	m = runes(m, "git scf head")
-	m = ctrl(m, tea.KeyEnter)
+	m = key(m, keyPress(tea.KeyEnter))
 	if m.edit.content() == before {
 		t.Fatal("resolve did not change the buffer")
 	}
-	m = ctrl(m, tea.KeyCtrlZ)
+	m = key(m, ctrlKey('z'))
 	if m.edit.content() != before {
 		t.Fatalf("undo should restore the conflict, got %q", m.edit.content())
 	}
@@ -319,9 +319,9 @@ func TestExecGitScfUndoRestoresConflict(t *testing.T) {
 
 func TestExecGitUnknownSubcommand(t *testing.T) {
 	m := conflictFixture(t, 2)
-	m = ctrl(m, tea.KeyCtrlE)
+	m = key(m, ctrlKey('e'))
 	m = runes(m, "git foo")
-	m = ctrl(m, tea.KeyEnter)
+	m = key(m, keyPress(tea.KeyEnter))
 	if m.mode != modeExec {
 		t.Fatal("unknown git subcommand should stay in exec")
 	}

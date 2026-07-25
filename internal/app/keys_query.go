@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/nickooan/ntee-editor/internal/filetree"
 	"github.com/nickooan/ntee-editor/internal/input"
@@ -22,7 +22,7 @@ func (m Model) queryInputSuggestions(entries []filetree.FileTreeEntry) []filetre
 
 // handleQueryKey is the home-mode handler: the bottom input bar drives the
 // sidebar (typing expands, navigation highlights) and Enter enters/opens.
-func (m Model) handleQueryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleQueryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	m, corpusCmd := m.ensureCorpus()
 	entries := m.treeEntries()
 	suggestions := m.queryInputSuggestions(entries)
@@ -31,71 +31,73 @@ func (m Model) handleQueryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	popupOpen := len(suggestions) > 0
 
-	switch msg.Type {
-	case tea.KeyShiftUp:
+	switch msg.String() {
+	case "shift+up":
 		if popupOpen {
 			return m.moveInputSuggestion(suggestions, -1), nil
 		}
 		return m.moveSidebarSelection(entries, -1), nil
-	case tea.KeyShiftDown:
+	case "shift+down":
 		if popupOpen {
 			return m.moveInputSuggestion(suggestions, 1), nil
 		}
 		return m.moveSidebarSelection(entries, 1), nil
 
-	case tea.KeyUp:
+	case "up":
 		if popupOpen {
 			return m.moveInputSuggestion(suggestions, -1), nil
 		}
 		m.fileScrollY = input.Clamp(m.fileScrollY-1, 0, max(0, len(m.fileLines)-1))
-	case tea.KeyDown:
+	case "down":
 		if popupOpen {
 			return m.moveInputSuggestion(suggestions, 1), nil
 		}
 		m.fileScrollY = input.Clamp(m.fileScrollY+1, 0, max(0, len(m.fileLines)-1))
-	case tea.KeyPgUp:
+	case "pgup":
 		m.fileScrollY = input.Clamp(m.fileScrollY-m.contentHeight(), 0, max(0, len(m.fileLines)-1))
-	case tea.KeyPgDown:
+	case "pgdown":
 		m.fileScrollY = input.Clamp(m.fileScrollY+m.contentHeight(), 0, max(0, len(m.fileLines)-1))
-	case tea.KeyLeft:
+	case "left":
 		m.fileScrollX = max(0, m.fileScrollX-4)
-	case tea.KeyRight:
+	case "right":
 		m.fileScrollX += 4
 
-	case tea.KeyShiftLeft:
+	case "shift+left":
 		m = m.adoptPreview()
 		m.qCursor = input.MoveCursor(m.command, m.qCursor, -1)
-	case tea.KeyShiftRight:
+	case "shift+right":
 		m = m.adoptPreview()
 		m.qCursor = input.MoveCursor(m.command, m.qCursor, 1)
 
-	case tea.KeyEnter:
+	case "enter":
 		return m.submitQuery(entries, suggestions)
 
-	case tea.KeyEsc:
+	case "esc":
 		return m.moveQueryToParentDirectory(), nil
 
-	case tea.KeyTab:
+	case "tab":
 		if m.openFile != nil {
 			m = m.beginEditSession(m.openFile.Content)
 			m.mode = modeEdit
 		}
 
-	case tea.KeyBackspace:
+	case "backspace":
 		m = m.adoptPreview()
 		m.command, m.qCursor, _ = input.RemoveBeforeCursor(m.command, m.qCursor)
 		m.inputSuggestIndex = 0
 		m.keyboardSelectedCommand = "" // typing re-anchors the highlight to the text
-	case tea.KeySpace:
+	case "space":
 		m = m.adoptPreview()
 		m.command, m.qCursor = input.InsertAtCursor(m.command, m.qCursor, " ")
 		m.inputSuggestIndex = 0
 		m.keyboardSelectedCommand = ""
-	case tea.KeyRunes:
-		m = m.adoptPreview()
-		m.command, m.qCursor = input.InsertAtCursor(m.command, m.qCursor, string(msg.Runes))
-		m.inputSuggestIndex = 0
-		m.keyboardSelectedCommand = ""
+	default:
+		if t := keyText(msg); t != "" {
+			m = m.adoptPreview()
+			m.command, m.qCursor = input.InsertAtCursor(m.command, m.qCursor, t)
+			m.inputSuggestIndex = 0
+			m.keyboardSelectedCommand = ""
+		}
 	}
 	// corpusCmd (background revalidation, or nil) rides out on the typing paths
 	// that fall through here — exactly when fresh results matter.

@@ -2,12 +2,14 @@ package app
 
 import (
 	"fmt"
+	"image/color"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/nickooan/ntee-editor/internal/filetree"
@@ -16,9 +18,19 @@ import (
 	"github.com/nickooan/ntee-editor/internal/view"
 )
 
-func (m Model) View() string {
+func (m Model) View() tea.View {
+	v := tea.NewView(m.render())
+	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
+	return v
+}
+
+func (m Model) render() string {
 	if !m.ready {
 		return "starting…"
+	}
+	if m.splash {
+		return m.renderSplash()
 	}
 
 	header := headerStyle.Width(m.width).Render("ntee-editor  ·  " + m.root)
@@ -35,7 +47,9 @@ func (m Model) View() string {
 		// Inspection owns both panes: the file tree gives way to the menu.
 		sidebarBody = m.renderInspectMenu(sidebarWidth-4, bodyHeight-2)
 	}
-	sidebar := paneStyle.Width(sidebarWidth - 2).Height(bodyHeight - 2).Render(sidebarBody)
+	// lipgloss v2: Width/Height include the border, so the panes take the
+	// full slot (v1 set the inner size and the border grew them by 2).
+	sidebar := paneStyle.Width(sidebarWidth).Height(bodyHeight).Render(sidebarBody)
 
 	// Overlays own the whole pane; otherwise the tab strip steals the top row.
 	overlayOpen := m.fuzzyOpen || m.messageOverlay != "" || m.defPickOpen || m.grepOpen
@@ -70,7 +84,7 @@ func (m Model) View() string {
 		divider := tabDividerStyle.Render(strings.Repeat("─", max(0, mainWidth-4)))
 		mainBody = m.renderTabStrip(mainWidth-4) + "\n" + divider + "\n" + mainBody
 	}
-	mainPane := paneStyle.Width(mainWidth - 2).Height(bodyHeight - 2).Render(mainBody)
+	mainPane := paneStyle.Width(mainWidth).Height(bodyHeight).Render(mainBody)
 
 	body := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, mainPane)
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, status)
@@ -692,6 +706,12 @@ func (m Model) renderSearch(width, height int) string {
 		if fcol >= width {
 			off = max(0, fcol-width/2)
 		}
+	} else if m.searchPrevMode == modeEdit {
+		// No matches yet: keep the view where the user was editing (~30% from
+		// the top, the same anchor Enter uses when landing back in the buffer).
+		start = input.Clamp(anchorScroll(m.edit.cy, height, len(lines)), 0, maxScrollY)
+	} else {
+		start = input.Clamp(m.fileScrollY, 0, maxScrollY) // non-edit entry: keep the view scroll
 	}
 
 	// Live replace preview while typing in the search-exec bar: target spans
@@ -944,7 +964,7 @@ func segStyleFor(segment view.HighlightSegment) lipgloss.Style {
 	return style
 }
 
-func colorFor(name string) lipgloss.Color {
+func colorFor(name string) color.Color {
 	if strings.HasPrefix(name, "#") {
 		return lipgloss.Color(name) // chroma style hex; termenv degrades on non-truecolor terminals
 	}

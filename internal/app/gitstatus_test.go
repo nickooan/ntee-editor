@@ -3,7 +3,7 @@ package app
 import (
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 func TestGitStatusMsgSwapsDirtySet(t *testing.T) {
@@ -80,7 +80,7 @@ func uncommittedFixture(t *testing.T) Model {
 
 func TestCtrlUListsOnlyUncommitted(t *testing.T) {
 	m := uncommittedFixture(t)
-	m = ctrl(m, tea.KeyCtrlU)
+	m = key(m, ctrlKey('u'))
 	if !m.fuzzyOpen {
 		t.Fatal("Ctrl+U must open the fuzzy overlay")
 	}
@@ -99,7 +99,7 @@ func TestCtrlUListsOnlyUncommitted(t *testing.T) {
 	if len(m.fuzzyMatches) != 1 {
 		t.Fatalf("filter should keep the match, got %d", len(m.fuzzyMatches))
 	}
-	m = ctrl(m, tea.KeyEnter)
+	m = key(m, keyPress(tea.KeyEnter))
 	if m.fuzzyOpen {
 		t.Fatal("Enter must close the overlay")
 	}
@@ -110,7 +110,7 @@ func TestCtrlUListsOnlyUncommitted(t *testing.T) {
 
 func TestCtrlPStillListsEverything(t *testing.T) {
 	m := uncommittedFixture(t)
-	m = ctrl(m, tea.KeyCtrlP)
+	m = key(m, ctrlKey('p'))
 	if !m.fuzzyOpen || m.fuzzyPrompt != "goto " {
 		t.Fatalf("Ctrl+P overlay: open=%v prompt=%q", m.fuzzyOpen, m.fuzzyPrompt)
 	}
@@ -121,11 +121,11 @@ func TestCtrlPStillListsEverything(t *testing.T) {
 
 func TestCtrlUToggleCloses(t *testing.T) {
 	m := uncommittedFixture(t)
-	m = ctrl(m, tea.KeyCtrlU)
+	m = key(m, ctrlKey('u'))
 	if !m.fuzzyOpen {
 		t.Fatal("expected overlay open")
 	}
-	m = ctrl(m, tea.KeyCtrlU)
+	m = key(m, ctrlKey('u'))
 	if m.fuzzyOpen {
 		t.Fatal("Ctrl+U while open must close the overlay")
 	}
@@ -133,7 +133,7 @@ func TestCtrlUToggleCloses(t *testing.T) {
 
 func TestCtrlUNotARepo(t *testing.T) {
 	m, _ := newTestModel(t, nil) // temp dir: gitRepo stays false
-	m = ctrl(m, tea.KeyCtrlU)
+	m = key(m, ctrlKey('u'))
 	if m.fuzzyOpen {
 		t.Fatal("non-repo must not open the overlay")
 	}
@@ -145,7 +145,7 @@ func TestCtrlUNotARepo(t *testing.T) {
 func TestCtrlUNothingDirty(t *testing.T) {
 	m, _ := newTestModel(t, nil)
 	m.gitRepo = true // repo, but the dirty set is empty
-	m = ctrl(m, tea.KeyCtrlU)
+	m = key(m, ctrlKey('u'))
 	if m.fuzzyOpen {
 		t.Fatal("empty dirty set must not open the overlay")
 	}

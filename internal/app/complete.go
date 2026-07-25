@@ -5,7 +5,7 @@ import (
 	"strings"
 	"unicode"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/nickooan/ntee-editor/internal/input"
 	"github.com/nickooan/ntee-editor/internal/lsp"
@@ -159,17 +159,17 @@ func (m Model) acceptCompletion() Model {
 
 // completionKey consumes the popup's navigation/accept/dismiss keys while it is
 // open; handled is false for any other key (the caller processes it normally).
-func (m Model) completionKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
-	switch msg.Type {
-	case tea.KeyUp:
+func (m Model) completionKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
+	switch msg.String() {
+	case "up":
 		m.completionIndex = max(0, m.completionIndex-1)
 		return m, nil, true
-	case tea.KeyDown:
+	case "down":
 		m.completionIndex = min(len(m.completionItems)-1, m.completionIndex+1)
 		return m, nil, true
-	case tea.KeyTab, tea.KeyEnter:
+	case "tab", "enter":
 		return m.acceptCompletion(), nil, true
-	case tea.KeyEsc:
+	case "esc":
 		m.completionOpen = false
 		m.completionDismissed = true
 		return m, nil, true

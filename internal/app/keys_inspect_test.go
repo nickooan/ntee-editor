@@ -7,7 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 	"gopkg.in/yaml.v3"
 
 	"github.com/nickooan/ntee-editor/internal/config"
@@ -62,7 +63,7 @@ func drain(t *testing.T, m Model, cmd tea.Cmd) Model {
 
 func TestInspectEnterExitRoundTrip(t *testing.T) {
 	m, _ := newTestModel(t, nil)
-	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlT})
+	next, cmd := m.Update(ctrlKey('t'))
 	m = next.(Model)
 	if m.mode != modeInspect || m.inspectPrevMode != modeQuery {
 		t.Fatalf("Ctrl+T from query: mode=%v prev=%v", m.mode, m.inspectPrevMode)
@@ -70,18 +71,18 @@ func TestInspectEnterExitRoundTrip(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("entering inspect should fetch stats")
 	}
-	m = ctrl(m, tea.KeyEsc)
+	m = key(m, keyPress(tea.KeyEsc))
 	if m.mode != modeQuery {
 		t.Fatalf("Esc should restore query mode, got %v", m.mode)
 	}
 
 	// From edit mode, and the editor is left untouched.
 	m = m.openFileAt("main.go")
-	m = ctrl(m, tea.KeyCtrlT)
+	m = key(m, ctrlKey('t'))
 	if m.mode != modeInspect || m.inspectPrevMode != modeEdit {
 		t.Fatalf("Ctrl+T from edit: mode=%v prev=%v", m.mode, m.inspectPrevMode)
 	}
-	m = ctrl(m, tea.KeyEsc)
+	m = key(m, keyPress(tea.KeyEsc))
 	if m.mode != modeEdit {
 		t.Fatalf("Esc should restore edit mode, got %v", m.mode)
 	}
@@ -89,12 +90,12 @@ func TestInspectEnterExitRoundTrip(t *testing.T) {
 
 func TestInspectBlocksGlobalChords(t *testing.T) {
 	m, _ := newTestModel(t, nil)
-	m = ctrl(m, tea.KeyCtrlT)
-	m = ctrl(m, tea.KeyCtrlP)
+	m = key(m, ctrlKey('t'))
+	m = key(m, ctrlKey('p'))
 	if m.fuzzyOpen {
 		t.Fatal("Ctrl+P must not open the finder in inspection mode")
 	}
-	m = ctrl(m, tea.KeyCtrlG)
+	m = key(m, ctrlKey('g'))
 	if m.grepOpen {
 		t.Fatal("Ctrl+G must not open grep in inspection mode")
 	}
@@ -102,20 +103,20 @@ func TestInspectBlocksGlobalChords(t *testing.T) {
 
 func TestInspectMenuSelection(t *testing.T) {
 	m, _ := newTestModel(t, nil)
-	m = ctrl(m, tea.KeyCtrlT)
+	m = key(m, ctrlKey('t'))
 	if m.inspectMenu != inspectMenuDB {
 		t.Fatalf("menu should start at ntee-db, got %d", m.inspectMenu)
 	}
-	m = ctrl(m, tea.KeyShiftDown)
+	m = key(m, shiftKey(tea.KeyDown))
 	if m.inspectMenu != inspectMenuLSP {
 		t.Fatalf("Shift+Down should select lsp, got %d", m.inspectMenu)
 	}
-	m = ctrl(m, tea.KeyShiftDown) // clamped
+	m = key(m, shiftKey(tea.KeyDown)) // clamped
 	if m.inspectMenu != inspectMenuLSP {
 		t.Fatalf("selection should clamp at the last item, got %d", m.inspectMenu)
 	}
-	m = ctrl(m, tea.KeyShiftUp)
-	m = ctrl(m, tea.KeyShiftUp) // clamped
+	m = key(m, shiftKey(tea.KeyUp))
+	m = key(m, shiftKey(tea.KeyUp)) // clamped
 	if m.inspectMenu != inspectMenuDB {
 		t.Fatalf("selection should clamp at the first item, got %d", m.inspectMenu)
 	}
@@ -123,9 +124,9 @@ func TestInspectMenuSelection(t *testing.T) {
 
 func TestInspectUnknownCommand(t *testing.T) {
 	m, _ := newTestModel(t, nil)
-	m = ctrl(m, tea.KeyCtrlT)
+	m = key(m, ctrlKey('t'))
 	m = runes(m, "bogus x")
-	m = ctrl(m, tea.KeyEnter)
+	m = key(m, keyPress(tea.KeyEnter))
 	if m.errText != "unknown command: bogus" || m.mode != modeInspect {
 		t.Fatalf("errText=%q mode=%v", m.errText, m.mode)
 	}
@@ -133,12 +134,12 @@ func TestInspectUnknownCommand(t *testing.T) {
 
 func TestInspectDBMemoryFallback(t *testing.T) {
 	m, _ := newTestModel(t, nil) // Memory backend
-	m = ctrl(m, tea.KeyCtrlT)
+	m = key(m, ctrlKey('t'))
 	m = drain(t, m, m.fetchDBInfoCmd())
 	if !errors.Is(m.inspectInfoErr, store.ErrNoStats) {
 		t.Fatalf("inspectInfoErr = %v", m.inspectInfoErr)
 	}
-	if out := m.View(); !strings.Contains(out, "no statistics") {
+	if out := m.render(); !strings.Contains(out, "no statistics") {
 		t.Fatal("db pane should show the in-memory fallback")
 	}
 	m = runes(m, "db compact")
@@ -153,17 +154,17 @@ func TestInspectDBCompactFlow(t *testing.T) {
 	m, _ := newTestModel(t, nil)
 	fake := &fakeMaintBackend{Memory: store.NewMemory(), info: store.DBInfo{Records: 7, MainBytes: 100, LiveBytes: 60}}
 	m.db = fake
-	m = ctrl(m, tea.KeyCtrlT)
+	m = key(m, ctrlKey('t'))
 	m = drain(t, m, m.fetchDBInfoCmd())
 	if m.inspectInfo.Records != 7 || m.inspectLoading {
 		t.Fatalf("stats not stored: %+v loading=%v", m.inspectInfo, m.inspectLoading)
 	}
-	if out := m.View(); !strings.Contains(out, "records      7") {
+	if out := m.render(); !strings.Contains(out, "records      7") {
 		t.Fatal("db pane should render the record count in the aligned column")
 	}
 
 	m = runes(m, "db compact")
-	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next, cmd := m.Update(keyPress(tea.KeyEnter))
 	m = next.(Model)
 	if m.inspectBusy != "compact" || m.notice != "db compact started" {
 		t.Fatalf("busy=%q notice=%q", m.inspectBusy, m.notice)
@@ -201,10 +202,10 @@ func TestInspectLSPEnablePersistsAndStarts(t *testing.T) {
 	m, _ := newTestModel(t, nil)
 	reg := &fakeRegistry{}
 	m.lsp = reg
-	m = ctrl(m, tea.KeyCtrlT)
+	m = key(m, ctrlKey('t'))
 
 	m = runes(m, "lsp enable typescript")
-	m = ctrl(m, tea.KeyEnter)
+	m = key(m, keyPress(tea.KeyEnter))
 	if !strings.Contains(m.notice, "lsp enabled: typescript") {
 		t.Fatalf("notice = %q errText = %q", m.notice, m.errText)
 	}
@@ -315,7 +316,9 @@ func TestInspectLSPPaneRendersStatuses(t *testing.T) {
 	}}
 	m.mode = modeInspect
 	m.inspectMenu = inspectMenuLSP
-	out := m.View()
+	// lipgloss v2 always emits ANSI (no TTY detection): strip before matching
+	// substrings that span style boundaries (name + state are styled apart).
+	out := ansi.Strip(m.render())
 	for _, want := range []string{"go", "running", "ruby", "stopped", "typescript", "disabled in config", "@inspection >"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("View missing %q", want)

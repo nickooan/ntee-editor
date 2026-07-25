@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/nickooan/ntee-editor/internal/lsp"
 )
@@ -27,27 +27,26 @@ func jumpFixture(t *testing.T) Model {
 	return m
 }
 
-func ctrl(m Model, k tea.KeyType) Model { return key(m, tea.KeyMsg{Type: k}) }
 
 func TestJumpToPathUnderCursorAndBack(t *testing.T) {
 	m := jumpFixture(t)
 	// Cursor on "lib/util.ts" in the comment line (line 2).
 	m.edit.cy, m.edit.cx = 2, 8
-	m = ctrl(m, tea.KeyCtrlJ)
+	m = key(m, ctrlKey('j'))
 	if m.openRel != "lib/util.ts" || m.mode != modeEdit {
 		t.Fatalf("path jump failed: open=%q err=%q", m.openRel, m.errText)
 	}
 	if len(m.jumpStack) != 1 {
 		t.Fatalf("stack depth = %d", len(m.jumpStack))
 	}
-	m = ctrl(m, tea.KeyCtrlO)
+	m = key(m, ctrlKey('o'))
 	if m.openRel != "main.go" || m.edit.cy != 2 || m.edit.cx != 8 {
 		t.Fatalf("jump back mismatch: open=%q cy=%d cx=%d", m.openRel, m.edit.cy, m.edit.cx)
 	}
 	if len(m.jumpStack) != 0 {
 		t.Fatal("stack should be empty after back")
 	}
-	m = ctrl(m, tea.KeyCtrlO)
+	m = key(m, ctrlKey('o'))
 	if m.errText != "no jump to return to" {
 		t.Fatalf("empty-stack error missing: %q", m.errText)
 	}
@@ -58,7 +57,7 @@ func TestJumpGuards(t *testing.T) {
 
 	// Unresolvable token errors and leaves no stack residue.
 	m.edit.cy, m.edit.cx = 0, 0 // "package" — keyword line, no definition
-	m = ctrl(m, tea.KeyCtrlJ)
+	m = key(m, ctrlKey('j'))
 	if m.errText == "" || len(m.jumpStack) != 0 {
 		t.Fatalf("unresolvable jump: err=%q stack=%d", m.errText, len(m.jumpStack))
 	}
@@ -74,7 +73,7 @@ func TestJumpWithUnsavedChangesStashesDraft(t *testing.T) {
 	}
 
 	m.edit.cy, m.edit.cx = 2, 8 // on "lib/util.ts" in the comment
-	m = ctrl(m, tea.KeyCtrlJ)
+	m = key(m, ctrlKey('j'))
 	if m.openRel != "lib/util.ts" || m.errText != "" {
 		t.Fatalf("dirty buffer must not block the jump: open=%q err=%q", m.openRel, m.errText)
 	}
@@ -86,7 +85,7 @@ func TestJumpWithUnsavedChangesStashesDraft(t *testing.T) {
 	}
 
 	// Jumping back restores the draft: content, dirty flag, red-tab marker.
-	m = ctrl(m, tea.KeyCtrlO)
+	m = key(m, ctrlKey('o'))
 	if m.openRel != "main.go" || !m.edit.dirty {
 		t.Fatalf("jump back should restore the drafted buffer: open=%q dirty=%v", m.openRel, m.edit.dirty)
 	}
@@ -94,7 +93,7 @@ func TestJumpWithUnsavedChangesStashesDraft(t *testing.T) {
 		t.Fatalf("draft content lost: %q", m.edit.lines[0])
 	}
 	// Undo still walks back to the on-disk baseline.
-	m = ctrl(m, tea.KeyCtrlZ)
+	m = key(m, ctrlKey('z'))
 	if m.edit.dirty || m.edit.lines[0] != "package main" {
 		t.Fatalf("undo should reach the disk baseline: %q dirty=%v", m.edit.lines[0], m.edit.dirty)
 	}
@@ -103,13 +102,13 @@ func TestJumpWithUnsavedChangesStashesDraft(t *testing.T) {
 func TestJumpStackClearedOnEscAndOpen(t *testing.T) {
 	m := jumpFixture(t)
 	m.edit.cy, m.edit.cx = 2, 8
-	m = ctrl(m, tea.KeyCtrlJ) // → lib/util.ts, stack 1
+	m = key(m, ctrlKey('j')) // → lib/util.ts, stack 1
 	if len(m.jumpStack) != 1 {
 		t.Fatalf("setup: stack=%d err=%q", len(m.jumpStack), m.errText)
 	}
 
 	// Esc out of edit mode ends the trail.
-	m = ctrl(m, tea.KeyEsc)
+	m = key(m, keyPress(tea.KeyEsc))
 	if len(m.jumpStack) != 0 {
 		t.Fatal("esc should clear the jump stack")
 	}
@@ -117,7 +116,7 @@ func TestJumpStackClearedOnEscAndOpen(t *testing.T) {
 	// A deliberate open also starts a fresh trail.
 	m = jumpFixture(t)
 	m.edit.cy, m.edit.cx = 2, 8
-	m = ctrl(m, tea.KeyCtrlJ)
+	m = key(m, ctrlKey('j'))
 	m = m.openFileAt("main.go")
 	if len(m.jumpStack) != 0 {
 		t.Fatal("deliberate open should clear the jump stack")
@@ -126,7 +125,7 @@ func TestJumpStackClearedOnEscAndOpen(t *testing.T) {
 
 func TestEnterSearchPopulatesHighlights(t *testing.T) {
 	m := jumpFixture(t)
-	m = ctrl(m, tea.KeyCtrlF)
+	m = key(m, ctrlKey('f'))
 	if m.mode != modeSearch {
 		t.Fatal("expected search mode")
 	}
@@ -143,7 +142,7 @@ func TestEnterSearchPopulatesHighlights(t *testing.T) {
 	must(t, os.WriteFile(filepath.Join(root, "notes.xyzunknown"), []byte("plain text\n"), 0o644))
 	m2 := m
 	m2 = m2.openFileAt("notes.xyzunknown")
-	m2 = ctrl(m2, tea.KeyCtrlF)
+	m2 = key(m2, ctrlKey('f'))
 	if m2.searchHl != nil {
 		t.Fatal("unknown extension should search plain")
 	}
@@ -165,7 +164,7 @@ func TestPickerEscCancelsWithoutMoving(t *testing.T) {
 	if !m.defPickOpen {
 		t.Fatalf("picker should open: err=%q", m.errText)
 	}
-	m = ctrl(m, tea.KeyEsc)
+	m = key(m, keyPress(tea.KeyEsc))
 	if m.defPickOpen || m.openRel != "main.go" || m.edit.cy != 3 {
 		t.Fatalf("esc should cancel in place: open=%q cy=%d", m.openRel, m.edit.cy)
 	}
@@ -197,7 +196,7 @@ func TestPickerPreviewFollowsSelection(t *testing.T) {
 	}
 
 	first := m.defPickPrevRel
-	m = ctrl(m, tea.KeyDown)
+	m = key(m, keyPress(tea.KeyDown))
 	if m.defPickPrevRel == first {
 		t.Fatalf("preview should follow selection to the other file: %q", m.defPickPrevRel)
 	}
@@ -228,7 +227,7 @@ func lspJumpModel(t *testing.T, content string) (Model, *stubClient) {
 // definition/references round-trips.
 func ctrlJ(t *testing.T, m Model) Model {
 	t.Helper()
-	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlJ})
+	next, cmd := m.Update(ctrlKey('j'))
 	m = next.(Model)
 	for cmd != nil {
 		next, cmd = m.Update(cmd())

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/nickooan/ntee-editor/internal/lsp"
 )
@@ -71,7 +71,7 @@ func TestLifecycleCallsReachClient(t *testing.T) {
 	m, client := newLSPTestModel(t)
 	m = m.openFileAt("main.go")
 	m = runes(m, "x ") // burst flush → DidChange
-	m = key(m, tea.KeyMsg{Type: tea.KeyCtrlS})
+	m = key(m, ctrlKey('s'))
 	m = m.openFileAt("lib/util.ts") // close main.go, open util.ts
 
 	// Collapse consecutive identical calls: completion syncs the buffer with
@@ -125,7 +125,7 @@ func TestLSPDefinitionJumpAndFallback(t *testing.T) {
 	// Empty LSP answer on an identifier → strict: no heuristic jump. The cursor
 	// pivots to references (an identifier with no definition is treated as its
 	// own declaration); an empty references answer reports cleanly, no residue.
-	m = key(m, tea.KeyMsg{Type: tea.KeyCtrlO})
+	m = key(m, ctrlKey('o'))
 	next, cmd = m.handleDefinition(definitionMsg{token: "nonexistentsymbolxyz"})
 	m = next.(Model)
 	for cmd != nil {
@@ -173,8 +173,8 @@ func TestLSPDefinitionPickerMultipleHits(t *testing.T) {
 	if !m.defPickOpen || len(m.defPickItems) != 2 {
 		t.Fatalf("picker should open with 2 LSP hits: %v %d", m.defPickOpen, len(m.defPickItems))
 	}
-	m = key(m, tea.KeyMsg{Type: tea.KeyDown})
-	m = key(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = key(m, keyPress(tea.KeyDown))
+	m = key(m, keyPress(tea.KeyEnter))
 	if m.openRel != "main.go" || m.edit.cy != 2 {
 		t.Fatalf("picked jump failed: open=%q cy=%d", m.openRel, m.edit.cy)
 	}
@@ -213,7 +213,7 @@ func TestLSPReferencesFromDefinitionLine(t *testing.T) {
 	if m.defPickTitle != "references of main" {
 		t.Fatalf("picker title: %q", m.defPickTitle)
 	}
-	m = key(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = key(m, keyPress(tea.KeyEnter))
 	if m.openRel != "lib/util.ts" {
 		t.Fatalf("picked reference jump failed: %q", m.openRel)
 	}

@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/nickooan/ntee-editor/internal/filetree"
 	"github.com/nickooan/ntee-editor/internal/input"
@@ -85,6 +85,13 @@ func (m Model) openGrep() (Model, tea.Cmd) {
 	if m.mode == modeEdit && m.edit.dirty {
 		m.errText = "unsaved changes — save (Ctrl+S) before repo search"
 		return m, nil
+	}
+	if m.corpusBuiltAt.IsZero() {
+		// Grep snapshots the corpus at open; an empty cold corpus would
+		// silently search nothing.
+		m, cmd := m.ensureCorpus() // make sure the build is in flight
+		m.errText = "index building — try repo search again shortly"
+		return m, cmd
 	}
 	m, corpusCmd := m.ensureCorpus()
 	m.grepOpen = true
@@ -345,12 +352,12 @@ func (m Model) grepSelectedFile() (grepFile, grepHit, bool) {
 	return grepFile{}, grepHit{}, false
 }
 
-func (m Model) handleGrepKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleGrepKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
-	switch msg.Type {
-	case tea.KeyEsc:
+	switch msg.String() {
+	case "esc":
 		m = m.closeGrep()
-	case tea.KeyUp:
+	case "up":
 		// Inside a multi-line query the arrow moves the cursor; from the first
 		// line it falls through to the result list (single-line queries keep
 		// their old behavior).
@@ -360,24 +367,24 @@ func (m Model) handleGrepKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.grepIndex = max(0, m.grepIndex-1)
 		m = m.refreshGrepPreview()
-	case tea.KeyDown:
+	case "down":
 		if next, ok := m.grepMoveCursorLine(1); ok {
 			m = next
 			break
 		}
 		m.grepIndex = min(max(0, len(m.grepResults)-1), m.grepIndex+1)
 		m = m.refreshGrepPreview()
-	case tea.KeyLeft:
+	case "left":
 		m.grepCursor = input.MoveCursor(m.grepQuery, m.grepCursor, -1)
-	case tea.KeyRight:
+	case "right":
 		m.grepCursor = input.MoveCursor(m.grepQuery, m.grepCursor, 1)
-	case tea.KeyHome:
+	case "home":
 		line, _ := grepLineCol(m.grepQuery, m.grepCursor)
 		m.grepCursor = grepOffsetAt(m.grepQuery, line, 0)
-	case tea.KeyEnd:
+	case "end":
 		line, _ := grepLineCol(m.grepQuery, m.grepCursor)
 		m.grepCursor = grepOffsetAt(m.grepQuery, line, -1)
-	case tea.KeyEnter:
+	case "enter":
 		_, hit, ok := m.grepSelectedFile()
 		m = m.closeGrep()
 		if !ok {
@@ -389,31 +396,38 @@ func (m Model) handleGrepKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.edit.cx = 0
 			m = m.anchorCursorLine()
 		}
-	case tea.KeyBackspace:
+	case "backspace":
 		if q, at, ok := input.RemoveBeforeCursor(m.grepQuery, m.grepCursor); ok {
 			m.grepQuery, m.grepCursor = q, at
 			m, cmd = m.queueGrepSearch()
 		}
-	case tea.KeyDelete:
+	case "delete":
 		if runes := []rune(m.grepQuery); m.grepCursor < len(runes) {
 			m.grepQuery = string(runes[:m.grepCursor]) + string(runes[m.grepCursor+1:])
 			m, cmd = m.queueGrepSearch()
 		}
-	case tea.KeySpace:
+	case "space":
 		m = m.grepInsert(" ")
 		m, cmd = m.queueGrepSearch()
-	case tea.KeyCtrlJ:
+	case "ctrl+j":
 		m = m.grepInsert("\n")
 		m, cmd = m.queueGrepSearch()
-	case tea.KeyRunes:
-		// Bracketed paste delivers newlines inside one KeyRunes message, and
-		// terminals send them as CR; normalize to \n so the query matches the
-		// snapshot's CRLF-normalized content.
-		s := strings.ReplaceAll(string(msg.Runes), "\r\n", "\n")
-		m = m.grepInsert(strings.ReplaceAll(s, "\r", "\n"))
-		m, cmd = m.queueGrepSearch()
+	default:
+		if t := keyText(msg); t != "" {
+			m = m.grepInsert(t)
+			m, cmd = m.queueGrepSearch()
+		}
 	}
 	return m, cmd
+}
+
+// grepPaste lands a bracketed paste (tea.PasteMsg) into the query. Terminals
+// send newlines as CR; normalize to \n so the query matches the snapshot's
+// CRLF-normalized content.
+func (m Model) grepPaste(text string) (Model, tea.Cmd) {
+	s := strings.ReplaceAll(text, "\r\n", "\n")
+	m = m.grepInsert(strings.ReplaceAll(s, "\r", "\n"))
+	return m.queueGrepSearch()
 }
 
 // grepInsert inserts text at the query cursor.

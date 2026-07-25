@@ -7,7 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/nickooan/ntee-editor/internal/view"
 )
@@ -19,7 +20,7 @@ func grepFixture(t *testing.T) Model {
 		"package main\n\n// grepNeedle here\nfunc a() {}\n"), 0o644))
 	must(t, os.WriteFile(filepath.Join(root, "beta.go"), []byte(
 		"package main\n\nfunc b() {\n\t_ = \"grepNeedle too\"\n}\n"), 0o644))
-	return m
+	return rebuildCorpusNow(m) // the fixture's files postdate newTestModel's warm-up
 }
 
 // deliver feeds an async message to Update and returns the model + follow-up Cmd.
@@ -73,7 +74,7 @@ func grepSettle(t *testing.T, m Model) Model {
 
 func TestGrepSearchAcrossFiles(t *testing.T) {
 	m := grepFixture(t)
-	m = key(m, tea.KeyMsg{Type: tea.KeyCtrlG})
+	m = key(m, ctrlKey('g'))
 	if !m.grepOpen || !m.grepLoading || m.grepFiles != nil {
 		t.Fatal("ctrl+g should open instantly and index in the background")
 	}
@@ -103,13 +104,13 @@ func TestGrepSearchAcrossFiles(t *testing.T) {
 	}
 
 	// ↓ moves the selection; preview cache follows the new file.
-	m = key(m, tea.KeyMsg{Type: tea.KeyDown})
+	m = key(m, keyPress(tea.KeyDown))
 	if m.grepIndex != 1 || m.grepHlRel != "beta.go" {
 		t.Fatalf("selection/preview: idx=%d rel=%q", m.grepIndex, m.grepHlRel)
 	}
 
 	// Enter opens the selected hit in edit mode, anchored.
-	m = key(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = key(m, keyPress(tea.KeyEnter))
 	if m.grepOpen || m.openRel != "beta.go" || m.mode != modeEdit {
 		t.Fatalf("enter open failed: open=%q mode=%d", m.openRel, m.mode)
 	}
@@ -122,7 +123,8 @@ func TestGrepLiteralFallbackAndCase(t *testing.T) {
 	m := grepFixture(t)
 	root := m.root
 	must(t, os.WriteFile(filepath.Join(root, "paren.go"), []byte("package main\n\n// call foo(bar\n"), 0o644))
-	m = key(m, tea.KeyMsg{Type: tea.KeyCtrlG})
+	m = rebuildCorpusNow(m)
+	m = key(m, ctrlKey('g'))
 	m = grepLoad(t, m)
 
 	m = runes(m, "foo(bar") // invalid regex → literal fallback
@@ -131,7 +133,7 @@ func TestGrepLiteralFallbackAndCase(t *testing.T) {
 		t.Fatalf("literal fallback: %+v", m.grepResults)
 	}
 	for range "foo(bar" {
-		m = key(m, tea.KeyMsg{Type: tea.KeyBackspace})
+		m = key(m, keyPress(tea.KeyBackspace))
 	}
 	m = runes(m, "GREPNEEDLE")
 	m = grepSettle(t, m)
@@ -144,15 +146,15 @@ func TestGrepDirtyEditGuard(t *testing.T) {
 	m := grepFixture(t)
 	m = m.openFileAt("alpha.go")
 	m = runes(m, "x") // dirty
-	m = key(m, tea.KeyMsg{Type: tea.KeyCtrlG})
+	m = key(m, ctrlKey('g'))
 	if m.grepOpen {
 		t.Fatal("grep must not open over unsaved changes")
 	}
 	if !strings.Contains(m.errText, "save (Ctrl+S)") {
 		t.Fatalf("guard message: %q", m.errText)
 	}
-	m = key(m, tea.KeyMsg{Type: tea.KeyCtrlS})
-	m = key(m, tea.KeyMsg{Type: tea.KeyCtrlG})
+	m = key(m, ctrlKey('s'))
+	m = key(m, ctrlKey('g'))
 	if !m.grepOpen {
 		t.Fatal("grep should open after saving")
 	}
@@ -162,10 +164,10 @@ func TestGrepEscClosesWithoutOpening(t *testing.T) {
 	m := grepFixture(t)
 	m = m.openFileAt("alpha.go")
 	before := m.openRel
-	m = key(m, tea.KeyMsg{Type: tea.KeyCtrlG})
+	m = key(m, ctrlKey('g'))
 	m = grepLoad(t, m)
 	m = runes(m, "grepNeedle")
-	m = key(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m = key(m, keyPress(tea.KeyEsc))
 	if m.grepOpen || m.openRel != before {
 		t.Fatalf("esc should close in place: open=%q", m.openRel)
 	}
@@ -179,14 +181,16 @@ func TestGrepEscClosesWithoutOpening(t *testing.T) {
 
 func TestGrepOverlayLayoutSplit(t *testing.T) {
 	m := grepFixture(t)
-	m = key(m, tea.KeyMsg{Type: tea.KeyCtrlG})
+	m = key(m, ctrlKey('g'))
 	if out := m.renderGrepOverlay(100, 30); !strings.Contains(out, "indexing") {
 		t.Fatal("pre-load render should show the indexing state")
 	}
 	m = grepLoad(t, m)
 	m = runes(m, "grepNeedle")
 	m = grepSettle(t, m)
-	out := m.renderGrepOverlay(100, 30)
+	// lipgloss v2 always emits ANSI (no TTY detection), so strip the escapes
+	// before asserting on substrings that span style boundaries.
+	out := ansi.Strip(m.renderGrepOverlay(100, 30))
 	lines := strings.Split(out, "\n")
 	if len(lines) < 25 {
 		t.Fatalf("overlay should be tall: %d rows", len(lines))
@@ -205,10 +209,10 @@ func TestGrepOverlayLayoutSplit(t *testing.T) {
 // A load from a closed-then-reopened session must not clobber the new one.
 func TestGrepStaleLoadDropped(t *testing.T) {
 	m := grepFixture(t)
-	m = key(m, tea.KeyMsg{Type: tea.KeyCtrlG})
+	m = key(m, ctrlKey('g'))
 	staleLoad := m.grepLoadBatchCmd(m.grepGen, 0) // captures the first open's generation
-	m = key(m, tea.KeyMsg{Type: tea.KeyEsc})
-	m = key(m, tea.KeyMsg{Type: tea.KeyCtrlG}) // grepGen bumped
+	m = key(m, keyPress(tea.KeyEsc))
+	m = key(m, ctrlKey('g')) // grepGen bumped
 	m, _ = deliver(m, staleLoad())
 	if m.grepFiles != nil || !m.grepLoading {
 		t.Fatal("stale load must be dropped")
@@ -222,7 +226,7 @@ func TestGrepStaleLoadDropped(t *testing.T) {
 // Ticks and results from a superseded query must be ignored.
 func TestGrepStaleTickAndResultsDropped(t *testing.T) {
 	m := grepFixture(t)
-	m = key(m, tea.KeyMsg{Type: tea.KeyCtrlG})
+	m = key(m, ctrlKey('g'))
 	m = grepLoad(t, m)
 	m = runes(m, "gr")
 	oldGen := m.grepSearchGen
@@ -242,7 +246,7 @@ func TestGrepStaleTickAndResultsDropped(t *testing.T) {
 // completion fires a covering search over the full snapshot.
 func TestGrepSearchWhileIndexing(t *testing.T) {
 	m := grepFixture(t)
-	m = key(m, tea.KeyMsg{Type: tea.KeyCtrlG})
+	m = key(m, ctrlKey('g'))
 	m = runes(m, "grepNeedle") // typed before any batch landed
 	m = grepSettle(t, m)       // debounced search runs over the (empty) prefix
 	if len(m.grepResults) != 0 {
@@ -257,7 +261,7 @@ func TestGrepSearchWhileIndexing(t *testing.T) {
 // A partial batch appends, keeps loading, and serves progressive results.
 func TestGrepIncrementalDelivery(t *testing.T) {
 	m := grepFixture(t)
-	m = key(m, tea.KeyMsg{Type: tea.KeyCtrlG})
+	m = key(m, ctrlKey('g'))
 	m = runes(m, "grepNeedle")
 	m = grepSettle(t, m) // empty-prefix search lands → search idle
 
@@ -298,11 +302,11 @@ func TestGrepIncrementalDelivery(t *testing.T) {
 // A closed overlay must ignore results that were in flight.
 func TestGrepEscDropsInFlightResults(t *testing.T) {
 	m := grepFixture(t)
-	m = key(m, tea.KeyMsg{Type: tea.KeyCtrlG})
+	m = key(m, ctrlKey('g'))
 	m = grepLoad(t, m)
 	m = runes(m, "grepNeedle")
 	gen := m.grepSearchGen
-	m = key(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m = key(m, keyPress(tea.KeyEsc))
 	m, _ = deliver(m, grepResultsMsg{gen: gen, results: []grepHit{{rel: "alpha.go", line: 0}}})
 	if m.grepOpen || m.grepFiles != nil || len(m.grepResults) != 0 {
 		t.Fatal("closed overlay must ignore in-flight results")
@@ -377,7 +381,8 @@ func TestGrepParallelDeterministic(t *testing.T) {
 		must(t, os.WriteFile(filepath.Join(root, fmt.Sprintf("f%03d.go", i)),
 			[]byte(fmt.Sprintf("package main\n// parNeedle %d\n", i)), 0o644))
 	}
-	m = key(m, tea.KeyMsg{Type: tea.KeyCtrlG})
+	m = rebuildCorpusNow(m)
+	m = key(m, ctrlKey('g'))
 	m = grepLoad(t, m)
 	m = runes(m, "parNeedle")
 
@@ -407,11 +412,11 @@ func TestGrepParallelDeterministic(t *testing.T) {
 // multi-line literal matches the snapshot's normalized content end-to-end.
 func TestGrepMultilineQuery(t *testing.T) {
 	m := grepFixture(t)
-	m = key(m, tea.KeyMsg{Type: tea.KeyCtrlG})
+	m = key(m, ctrlKey('g'))
 	m = grepLoad(t, m)
 
 	m = runes(m, "here")
-	m = key(m, tea.KeyMsg{Type: tea.KeyCtrlJ})
+	m = key(m, ctrlKey('j'))
 	m = runes(m, "func")
 	if m.grepQuery != "here\nfunc" {
 		t.Fatalf("ctrl+j should insert a newline: %q", m.grepQuery)
@@ -421,15 +426,16 @@ func TestGrepMultilineQuery(t *testing.T) {
 		t.Fatalf("multi-line literal should hit alpha.go at its start line: %+v", m.grepResults)
 	}
 
-	// Bracketed paste delivers one KeyRunes message with raw CR/CRLF endings.
-	m = key(m, tea.KeyMsg{Type: tea.KeyEsc})
-	m = key(m, tea.KeyMsg{Type: tea.KeyCtrlG})
+	// Bracketed paste arrives as one PasteMsg with raw CR/CRLF endings.
+	m = key(m, keyPress(tea.KeyEsc))
+	m = key(m, ctrlKey('g'))
 	m = grepLoad(t, m)
-	m = key(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("here\r\nfunc")})
+	next, _ := m.Update(tea.PasteMsg{Content: "here\r\nfunc"})
+	m = next.(Model)
 	if m.grepQuery != "here\nfunc" {
 		t.Fatalf("pasted CRLF should normalize: %q", m.grepQuery)
 	}
-	m = key(m, tea.KeyMsg{Type: tea.KeyBackspace})
+	m = key(m, keyPress(tea.KeyBackspace))
 	if m.grepQuery != "here\nfun" {
 		t.Fatalf("backspace should cross into the last line: %q", m.grepQuery)
 	}
@@ -439,13 +445,13 @@ func TestGrepMultilineQuery(t *testing.T) {
 // past the grepMaxInputRows display cap.
 func TestGrepOverlayMultilineInputHeightStable(t *testing.T) {
 	m := grepFixture(t)
-	m = key(m, tea.KeyMsg{Type: tea.KeyCtrlG})
+	m = key(m, ctrlKey('g'))
 	m = grepLoad(t, m)
 	m = runes(m, "grepNeedle")
 	m = grepSettle(t, m)
 	base := strings.Count(m.renderGrepOverlay(100, 30), "\n")
 	for lines := 2; lines <= 5; lines++ {
-		m = key(m, tea.KeyMsg{Type: tea.KeyCtrlJ})
+		m = key(m, ctrlKey('j'))
 		m = runes(m, "x")
 		if got := strings.Count(m.renderGrepOverlay(100, 30), "\n"); got != base {
 			t.Fatalf("%d-line query changed overlay height: %d != %d", lines, got, base)
@@ -458,14 +464,14 @@ func TestGrepOverlayMultilineInputHeightStable(t *testing.T) {
 // and insert/backspace/delete work at the cursor position.
 func TestGrepQueryCursorEditing(t *testing.T) {
 	m := grepFixture(t)
-	m = key(m, tea.KeyMsg{Type: tea.KeyCtrlG})
+	m = key(m, ctrlKey('g'))
 	m = grepLoad(t, m)
 	m = runes(m, "abc")
-	m = key(m, tea.KeyMsg{Type: tea.KeyCtrlJ})
+	m = key(m, ctrlKey('j'))
 	m = runes(m, "xyz")
 
-	m = key(m, tea.KeyMsg{Type: tea.KeyLeft})
-	m = key(m, tea.KeyMsg{Type: tea.KeyUp})
+	m = key(m, keyPress(tea.KeyLeft))
+	m = key(m, keyPress(tea.KeyUp))
 	if m.grepCursor != 2 {
 		t.Fatalf("left+up should land on line 0 col 2: %d", m.grepCursor)
 	}
@@ -473,27 +479,27 @@ func TestGrepQueryCursorEditing(t *testing.T) {
 	if m.grepQuery != "abQc\nxyz" || m.grepCursor != 3 {
 		t.Fatalf("insert at cursor: %q cur=%d", m.grepQuery, m.grepCursor)
 	}
-	m = key(m, tea.KeyMsg{Type: tea.KeyDelete})
+	m = key(m, keyPress(tea.KeyDelete))
 	if m.grepQuery != "abQ\nxyz" || m.grepCursor != 3 {
 		t.Fatalf("forward delete at cursor: %q cur=%d", m.grepQuery, m.grepCursor)
 	}
-	m = key(m, tea.KeyMsg{Type: tea.KeyDown})
+	m = key(m, keyPress(tea.KeyDown))
 	if m.grepCursor != len([]rune(m.grepQuery)) {
 		t.Fatalf("down should clamp the column to the target line end: %d", m.grepCursor)
 	}
-	m = key(m, tea.KeyMsg{Type: tea.KeyHome})
+	m = key(m, keyPress(tea.KeyHome))
 	if m.grepCursor != 4 {
 		t.Fatalf("home should go to the line start: %d", m.grepCursor)
 	}
-	m = key(m, tea.KeyMsg{Type: tea.KeyBackspace})
+	m = key(m, keyPress(tea.KeyBackspace))
 	if m.grepQuery != "abQxyz" || m.grepCursor != 3 {
 		t.Fatalf("backspace at line start should join lines: %q cur=%d", m.grepQuery, m.grepCursor)
 	}
 
 	// Single-line again: up/down fall through to the result list.
 	before := m.grepCursor
-	m = key(m, tea.KeyMsg{Type: tea.KeyUp})
-	m = key(m, tea.KeyMsg{Type: tea.KeyDown})
+	m = key(m, keyPress(tea.KeyUp))
+	m = key(m, keyPress(tea.KeyDown))
 	if m.grepCursor != before {
 		t.Fatalf("boundary up/down must not move the cursor: %d", m.grepCursor)
 	}

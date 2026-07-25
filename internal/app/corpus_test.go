@@ -42,7 +42,7 @@ func containsStr(xs []string, want string) bool {
 // gitignored files must never appear in it.
 func TestCorpusExcludesGitAndGitignored(t *testing.T) {
 	m, _ := corpusModel(t)
-	m, _ = m.ensureCorpus()
+	m = rebuildCorpusNow(m)
 
 	if !containsStr(m.corpus, "keep.go") {
 		t.Fatalf("expected keep.go in corpus, got %v", m.corpus)
@@ -63,7 +63,7 @@ func TestCorpusExcludesGitAndGitignored(t *testing.T) {
 // clears the rebuilding flag.
 func TestCorpusMsgSwapsCorpus(t *testing.T) {
 	m, root := corpusModel(t)
-	m, _ = m.ensureCorpus()
+	m = rebuildCorpusNow(m)
 	m.corpusRebuilding = true // pretend a background rebuild is in flight
 
 	// A new file appears externally; the cached corpus does not see it yet.
@@ -87,44 +87,59 @@ func TestCorpusMsgSwapsCorpus(t *testing.T) {
 }
 
 // TestCorpusBuiltOncePerSession is the core of the performance fix: typing in
-// the query bar must not re-walk the tree on every keystroke. The corpus is
-// built once (on the first keystroke, cold cache) and reused thereafter.
+// the query bar must never walk the tree on the UI goroutine, and the corpus,
+// once built, is reused across keystrokes (no rebuild within corpusTTL).
 func TestCorpusBuiltOncePerSession(t *testing.T) {
-	m, _ := newTestModel(t, nil)
-
-	m = runes(m, "m") // first keystroke: cold build
+	m, _ := newTestModel(t, nil) // warm (rebuildCorpusNow in the fixture)
 	first := m.corpusBuiltAt
 	if first.IsZero() {
-		t.Fatal("corpus not built after the first keystroke")
+		t.Fatal("fixture should start warm")
 	}
 
-	m = runes(m, "ain.go") // more keystrokes, all within corpusTTL
+	m = runes(m, "main.go") // keystrokes within corpusTTL
 	if !m.corpusBuiltAt.Equal(first) {
 		t.Fatalf("corpus rebuilt during typing: first=%v now=%v", first, m.corpusBuiltAt)
+	}
+}
+
+// TestColdCorpusNeverBuildsOnKeystroke: on a cold cache the keystroke path
+// must not walk synchronously — New marks the Init build in flight, so
+// ensureCorpus just waits for the corpusMsg.
+func TestColdCorpusNeverBuildsOnKeystroke(t *testing.T) {
+	m, _ := corpusModel(t)
+	if !m.corpusRebuilding {
+		t.Fatal("cold New should mark the Init build in flight")
+	}
+	m, cmd := m.ensureCorpus()
+	if cmd != nil {
+		t.Fatal("ensureCorpus must not fire a second build while one is in flight")
+	}
+	if !m.corpusBuiltAt.IsZero() || len(m.corpus) != 0 {
+		t.Fatal("ensureCorpus must not build synchronously on a cold cache")
 	}
 }
 
 // TestSignatureValidDetectsChange guards against the root-mtime-only bug: the
 // stat-sweep must invalidate when anything in the tree changes.
 func TestSignatureValidDetectsChange(t *testing.T) {
-	m, root := corpusModel(t)
+	_, root := corpusModel(t)
 	gi := filetree.LoadGitignore(root)
 	files, dirMtimes, _ := filetree.BuildAllEntries(root, config.Default().Tree.Ignore, gi, 50000)
 	idx := store.CorpusIndex{Version: store.CorpusVersion, Files: files, DirMtimes: dirMtimes}
 
-	if !m.signatureValid(idx) {
+	if !signatureValidFor(root, idx) {
 		t.Fatal("a freshly built signature should be valid")
 	}
 	// Adding a file bumps its containing directory's mtime.
 	must(t, os.WriteFile(filepath.Join(root, "newfile.go"), []byte("x\n"), 0o644))
-	if m.signatureValid(idx) {
+	if signatureValidFor(root, idx) {
 		t.Fatal("signature should be invalid after an external add")
 	}
 	// A missing directory and an empty signature are both invalid.
-	if m.signatureValid(store.CorpusIndex{Version: store.CorpusVersion, DirMtimes: map[string]int64{"ghost": 1}}) {
+	if signatureValidFor(root, store.CorpusIndex{Version: store.CorpusVersion, DirMtimes: map[string]int64{"ghost": 1}}) {
 		t.Fatal("removed dir should invalidate")
 	}
-	if m.signatureValid(store.CorpusIndex{Version: store.CorpusVersion}) {
+	if signatureValidFor(root, store.CorpusIndex{Version: store.CorpusVersion}) {
 		t.Fatal("empty signature should be invalid")
 	}
 }
@@ -149,7 +164,25 @@ func TestWarmStartLoadsPersistedCorpus(t *testing.T) {
 	if !containsStr(m2.corpus, "keep.go") {
 		t.Fatalf("warm-started corpus missing keep.go: %v", m2.corpus)
 	}
-	if m2.Init() != nil {
-		t.Fatal("warm start must not trigger a rebuild in Init")
+	if m2.splash {
+		t.Fatal("warm start must not show the splash")
+	}
+
+	// The warm start adopts the index optimistically; the signature check runs
+	// in the background and stays silent while the tree is unchanged…
+	if m2.pendingValidate == nil {
+		t.Fatal("warm start should queue a background signature check")
+	}
+	if msg := m2.validateCorpusCmd(*m2.pendingValidate)(); msg != nil {
+		t.Fatalf("valid signature must not trigger a rebuild, got %T", msg)
+	}
+	// …and delivers a fresh corpus when the tree changed under the cache.
+	must(t, os.WriteFile(filepath.Join(root, "added.go"), []byte("x\n"), 0o644))
+	msg, ok := m2.validateCorpusCmd(*m2.pendingValidate)().(corpusMsg)
+	if !ok {
+		t.Fatal("changed signature should run the rebuild")
+	}
+	if !containsStr(msg.files, "added.go") {
+		t.Fatalf("background rebuild missing the new file: %v", msg.files)
 	}
 }

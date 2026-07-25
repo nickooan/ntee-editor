@@ -3,7 +3,7 @@ package app
 import (
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/nickooan/ntee-editor/internal/filetree"
 	"github.com/nickooan/ntee-editor/internal/input"
@@ -25,11 +25,15 @@ func (m Model) tabRows() int {
 	return 0
 }
 
-func (m Model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleEditKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.openFile == nil {
 		m.mode = modeQuery
 		return m, nil
 	}
+
+	k := msg.String()
+	t := keyText(msg)
+	isText := t != "" && k != "space"
 
 	// The completion popup, when open, consumes its navigation/accept/dismiss
 	// keys; any other key (except typing/backspace, which manage the popup
@@ -38,10 +42,10 @@ func (m Model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if next, cmd, done := m.completionKey(msg); done {
 			return next, cmd
 		}
-		if msg.Type != tea.KeyRunes && msg.Type != tea.KeyBackspace {
+		if !isText && k != "backspace" {
 			m = m.closeCompletion()
 		}
-	} else if msg.Type != tea.KeyRunes && msg.Type != tea.KeyBackspace {
+	} else if !isText && k != "backspace" {
 		// Any non-typing key is a word boundary: lift an Esc dismissal so the
 		// popup auto-opens again at the next word. Without this, one Esc kept
 		// completion suppressed across new lines until a punctuation rune was
@@ -49,8 +53,8 @@ func (m Model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.completionDismissed = false
 	}
 
-	switch msg.Type {
-	case tea.KeyEsc:
+	switch k {
+	case "esc":
 		// First Esc clears a selection; the next discards unsaved edits and
 		// returns to the query bar (the pane keeps showing the on-disk file).
 		if m.edit.sel != nil {
@@ -75,7 +79,7 @@ func (m Model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.jumpStack = nil // quitting edit mode ends the jump trail
 		return m.refreshFileHighlights(), nil
 
-	case tea.KeyCtrlS:
+	case "ctrl+s":
 		m = m.saveEdit()
 		if m.gitRepo {
 			// A write just landed: refresh git status now instead of waiting
@@ -84,57 +88,57 @@ func (m Model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case tea.KeyCtrlZ:
+	case "ctrl+z":
 		return m.undo(), nil
 
-	case tea.KeyCtrlY:
+	case "ctrl+y":
 		return m.redo(), nil
 
-	case tea.KeyCtrlF:
+	case "ctrl+f":
 		m = m.flushBurst()
 		return m.enterSearch(modeEdit, m.edit.content()), nil
 
-	case tea.KeyCtrlJ:
+	case "ctrl+j":
 		return m.jumpToReference()
 
-	case tea.KeyCtrlO:
+	case "ctrl+o":
 		return m.jumpBack()
 
-	case tea.KeyCtrlA:
+	case "ctrl+a":
 		m.edit.expandSelection()
 		return m, nil
 
-	case tea.KeyCtrlE:
+	case "ctrl+e":
 		return m.enterExec(), nil
 
-	case tea.KeyUp:
+	case "up":
 		return m.moveEditCursor(0, -1), nil
-	case tea.KeyDown:
+	case "down":
 		return m.moveEditCursor(0, 1), nil
-	case tea.KeyLeft:
+	case "left":
 		return m.moveEditCursor(-1, 0), nil
-	case tea.KeyRight:
+	case "right":
 		return m.moveEditCursor(1, 0), nil
-	case tea.KeyShiftUp:
+	case "shift+up":
 		m.edit.extendLineSelection(-1)
 		return m, nil
-	case tea.KeyShiftDown:
+	case "shift+down":
 		m.edit.extendLineSelection(1)
 		return m, nil
-	case tea.KeyPgUp:
+	case "pgup":
 		return m.pageEdit(-1), nil
-	case tea.KeyPgDown:
+	case "pgdown":
 		return m.pageEdit(1), nil
-	case tea.KeyHome:
+	case "home":
 		m.edit.clearSelection()
 		m.edit.cx = 0
 		return m.flushBurst(), nil
-	case tea.KeyEnd:
+	case "end":
 		m.edit.clearSelection()
 		m.edit.cx = len(m.edit.line())
 		return m.flushBurst(), nil
 
-	case tea.KeyEnter:
+	case "enter":
 		cy := m.edit.cy
 		m.edit.newline()
 		m = m.hlMarkLine(cy)
@@ -142,7 +146,7 @@ func (m Model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.snapDirty = true
 		return m.flushBurst(), nil
 
-	case tea.KeyBackspace:
+	case "backspace":
 		linesBefore := len(m.edit.lines)
 		cyBefore := m.edit.cy
 		m.edit.backspace()
@@ -153,7 +157,7 @@ func (m Model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.snapDirty = true
 		return m.afterEditBackspace()
 
-	case tea.KeyDelete:
+	case "delete":
 		if m.edit.deleteSelection() {
 			m = m.hlMarkLine(m.edit.cy)
 			m.snapDirty = true
@@ -167,25 +171,52 @@ func (m Model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case tea.KeyTab:
+	case "tab":
 		m.edit.insert(strings.Repeat(" ", m.cfg.Editor.TabWidth))
 		m = m.hlMarkLine(m.edit.cy)
 		m.snapDirty = true
 		return m, nil
 
-	case tea.KeySpace:
+	case "space":
 		m.edit.insert(" ")
 		m = m.hlMarkLine(m.edit.cy)
 		m.snapDirty = true
 		return m.flushBurst(), nil // word boundary → coalesce the burst
 
-	case tea.KeyRunes:
-		m.edit.insert(string(msg.Runes))
-		m = m.hlMarkLine(m.edit.cy)
-		m.snapDirty = true
-		return m.afterEditType(string(msg.Runes))
+	default:
+		if isText {
+			m.edit.insert(t)
+			m = m.hlMarkLine(m.edit.cy)
+			m.snapDirty = true
+			return m.afterEditType(t)
+		}
 	}
 	return m, nil
+}
+
+// editPaste inserts bracketed-paste text into the buffer. edit.insert is
+// single-line, so the paste is split on newlines and stitched in with
+// newline() so each segment lands on its own line (with highlight upkeep).
+func (m Model) editPaste(text string) (tea.Model, tea.Cmd) {
+	if m.openFile == nil {
+		return m, nil
+	}
+	s := strings.ReplaceAll(text, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	for i, seg := range strings.Split(s, "\n") {
+		if i > 0 {
+			cy := m.edit.cy
+			m.edit.newline()
+			m = m.hlMarkLine(cy)
+			m = m.hlInsertLine(cy + 1)
+		}
+		if seg != "" {
+			m.edit.insert(seg)
+			m = m.hlMarkLine(m.edit.cy)
+		}
+	}
+	m.snapDirty = true
+	return m.flushBurst(), nil // a paste is one burst boundary
 }
 
 // pageEdit scrolls the file pane by one page with a one-line overlap (the old

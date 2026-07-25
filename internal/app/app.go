@@ -7,9 +7,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/nickooan/ntee-editor/internal/clipboard"
 	"github.com/nickooan/ntee-editor/internal/config"
@@ -21,6 +22,9 @@ import (
 	"github.com/nickooan/ntee-editor/internal/syntax"
 	"github.com/nickooan/ntee-editor/internal/view"
 )
+
+// Version is the release version, printed by --version and on the splash.
+const Version = "0.2.0"
 
 type mode int
 
@@ -152,8 +156,8 @@ type Model struct {
 	inspectInput    string
 	inspectCursor   int
 	inspectInfo     store.DBInfo
-	inspectInfoErr  error // store.ErrNoStats → in-memory fallback text
-	inspectLoading  bool  // stats fetch in flight
+	inspectInfoErr  error  // store.ErrNoStats → in-memory fallback text
+	inspectLoading  bool   // stats fetch in flight
 	inspectBusy     string // "" | "compact" | "relieve" — blocks duplicate runs
 
 	// Fuzzy file finder overlay: Ctrl+P (whole project) and Ctrl+U (uncommitted
@@ -174,7 +178,14 @@ type Model struct {
 	dirCorpus        []string // "/"-suffixed rel dirs from the same walk (dirMtimes keys)
 	corpusBuiltAt    time.Time
 	corpusRebuilding bool
-	corpusTruncated  bool // the walk hit Tree.MaxIndexFiles — index is partial
+	corpusTruncated  bool               // the walk hit Tree.MaxIndexFiles — index is partial
+	pendingValidate  *store.CorpusIndex // warm-adopted index awaiting a background signature check
+
+	// Opening splash: shown on a cold-cache start while the index builds in
+	// the background. Any key skips it; a minimum display avoids a flash.
+	splash      bool
+	splashStart time.Time
+	splashFrame int
 
 	// Per-line highlight cache. A nil row renders plain; rows are spliced on
 	// line insert/join so indices stay aligned between full rescans.
@@ -271,24 +282,38 @@ func New(cfg config.Config, db store.Backend, root, notice string, reg lsp.Regis
 		m.mode = modeQuery
 	}
 
-	// Warm start: reuse the persisted corpus if its directory signature still
-	// matches the tree (a cheap stat-sweep), skipping the full walk entirely.
-	if idx, ok := db.LoadCorpus(); ok && idx.Version == store.CorpusVersion && m.signatureValid(idx) {
+	// Warm start: adopt the persisted corpus optimistically — no stat sweep on
+	// the startup path, so the first frame paints immediately even on a huge
+	// tree. Init re-checks the signature in the background and rebuilds on a
+	// mismatch (the 2s-TTL refresh already tolerates a brief stale window).
+	if idx, ok := db.LoadCorpus(); ok && idx.Version == store.CorpusVersion {
 		m.corpus = idx.Files
 		m.dirCorpus = filetree.DirsFromMtimes(idx.DirMtimes)
 		m.corpusTruncated = idx.Truncated
 		m.corpusBuiltAt = time.Now()
+		m.pendingValidate = &idx
+	}
+	if m.corpusBuiltAt.IsZero() {
+		// Cold cache: Init fires the background walk; the splash covers it.
+		m.corpusRebuilding = true
+		m.splash = true
+		m.splashStart = time.Now()
 	}
 	return m
 }
 
 // Init warms the search corpus in the background when there is no valid
-// persisted index (a warm start skips the walk) and, in a git repo, kicks off
-// the git-status poll loop.
+// persisted index (a warm start instead re-validates the adopted index off the
+// UI goroutine) and, in a git repo, kicks off the git-status poll loop.
 func (m Model) Init() tea.Cmd {
 	var cmds []tea.Cmd
 	if m.corpusBuiltAt.IsZero() {
 		cmds = append(cmds, m.rebuildCorpusCmd())
+	} else if m.pendingValidate != nil {
+		cmds = append(cmds, m.validateCorpusCmd(*m.pendingValidate))
+	}
+	if m.splash {
+		cmds = append(cmds, splashTick())
 	}
 	if m.gitRepo {
 		cmds = append(cmds, m.refreshGitStatusCmd(), gitStatusTick())
@@ -314,6 +339,20 @@ func gitStatusTick() tea.Cmd {
 	return tea.Tick(gitStatusInterval, func(time.Time) tea.Msg { return gitStatusTickMsg{} })
 }
 
+// splashTickInterval paces the splash spinner; splashMinDisplay keeps the
+// splash up long enough not to flash on a fast index build.
+const (
+	splashTickInterval = 100 * time.Millisecond
+	splashMinDisplay   = 800 * time.Millisecond
+)
+
+// splashTickMsg advances the splash animation frame.
+type splashTickMsg struct{}
+
+func splashTick() tea.Cmd {
+	return tea.Tick(splashTickInterval, func(time.Time) tea.Msg { return splashTickMsg{} })
+}
+
 // refreshGitStatusCmd runs the `git status` child process off the UI goroutine
 // and delivers the parsed dirty set. The process is short-lived — one spawn per
 // call, no daemon.
@@ -330,17 +369,32 @@ func (m Model) refreshGitStatusCmd() tea.Cmd {
 // — any external add/remove/rename bumps the containing directory's mtime — so a
 // true result means the cached file list is still accurate. O(#dirs) stats,
 // far cheaper than the full walk's per-entry gitignore regex.
-func (m Model) signatureValid(idx store.CorpusIndex) bool {
+func signatureValidFor(root string, idx store.CorpusIndex) bool {
 	if len(idx.DirMtimes) == 0 {
 		return false
 	}
 	for dir, mtime := range idx.DirMtimes {
-		info, err := os.Stat(filepath.Join(m.root, dir))
+		info, err := os.Stat(filepath.Join(root, dir))
 		if err != nil || !info.IsDir() || info.ModTime().UnixNano() != mtime {
 			return false
 		}
 	}
 	return true
+}
+
+// validateCorpusCmd re-checks a warm-adopted index's directory signature off
+// the UI goroutine — the stat sweep is O(#dirs) and would stall the first
+// frame on a huge tree. A valid signature yields no message; a mismatch runs
+// the full walk and delivers a fresh corpusMsg that swaps the corpus in.
+func (m Model) validateCorpusCmd(idx store.CorpusIndex) tea.Cmd {
+	root := m.root
+	rebuild := m.rebuildCorpusCmd()
+	return func() tea.Msg {
+		if signatureValidFor(root, idx) {
+			return nil
+		}
+		return rebuild()
+	}
 }
 
 // corpusTTL bounds how stale the cached corpus may be before a use triggers a
@@ -357,23 +411,19 @@ type corpusMsg struct {
 	builtAt   time.Time
 }
 
-// ensureCorpus guarantees m.corpus is populated. On a cold cache it builds once
-// synchronously so the first query/fuzzy has data; on a warm cache it is an
-// O(1) read. When the cache is older than corpusTTL it fires a background
-// rebuild (off the UI goroutine) and returns its Cmd, so keystrokes are never
-// blocked on a walk while the list refreshes. (Persistence happens only in the
-// corpusMsg handler — the in-flight Init/TTL rebuild reconciles and stores.)
+// ensureCorpus keeps m.corpus fresh without ever walking on the UI goroutine.
+// On a cold cache it fires the background build (unless Init's, or a prior
+// keystroke's, is already in flight) — callers see an empty corpus until the
+// corpusMsg lands, so a huge tree never freezes a keystroke. On a warm cache
+// older than corpusTTL it fires a background rebuild the same way.
+// (Persistence happens only in the corpusMsg handler.)
 func (m Model) ensureCorpus() (Model, tea.Cmd) {
 	if m.corpusBuiltAt.IsZero() {
-		files, dirMtimes, truncated := filetree.BuildAllEntries(m.root, m.cfg.Tree.Ignore, m.gitignore, m.cfg.Tree.MaxIndexFiles)
-		m.corpus = files
-		m.dirCorpus = filetree.DirsFromMtimes(dirMtimes)
-		m.corpusTruncated = truncated
-		m.corpusBuiltAt = time.Now()
-		if truncated {
-			m.notice = truncatedNotice(m.cfg.Tree.MaxIndexFiles)
+		if m.corpusRebuilding {
+			return m, nil // a build is already in flight
 		}
-		return m, nil
+		m.corpusRebuilding = true
+		return m, m.rebuildCorpusCmd()
 	}
 	if !m.corpusRebuilding && time.Since(m.corpusBuiltAt) > corpusTTL {
 		m.corpusRebuilding = true
@@ -475,6 +525,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case splashTickMsg:
+		if !m.splash {
+			return m, nil // dead tick after a skip/dismiss
+		}
+		m.splashFrame++
+		if !m.corpusBuiltAt.IsZero() && time.Since(m.splashStart) >= splashMinDisplay {
+			m.splash = false
+			return m, nil // index landed and the minimum display elapsed
+		}
+		return m, splashTick()
+
 	case gitStatusTickMsg:
 		// Poll heartbeat: refresh unless one is already in flight, and always
 		// re-arm the next tick so the loop survives a skipped round.
@@ -510,17 +571,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleCompletion(msg)
 
 	case tea.MouseMsg:
+		if m.splash {
+			return m, nil
+		}
 		return m.handleMouse(msg)
 
-	case tea.KeyMsg:
-		if msg.Type == tea.KeyCtrlC || msg.Type == tea.KeyCtrlQ {
+	case tea.PasteMsg:
+		if m.splash {
+			return m, nil
+		}
+		return m.handlePaste(msg.Content)
+
+	case tea.KeyPressMsg:
+		k := msg.String()
+		if k == "ctrl+c" || k == "ctrl+q" {
 			return m.quit()
+		}
+		if m.splash {
+			// Any key skips the splash and is consumed — it must not leak
+			// into the query bar as typed text.
+			m.splash = false
+			return m, nil
 		}
 		m.notice = ""
 		m.errText = ""
 
 		if m.messageOverlay != "" {
-			if msg.Type == tea.KeyEnter || msg.Type == tea.KeyEsc {
+			if k == "enter" || k == "esc" {
 				m.messageOverlay = ""
 			}
 			return m, nil
@@ -534,19 +611,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.grepOpen {
 			return m.handleGrepKey(msg)
 		}
-		if msg.Type == tea.KeyCtrlP && !m.inBarMode() {
+		if k == "ctrl+p" && !m.inBarMode() {
 			return m.openFuzzy()
 		}
-		if msg.Type == tea.KeyCtrlU && !m.inBarMode() {
+		if k == "ctrl+u" && !m.inBarMode() {
 			return m.openUncommitted()
 		}
-		if msg.Type == tea.KeyCtrlG && !m.inBarMode() {
+		if k == "ctrl+g" && !m.inBarMode() {
 			return m.openGrep()
 		}
-		if msg.Type == tea.KeyCtrlT && !m.inBarMode() {
+		if k == "ctrl+t" && !m.inBarMode() {
 			return m.enterInspect()
 		}
-		if msg.Type == tea.KeyShiftTab && !m.inBarMode() {
+		if k == "shift+tab" && !m.inBarMode() {
 			return m.cycleTab(), nil
 		}
 
@@ -568,6 +645,65 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// handlePaste routes bracketed-paste text to whichever input has focus (v1
+// delivered pastes as one multi-rune KeyRunes message; v2 sends tea.PasteMsg).
+// Only the grep query and the edit buffer are multi-line — the single-line
+// bars take the paste with newlines collapsed to spaces.
+func (m Model) handlePaste(text string) (tea.Model, tea.Cmd) {
+	if m.messageOverlay != "" || m.defPickOpen {
+		return m, nil
+	}
+	if m.fuzzyOpen {
+		m.fuzzyQuery += pasteLine(text)
+		return m.refreshFuzzy(), nil
+	}
+	if m.grepOpen {
+		return m.grepPaste(text)
+	}
+	switch m.mode {
+	case modeQuery:
+		m = m.adoptPreview()
+		m.command, m.qCursor = input.InsertAtCursor(m.command, m.qCursor, pasteLine(text))
+		m.inputSuggestIndex = 0
+		m.keyboardSelectedCommand = ""
+	case modeEdit:
+		return m.editPaste(text)
+	case modeSearch:
+		m.searchInput += pasteLine(text)
+		m = m.focusNearestMatch()
+	case modeCommand:
+		m.cmdInput, m.cmdCursor = input.InsertAtCursor(m.cmdInput, m.cmdCursor, pasteLine(text))
+	case modeExec:
+		m.execInput, m.execCursor = input.InsertAtCursor(m.execInput, m.execCursor, pasteLine(text))
+		m = m.refreshExecSugs()
+	case modeSearchExec:
+		m.searchExecInput, m.searchExecCursor = input.InsertAtCursor(m.searchExecInput, m.searchExecCursor, pasteLine(text))
+	case modeInspect:
+		m.inspectInput, m.inspectCursor = input.InsertAtCursor(m.inspectInput, m.inspectCursor, pasteLine(text))
+	}
+	return m, nil
+}
+
+// keyText returns the printable text of a key press, or "" when the press is
+// a chord rather than typing. Shift and the lock states count as typing —
+// under the enhanced keyboard protocol Shift+d arrives as Text "D" with
+// ModShift set, and CapsLock/NumLock report as modifiers too. Ctrl, Alt, and
+// the other real chord modifiers do not produce text input.
+func keyText(msg tea.KeyPressMsg) string {
+	if msg.Mod&^(tea.ModShift|tea.ModCapsLock|tea.ModNumLock|tea.ModScrollLock) != 0 {
+		return ""
+	}
+	return msg.Text
+}
+
+// pasteLine flattens pasted text for the single-line input bars: CR/CRLF
+// normalize to \n, then newlines collapse to single spaces.
+func pasteLine(text string) string {
+	s := strings.ReplaceAll(text, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	return strings.ReplaceAll(s, "\n", " ")
 }
 
 func (m Model) quit() (tea.Model, tea.Cmd) {

@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/nickooan/ntee-editor/internal/config"
 	"github.com/nickooan/ntee-editor/internal/input"
@@ -71,26 +71,28 @@ func (m Model) enterInspect() (tea.Model, tea.Cmd) {
 // menu (mirroring the sidebar selection), the rest is the standard command-bar
 // input (exec-bar pattern). Esc returns to the previous mode; a busy
 // maintenance op keeps running and lands as a notice.
-func (m Model) handleInspectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyEsc:
+func (m Model) handleInspectKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
 		m.mode = m.inspectPrevMode
-	case tea.KeyShiftUp:
+	case "shift+up":
 		m.inspectMenu = input.Clamp(m.inspectMenu-1, 0, len(inspectMenuItems)-1)
-	case tea.KeyShiftDown:
+	case "shift+down":
 		m.inspectMenu = input.Clamp(m.inspectMenu+1, 0, len(inspectMenuItems)-1)
-	case tea.KeyEnter:
+	case "enter":
 		return m.runInspectCommand(strings.TrimSpace(m.inspectInput))
-	case tea.KeyLeft:
+	case "left":
 		m.inspectCursor = input.MoveCursor(m.inspectInput, m.inspectCursor, -1)
-	case tea.KeyRight:
+	case "right":
 		m.inspectCursor = input.MoveCursor(m.inspectInput, m.inspectCursor, 1)
-	case tea.KeyBackspace:
+	case "backspace":
 		m.inspectInput, m.inspectCursor, _ = input.RemoveBeforeCursor(m.inspectInput, m.inspectCursor)
-	case tea.KeySpace:
+	case "space":
 		m.inspectInput, m.inspectCursor = input.InsertAtCursor(m.inspectInput, m.inspectCursor, " ")
-	case tea.KeyRunes:
-		m.inspectInput, m.inspectCursor = input.InsertAtCursor(m.inspectInput, m.inspectCursor, string(msg.Runes))
+	default:
+		if t := keyText(msg); t != "" {
+			m.inspectInput, m.inspectCursor = input.InsertAtCursor(m.inspectInput, m.inspectCursor, t)
+		}
 	}
 	return m, nil
 }

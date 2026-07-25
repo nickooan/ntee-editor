@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/nickooan/ntee-editor/internal/config"
 	"github.com/nickooan/ntee-editor/internal/store"
@@ -54,14 +54,14 @@ func TestDraftRestoreUndoTimeline(t *testing.T) {
 	}
 	// Undo walks back through the draft steps down to the disk baseline.
 	for i := 0; i < 20 && m.edit.content() != disk; i++ {
-		m = ctrl(m, tea.KeyCtrlZ)
+		m = key(m, ctrlKey('z'))
 	}
 	if m.edit.content() != disk {
 		t.Fatalf("undo never reached disk baseline: %q", m.edit.content())
 	}
 	// Redo returns to the draft head.
 	for i := 0; i < 20 && m.edit.content() != edited; i++ {
-		m = ctrl(m, tea.KeyCtrlY)
+		m = key(m, ctrlKey('y'))
 	}
 	if m.edit.content() != edited {
 		t.Fatalf("redo never reached draft head: %q", m.edit.content())
@@ -77,7 +77,7 @@ func TestSaveDeletesDraft(t *testing.T) {
 	if _, ok := m.db.LoadDraft("main.go"); !ok {
 		t.Fatal("setup: draft should exist")
 	}
-	m = ctrl(m, tea.KeyCtrlS)
+	m = key(m, ctrlKey('s'))
 	if _, ok := m.db.LoadDraft("main.go"); ok {
 		t.Fatal("save must delete the draft")
 	}
@@ -91,7 +91,7 @@ func TestEscDiscardsDraft(t *testing.T) {
 	m = m.openFileAt("main.go")
 	disk := m.openFile.Content
 	m = runes(m, "junk")
-	m = ctrl(m, tea.KeyEsc)
+	m = key(m, keyPress(tea.KeyEsc))
 	if _, ok := m.db.LoadDraft("main.go"); ok {
 		t.Fatal("esc must delete the draft")
 	}
@@ -131,11 +131,11 @@ func TestShiftTabCycles(t *testing.T) {
 	if m.tabActive != 1 {
 		t.Fatalf("setup active = %d", m.tabActive)
 	}
-	m = ctrl(m, tea.KeyShiftTab)
+	m = key(m, shiftKey(tea.KeyTab))
 	if m.tabActive != 0 || m.openRel != "main.go" {
 		t.Fatalf("cycle: active=%d open=%q", m.tabActive, m.openRel)
 	}
-	m = ctrl(m, tea.KeyShiftTab) // wraps
+	m = key(m, shiftKey(tea.KeyTab)) // wraps
 	if m.tabActive != 1 || m.openRel != "lib/util.ts" {
 		t.Fatalf("wrap: active=%d open=%q", m.tabActive, m.openRel)
 	}
@@ -154,17 +154,17 @@ func TestTabCommandJumpAndErrors(t *testing.T) {
 	}
 
 	// @exec jump.
-	m = ctrl(m, tea.KeyCtrlE)
+	m = key(m, ctrlKey('e'))
 	m = runes(m, "tab util.ts")
-	m = ctrl(m, tea.KeyEnter)
+	m = key(m, keyPress(tea.KeyEnter))
 	if m.openRel != "lib/util.ts" || m.mode != modeEdit {
 		t.Fatalf("@exec tab jump failed: %q mode=%v", m.openRel, m.mode)
 	}
 
 	// Unknown tab: exec stays with an error.
-	m = ctrl(m, tea.KeyCtrlE)
+	m = key(m, ctrlKey('e'))
 	m = runes(m, "tab nope.zz")
-	m = ctrl(m, tea.KeyEnter)
+	m = key(m, keyPress(tea.KeyEnter))
 	if m.mode != modeExec || m.errText != "no tab: nope.zz" {
 		t.Fatalf("unknown tab: mode=%v err=%q", m.mode, m.errText)
 	}

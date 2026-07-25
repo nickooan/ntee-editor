@@ -14,7 +14,7 @@ import (
 	"sort"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"gopkg.in/yaml.v3"
 
 	"github.com/nickooan/ntee-editor/internal/app"
@@ -24,8 +24,6 @@ import (
 	"github.com/nickooan/ntee-editor/internal/store"
 )
 
-const version = "0.1.0"
-
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	prepareLSP := flag.Bool("prepare-lsp", false, "install language servers (optionally only the named languages) and write config, then exit")
@@ -34,7 +32,7 @@ func main() {
 	enableLSP := flag.Bool("enable-lsp", false, "re-enable LSP for the named languages (or 'all'); writes the user config")
 	flag.Parse()
 	if *showVersion {
-		fmt.Println("ntee-editor " + version)
+		fmt.Println("ntee-editor " + app.Version)
 		return
 	}
 	if *disableLSP || *enableLSP {
@@ -102,7 +100,7 @@ func main() {
 		reg = manager
 	}
 
-	program := tea.NewProgram(app.New(cfg, db, absRoot, notice, reg), tea.WithAltScreen(), tea.WithMouseCellMotion())
+	program := tea.NewProgram(app.New(cfg, db, absRoot, notice, reg))
 	if manager != nil {
 		manager.SetSink(func(msg any) { program.Send(msg) })
 		defer manager.ShutdownAll()

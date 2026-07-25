@@ -3,7 +3,7 @@ package app
 import (
 	"unicode/utf8"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/nickooan/ntee-editor/internal/input"
 	"github.com/nickooan/ntee-editor/internal/syntax"
@@ -36,34 +36,53 @@ func (m Model) freezeSearchSnapshot(content string) Model {
 	return m
 }
 
-func (m Model) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyEsc:
+func (m Model) handleSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
 		m.mode = m.searchPrevMode
-	case tea.KeyEnter:
+	case "enter":
 		m = m.acceptSearch()
-	case tea.KeyUp:
+	case "up":
 		m = m.nextMatch(-1)
-	case tea.KeyDown, tea.KeyCtrlF:
+	case "down", "ctrl+f":
 		m = m.nextMatch(1)
-	case tea.KeyCtrlE:
+	case "ctrl+e":
 		if m.searchInput != "" && len(view.FindSearchMatches(m.searchContent, m.searchInput)) > 0 {
 			return m.enterSearchExec(), nil
 		}
 		m.errText = "no matches to act on"
-	case tea.KeyBackspace:
+	case "backspace":
 		if runes := []rune(m.searchInput); len(runes) > 0 {
 			m.searchInput = string(runes[:len(runes)-1])
-			m.searchFocused = 0
+			m = m.focusNearestMatch()
 		}
-	case tea.KeySpace:
+	case "space":
 		m.searchInput += " "
-		m.searchFocused = 0
-	case tea.KeyRunes:
-		m.searchInput += string(msg.Runes)
-		m.searchFocused = 0
+		m = m.focusNearestMatch()
+	default:
+		if t := keyText(msg); t != "" {
+			m.searchInput += t
+			m = m.focusNearestMatch()
+		}
 	}
 	return m, nil
+}
+
+// focusNearestMatch focuses the first match at/after the edit cursor line
+// (wrapping to the file's first match), so a typed search starts near the
+// editing position instead of the top of the file.
+func (m Model) focusNearestMatch() Model {
+	m.searchFocused = 0
+	if m.searchPrevMode != modeEdit {
+		return m
+	}
+	for i, mt := range view.FindSearchMatches(m.searchContent, m.searchInput) {
+		if mt.LineIndex >= m.edit.cy {
+			m.searchFocused = i
+			break
+		}
+	}
+	return m
 }
 
 // nextMatch cycles the focused match (wrapping) in either direction.

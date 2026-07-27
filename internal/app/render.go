@@ -1077,6 +1077,11 @@ var (
 	diffGutterDelStyle = lipgloss.NewStyle().Foreground(colGutter).Background(colDiffDelBg)
 	diffAddTextStyle   = lipgloss.NewStyle().Foreground(colFg).Background(colDiffAddBg)
 	diffDelTextStyle   = lipgloss.NewStyle().Foreground(colFg).Background(colDiffDelBg)
+	// Gutter +/- markers: solid green/red (the full-strength palette colors,
+	// not the row tints) in the spacer column after the line number — the same
+	// slot the diagnostics gutter uses for its ● badge.
+	diffMarkAddStyle = lipgloss.NewStyle().Foreground(colGreen).Bold(true).Background(colDiffAddBg)
+	diffMarkDelStyle = lipgloss.NewStyle().Foreground(colRed).Bold(true).Background(colDiffDelBg)
 
 	cursorLineStyle    = lipgloss.NewStyle().Foreground(colFg).Background(colLineHl)
 	selectedEntryStyle = lipgloss.NewStyle().Foreground(colFg).Background(colSelection)

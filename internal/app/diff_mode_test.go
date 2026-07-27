@@ -316,11 +316,97 @@ func TestRenderDiffSmoke(t *testing.T) {
 		if !strings.Contains(frame, "@diff") {
 			t.Fatal("diff status line missing")
 		}
+		// Gutter markers: added rows carry "N+│", removed rows a blank
+		// number with "-│" (fixture: add row is buffer line 4 → "4+│").
+		if !strings.Contains(frame, "4+│") {
+			t.Fatal("added row's gutter + marker missing")
+		}
+		if !strings.Contains(frame, "-│") {
+			t.Fatal("removed row's gutter - marker missing")
+		}
 	}
 	// While loading there are no rows yet — must still render.
 	m.diffRows, m.diffLoading = nil, true
 	if !strings.Contains(ansi.Strip(m.render()), "computing diff…") {
 		t.Fatal("loading placeholder missing")
+	}
+}
+
+// Diff-view click geometry: the 10-line fixture buffer keeps gutterWidth=2,
+// so like edit mode (see mouse_test.go) content starts at column 31, row 4.
+func TestDiffClickPlacesCursor(t *testing.T) {
+	m, _ := diffFixture(t)
+	m.diffCursor, m.diffCx, m.diffScrollY = 0, 0, 0
+
+	// Click the del row (display row 6), rune column 2 of "gone".
+	m = click(m, testTextX+2, testTextY+6)
+	if m.diffCursor != 6 || m.diffCx != 2 {
+		t.Fatalf("cursor = (%d, %d), want (6, 2)", m.diffCursor, m.diffCx)
+	}
+	if m.mode != modeDiff {
+		t.Fatalf("mode = %v", m.mode)
+	}
+	// A gutter click lands on the row at column 0; columns clamp to row end.
+	m = click(m, testTextX-3, testTextY+3)
+	if m.diffCursor != 3 || m.diffCx != 0 {
+		t.Fatalf("gutter click = (%d, %d), want (3, 0)", m.diffCursor, m.diffCx)
+	}
+	m = click(m, testTextX+50, testTextY+1)
+	if m.diffCursor != 1 || m.diffCx != len([]rune("l1")) {
+		t.Fatalf("beyond-EOL click = (%d, %d), want clamped to line end", m.diffCursor, m.diffCx)
+	}
+	// A click below the last diff row is a no-op.
+	before := m.diffCursor
+	m = click(m, testTextX, testTextY+20)
+	if m.diffCursor != before {
+		t.Fatal("click below the diff must not move the cursor")
+	}
+}
+
+func TestDiffClickPagesAtEdges(t *testing.T) {
+	m, root := newTestModel(t, nil)
+	// A buffer taller than the pane so the viewport actually pages.
+	var cur []string
+	for i := 0; i < 80; i++ {
+		cur = append(cur, fmt.Sprintf("line %d", i))
+	}
+	must(t, os.WriteFile(filepath.Join(root, "main.go"), []byte(strings.Join(cur, "\n")+"\n"), 0o644))
+	m = m.openFileAt("main.go")
+	m.gitRepo = true
+	m.edit.lines = m.edit.lines[:80]
+	next, _ := m.enterDiff("")
+	m = next.(Model)
+	rows, adds, dels := buildDiffRows(append([]string{"old first"}, cur[1:]...), m.edit.lines)
+	res, _ := m.Update(diffReadyMsg{gen: m.diffGen, rel: m.openRel, rows: rows, adds: adds, dels: dels})
+	m = res.(Model)
+
+	h := m.contentHeight() + 1
+	m.diffCursor, m.diffScrollY = 40, 30 // viewport [30, 30+h)
+	bottom := 30 + h - 1
+	m = click(m, testTextX, testTextY+(bottom-30))
+	if m.diffCursor != bottom || m.diffScrollY != bottom {
+		t.Fatalf("bottom-row click: cursor=%d scroll=%d, want both %d", m.diffCursor, m.diffScrollY, bottom)
+	}
+	m = click(m, testTextX, testTextY) // top visible row → page up
+	top := bottom
+	if m.diffCursor != top || m.diffScrollY != max(0, top-h+1) {
+		t.Fatalf("top-row click: cursor=%d scroll=%d, want cursor %d at the bottom", m.diffCursor, m.diffScrollY, top)
+	}
+}
+
+func TestDiffCtrlClickOnDelRowRefuses(t *testing.T) {
+	m, _ := diffFixture(t)
+	m.diffCursor, m.diffScrollY = 0, 0
+	next, cmd := ctrlClick(m, testTextX, testTextY+6) // the del row
+	m = next
+	if cmd != nil {
+		t.Fatal("del-row ctrl+click must not fire a jump cmd")
+	}
+	if m.errText != "cannot jump from a removed line" {
+		t.Fatalf("errText = %q", m.errText)
+	}
+	if m.diffCursor != 6 {
+		t.Fatalf("the click should still place the cursor, got %d", m.diffCursor)
 	}
 }
 

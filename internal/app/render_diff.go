@@ -39,12 +39,16 @@ func (m Model) renderDiff(width, height int) string {
 		row := m.diffRows[i]
 		text := m.diffRowText(i)
 
+		// The +/- marker sits in the spacer column after the number ("117+│ "),
+		// keeping the gutter exactly gutterWidth+3 columns like renderFile.
 		var number string
 		switch row.kind {
 		case diffAdd:
-			number = diffGutterAddStyle.Render(pad(strconv.Itoa(row.bufLine+1), gutterWidth) + " │ ")
+			number = diffGutterAddStyle.Render(pad(strconv.Itoa(row.bufLine+1), gutterWidth)) +
+				diffMarkAddStyle.Render("+") + diffGutterAddStyle.Render("│ ")
 		case diffDel:
-			number = diffGutterDelStyle.Render(pad("", gutterWidth) + " │ ")
+			number = diffGutterDelStyle.Render(pad("", gutterWidth)) +
+				diffMarkDelStyle.Render("-") + diffGutterDelStyle.Render("│ ")
 		default:
 			number = gutterStyle.Render(pad(strconv.Itoa(row.bufLine+1), gutterWidth) + " │ ")
 		}

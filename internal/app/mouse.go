@@ -89,6 +89,13 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			if mo.Button == tea.MouseRight && !ctrl {
 				return m, nil
 			}
+			if m.mode == modeDiff {
+				next, hit := m.handleDiffClick(mo.X, mo.Y)
+				if hit && ctrl {
+					return next.diffJumpToReference() // Ctrl+click = jump to definition
+				}
+				return next, nil
+			}
 			next, hit := m.handleEditClick(mo.X, mo.Y)
 			if hit && ctrl {
 				return next.jumpToReference() // Ctrl+click = jump to definition
@@ -140,6 +147,76 @@ func (m Model) handleEditClick(x, y int) (Model, bool) {
 	m.edit.clearSelection()
 	m.edit.cy, m.edit.cx = line, col
 	m.edit.clampCursor()
+	return m, true
+}
+
+// diffClickTarget maps a terminal cell (x, y) to a diff display row and rune
+// column — editClickTarget's math over diffRows instead of buffer lines: same
+// chrome offsets, same gutter formula as renderDiff, and the horizontal
+// window applies only to the review cursor's row.
+func (m Model) diffClickTarget(x, y int) (int, int, bool) {
+	height := m.contentHeight() + 1 // rendered rows: single-line status, like edit mode
+	total := len(m.diffRows)
+	if total == 0 {
+		return 0, 0, false
+	}
+
+	paneRow := y - 2 - m.tabRows()
+	if paneRow < 0 || paneRow >= height {
+		return 0, 0, false
+	}
+	start := fileViewportTop(m.diffCursor, m.diffScrollY, height, total)
+	row := start + paneRow
+	if row >= total {
+		return 0, 0, false // pane background below the last row
+	}
+
+	sidebar := m.sidebarWidth()
+	mainWidth := max(3, m.width-sidebar)
+	paneCol := x - (sidebar + 1)
+	if paneCol < 0 || paneCol >= mainWidth-2 {
+		return 0, 0, false
+	}
+	gutterWidth := len(strconv.Itoa(max(len(m.edit.lines), height)))
+	contentCol := max(0, paneCol-(gutterWidth+3)) // gutter click → column 0
+
+	text := []rune(m.diffRowText(row))
+	off := 0
+	if row == m.diffCursor {
+		contentWidth := max(1, (mainWidth-4)-gutterWidth-3)
+		if at := input.Clamp(m.diffCx, 0, len(text)); at >= contentWidth {
+			off = at - contentWidth + 1
+		}
+	}
+	col := input.Clamp(off+contentCol, 0, len(text))
+	return row, col, true
+}
+
+// handleDiffClick moves the review cursor to a clicked diff row, with
+// handleEditClick's viewport anchoring: an ordinary click freezes the window,
+// clicking the top visible row pages up, the bottom visible row pages down.
+func (m Model) handleDiffClick(x, y int) (Model, bool) {
+	if m.mode != modeDiff || m.openFile == nil {
+		return m, false
+	}
+	row, col, ok := m.diffClickTarget(x, y)
+	if !ok {
+		return m, false
+	}
+	h := m.contentHeight() + 1
+	total := len(m.diffRows)
+	top := fileViewportTop(m.diffCursor, m.diffScrollY, h, total)
+	bottom := min(top+h-1, total-1)
+	switch {
+	case row == top && top > 0:
+		m.diffScrollY = max(0, row-h+1) // clicked top row → page up, row lands at the bottom
+	case row == bottom && bottom < total-1:
+		m.diffScrollY = row // clicked bottom row → page down, row lands at the top
+	default:
+		m.diffScrollY = top // ordinary click: the viewport stays put
+	}
+	m.diffCursor = row
+	m.diffCx = col
 	return m, true
 }
 

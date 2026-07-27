@@ -144,12 +144,15 @@ func (m Model) handleEditClick(x, y int) (Model, bool) {
 }
 
 // wheelScroll handles a vertical wheel notch (dir = -1 up, +1 down). In edit
-// mode it moves the cursor (the viewport follows via fileViewportTop); in the
-// query/command file view it nudges the scroll offset. Other modes are inert.
+// and diff-review modes it moves the cursor (the viewport follows via
+// fileViewportTop); in the query/command file view it nudges the scroll
+// offset. Other modes are inert.
 func (m Model) wheelScroll(dir int) Model {
 	switch {
 	case m.mode == modeEdit && m.openFile != nil:
 		return m.moveEditCursor(0, dir*wheelScrollLines)
+	case m.mode == modeDiff && m.openFile != nil:
+		return m.moveDiffCursor(dir * wheelScrollLines)
 	case (m.mode == modeQuery || m.mode == modeCommand) && m.openFile != nil:
 		m.fileScrollY = input.Clamp(m.fileScrollY+dir*wheelScrollLines, 0, max(0, len(m.fileLines)-1))
 	}

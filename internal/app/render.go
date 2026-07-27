@@ -75,6 +75,8 @@ func (m Model) render() string {
 		mainBody = m.renderSearch(mainWidth-4, innerH)
 	case m.mode == modeQuery:
 		mainBody = m.renderQueryMain(mainWidth-4, innerH)
+	case m.mode == modeDiff:
+		mainBody = m.renderDiff(mainWidth-4, innerH)
 	case m.openFile != nil:
 		mainBody = m.renderFile(mainWidth-4, innerH)
 	default:
@@ -158,6 +160,8 @@ func (m Model) renderStatusLine() string {
 	case modeCommand:
 		return promptStyle.Render(":") + renderInputLine(m.cmdInput, m.cmdCursor) +
 			statusTextStyle.Render("   ") + hintStyle.Render("jump <line|top|end> · tab <name|cl|cr> · revert")
+	case modeDiff:
+		return m.renderDiffStatus()
 	case modeInspect:
 		bar := execPromptStyle.Render("@inspection >") +
 			renderInputLineStyled(m.inspectInput, m.inspectCursor, execTextStyle) +
@@ -296,7 +300,7 @@ func (m Model) renderSidebar(width, height int) string {
 // static usage hint.
 func (m Model) renderExecSugs() string {
 	if len(m.execSugs) == 0 {
-		return execHintStyle.Render("copy [a-b|all|fpath] · jump <line|top|end> · tab <name|cl|cr> · git scf <side> · Esc cancel")
+		return execHintStyle.Render("copy [a-b|all|fpath] · jump <line|top|end> · tab <name|cl|cr> · git scf <side> · git diff [rev] · Esc cancel")
 	}
 	const maxShown = 6
 	sel := input.Clamp(m.execSugIndex, 0, len(m.execSugs)-1)
@@ -580,6 +584,12 @@ func (m Model) renderContentLine(i int, line string, off, width int) string {
 }
 
 func plainWindow(line string, off, width int) string {
+	return plainWindowStyled(line, off, width, baseStyle)
+}
+
+// plainWindowStyled is plainWindow with the row's style threaded in, so a
+// diff row's background covers the text and the EOL padding alike.
+func plainWindowStyled(line string, off, width int, style lipgloss.Style) string {
 	runes := []rune(line)
 	start := input.Clamp(off, 0, len(runes))
 	end := input.Clamp(start+width, 0, len(runes))
@@ -587,12 +597,19 @@ func plainWindow(line string, off, width int) string {
 	if pad := width - (end - start); pad > 0 {
 		out += strings.Repeat(" ", pad)
 	}
-	return baseStyle.Render(out)
+	return style.Render(out)
 }
 
 // renderSegments renders styled segments through a rune window [off, off+width),
 // padding the remainder.
 func renderSegments(segs []view.HighlightSegment, off, width int) string {
+	return renderSegmentsBg(segs, off, width, hexBg, baseStyle)
+}
+
+// renderSegmentsBg is renderSegments with the row's background threaded in:
+// bg tints every syntax run and padStyle carries the same tint past EOL —
+// without it the row would show a stripe of editor background after the text.
+func renderSegmentsBg(segs []view.HighlightSegment, off, width int, bg string, padStyle lipgloss.Style) string {
 	var b strings.Builder
 	skipped, rendered := 0, 0
 	for _, seg := range segs {
@@ -611,11 +628,11 @@ func renderSegments(segs []view.HighlightSegment, off, width int) string {
 			skipped = off
 		}
 		take := min(len(runes)-i, width-rendered)
-		b.WriteString(segStyleFor(seg).Render(string(runes[i : i+take])))
+		b.WriteString(segStyleWithBg(seg, bg).Render(string(runes[i : i+take])))
 		rendered += take
 	}
 	if pad := width - rendered; pad > 0 {
-		b.WriteString(baseStyle.Render(strings.Repeat(" ", pad)))
+		b.WriteString(padStyle.Render(strings.Repeat(" ", pad)))
 	}
 	return b.String()
 }
@@ -914,9 +931,11 @@ func pad(s string, width int) string {
 
 // segStyles memoizes lipgloss styles per segment-style combination —
 // renderSegments runs for every visible row on every frame, and the style set
-// is tiny. The TUI render loop is single-goroutine, so a plain map is safe.
+// is tiny (diff review adds at most two extra backgrounds per combination).
+// The TUI render loop is single-goroutine, so a plain map is safe.
 type segStyleKey struct {
 	color     string
+	bg        string // background hex — hexBg outside diff review
 	bold      bool
 	dim       bool
 	underline bool
@@ -927,8 +946,16 @@ type segStyleKey struct {
 var segStyles = map[segStyleKey]lipgloss.Style{}
 
 func segStyleFor(segment view.HighlightSegment) lipgloss.Style {
+	return segStyleWithBg(segment, hexBg)
+}
+
+// segStyleWithBg is segStyleFor with the row's background threaded in: every
+// emitted run must carry its own background (see the palette comment), so a
+// diff row's tint has to be baked into the segment style itself.
+func segStyleWithBg(segment view.HighlightSegment, bg string) lipgloss.Style {
 	key := segStyleKey{
 		color:     segment.Color,
+		bg:        bg,
 		bold:      segment.Bold,
 		dim:       segment.DimColor,
 		underline: segment.Underline,
@@ -939,7 +966,7 @@ func segStyleFor(segment view.HighlightSegment) lipgloss.Style {
 		return style
 	}
 
-	style := lipgloss.NewStyle().Background(colBg)
+	style := lipgloss.NewStyle().Background(lipgloss.Color(bg))
 	if key.color != "" {
 		style = style.Foreground(colorFor(key.color))
 	} else {
@@ -990,11 +1017,19 @@ func colorFor(name string) color.Color {
 	}
 }
 
+// Background hexes that thread through segStyleWithBg — string form so they
+// can key the segStyles memo map.
+const (
+	hexBg        = "#282828" // editor background
+	hexDiffAddBg = "#32361a" // diff review: added line (desaturated dark green)
+	hexDiffDelBg = "#3c2422" // diff review: removed line (desaturated dark red)
+)
+
 // Gruvbox-dark palette (matches the default grammar style). Every emitted
 // run carries its own background — wrapping already-styled strings would
 // break on their inner ANSI resets.
 var (
-	colBg        = lipgloss.Color("#282828") // editor background
+	colBg        = lipgloss.Color(hexBg) // editor background
 	colBgChrome  = lipgloss.Color("#1d2021") // header / status chrome (bg0_h)
 	colFg        = lipgloss.Color("#ebdbb2") // cream foreground
 	colLineHl    = lipgloss.Color("#3c3836") // cursor-line highlight (bg1)
@@ -1032,6 +1067,16 @@ var (
 
 	gutterErrStyle  = lipgloss.NewStyle().Foreground(colRed).Background(colBg)
 	gutterWarnStyle = lipgloss.NewStyle().Foreground(colYellow).Background(colBg)
+
+	// Diff review rows: subtle green/red backgrounds near colBg's luminance so
+	// syntax colors stay readable on added lines; removed lines render plain
+	// (no highlight cache exists for text that left the buffer).
+	colDiffAddBg       = lipgloss.Color(hexDiffAddBg)
+	colDiffDelBg       = lipgloss.Color(hexDiffDelBg)
+	diffGutterAddStyle = lipgloss.NewStyle().Foreground(colGutter).Background(colDiffAddBg)
+	diffGutterDelStyle = lipgloss.NewStyle().Foreground(colGutter).Background(colDiffDelBg)
+	diffAddTextStyle   = lipgloss.NewStyle().Foreground(colFg).Background(colDiffAddBg)
+	diffDelTextStyle   = lipgloss.NewStyle().Foreground(colFg).Background(colDiffDelBg)
 
 	cursorLineStyle    = lipgloss.NewStyle().Foreground(colFg).Background(colLineHl)
 	selectedEntryStyle = lipgloss.NewStyle().Foreground(colFg).Background(colSelection)

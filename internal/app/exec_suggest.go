@@ -30,7 +30,7 @@ func (m Model) execSuggestions(input string) []string {
 	case prev == "tab":
 		cands = append([]string{"cl", "cr"}, tabBaseNames(m.tabs)...)
 	case prev == "git":
-		cands = []string{"scf"}
+		cands = []string{"scf", "diff"} // diff's revision arg stays free-form
 	case prev == "git scf":
 		cands = m.conflictSideCandidates()
 	default:

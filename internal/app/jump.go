@@ -29,6 +29,15 @@ type jumpFrame struct {
 	relPath string
 	cy, cx  int
 	scrollY int
+
+	// Diff-review origin (the jump left a "git diff" view): Ctrl+O re-enters
+	// diff mode on this file, re-derives the diff against diffBase — the
+	// buffer may have changed at the jump target — and restores the review
+	// position (clamped by handleDiffReady).
+	inDiff      bool
+	diffBase    string
+	diffCursor  int
+	diffScrollY int
 }
 
 // maxJumpFrames bounds the trail; oldest frames drop off.
@@ -355,7 +364,9 @@ func (m Model) requestDefinition(token string, cx int, tryCols []int, snapped bo
 // definition query on a declaration). Guards re-run — the user may have typed
 // while the request was in flight.
 func (m Model) handleDefinition(msg definitionMsg) (tea.Model, tea.Cmd) {
-	if m.openFile == nil || m.mode != modeEdit {
+	// modeDiff is accepted too: Ctrl+J in diff review syncs the edit cursor
+	// and fires the same async lookup, so its answer must land as well.
+	if m.openFile == nil || (m.mode != modeEdit && m.mode != modeDiff) {
 		return m, nil
 	}
 	// LSP-strict: when a server is configured for this file type, its answer
@@ -441,7 +452,8 @@ func (m Model) requestReferences(token string, cx int) (tea.Model, tea.Cmd) {
 // line itself. LSP-strict: an empty or failed answer reports rather than
 // guessing via the heuristic.
 func (m Model) handleReferences(msg referencesMsg) (tea.Model, tea.Cmd) {
-	if m.openFile == nil || m.mode != modeEdit {
+	// modeDiff accepted for the same reason as handleDefinition.
+	if m.openFile == nil || (m.mode != modeEdit && m.mode != modeDiff) {
 		return m, nil
 	}
 	if msg.err != nil {
@@ -460,12 +472,18 @@ func (m Model) handleReferences(msg referencesMsg) (tea.Model, tea.Cmd) {
 }
 
 // jumpToLocation pushes the origin frame and lands on (rel, line, utf16Col).
+// A diff-review origin is remembered on the frame (for Ctrl+O) and the review
+// itself ends on a successful landing — the target always opens in edit mode.
 func (m Model) jumpToLocation(rel string, line, utf16Col int) Model {
 	m.jumpStack = append(m.jumpStack, jumpFrame{
-		relPath: m.openRel,
-		cy:      m.edit.cy,
-		cx:      m.edit.cx,
-		scrollY: m.fileScrollY,
+		relPath:     m.openRel,
+		cy:          m.edit.cy,
+		cx:          m.edit.cx,
+		scrollY:     m.fileScrollY,
+		inDiff:      m.mode == modeDiff,
+		diffBase:    m.diffBase,
+		diffCursor:  m.diffCursor,
+		diffScrollY: m.diffScrollY,
 	})
 	if len(m.jumpStack) > maxJumpFrames {
 		m.jumpStack = append([]jumpFrame(nil), m.jumpStack[len(m.jumpStack)-maxJumpFrames:]...)
@@ -473,6 +491,10 @@ func (m Model) jumpToLocation(rel string, line, utf16Col int) Model {
 
 	if rel == m.openRel {
 		// Same-file jump: just move the cursor.
+		if m.mode == modeDiff {
+			m = m.clearDiffState()
+			m.mode = modeEdit
+		}
 		m.edit.clearSelection()
 		m.edit.cy = input.Clamp(line, 0, len(m.edit.lines)-1)
 		m.edit.cx = lsp.RuneCol(m.edit.lines[m.edit.cy], utf16Col)
@@ -482,10 +504,12 @@ func (m Model) jumpToLocation(rel string, line, utf16Col int) Model {
 
 	next, opened := m.openJumpFile(rel, line, 0, 0)
 	if !opened {
-		// A failed jump leaves no stack residue.
+		// A failed jump leaves no stack residue (and an active diff review
+		// stays intact).
 		next.jumpStack = next.jumpStack[:len(next.jumpStack)-1]
 		return next
 	}
+	next = next.clearDiffState() // openJumpFile already landed in edit mode
 	next.edit.cx = lsp.RuneCol(next.edit.lines[next.edit.cy], utf16Col)
 	next.edit.clampCursor()
 	return next.anchorCursorLine()
@@ -504,8 +528,25 @@ func (m Model) jumpBack() (tea.Model, tea.Cmd) {
 	}
 	frame := m.jumpStack[len(m.jumpStack)-1]
 	m.jumpStack = m.jumpStack[:len(m.jumpStack)-1]
-	next, _ := m.openJumpFile(frame.relPath, frame.cy, frame.cx, frame.scrollY)
-	return next, nil
+	if m.mode == modeDiff {
+		// Ctrl+O from inside a review: this file's review is over.
+		m = m.clearDiffState()
+		m.mode = modeEdit
+	}
+	next, ok := m.openJumpFile(frame.relPath, frame.cy, frame.cx, frame.scrollY)
+	if !ok || !frame.inDiff {
+		return next, nil
+	}
+	// The origin was a diff review: re-enter it. The diff is re-derived (the
+	// buffer may have changed at the jump target); diffPending* restore the
+	// review position when the recomputed rows land.
+	next.diffBase = frame.diffBase
+	next.diffPendingCursor, next.diffPendingScroll = frame.diffCursor, frame.diffScrollY
+	next.diffHasPending = true
+	next.diffGen++
+	next.diffLoading = true
+	next.mode = modeDiff
+	return next, next.computeDiffCmd()
 }
 
 // openJumpFile opens a target into a fresh edit session at (cy, cx), keeping

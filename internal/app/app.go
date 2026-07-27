@@ -36,6 +36,7 @@ const (
 	modeExec       // "@exec >" editor-command bar (Ctrl+E from edit mode)
 	modeSearchExec // "@search … >" replace-command bar (Ctrl+E from search mode)
 	modeInspect    // "@inspection >" dashboard (Ctrl+T): store stats + lsp control
+	modeDiff       // read-only git-diff review of the open file ("git diff" in @exec)
 )
 
 // inBarMode reports whether keystrokes are feeding a text-input bar, where
@@ -106,6 +107,26 @@ type Model struct {
 	cursorMem map[string]store.TabCursor // per-tab last cursor, restored on revisit
 
 	edit editor
+
+	// Diff review mode ("git diff [hash]" in the @exec bar): a read-only
+	// unified view of the edit buffer vs a git base. diffRows is the display
+	// model (ctx/add rows index into edit.lines; del rows carry the removed
+	// text); it is computed once per entry by an async computeDiffCmd and
+	// guarded against staleness by diffGen. diffPending* carry a Ctrl+O
+	// restore position, applied when the recomputed diff lands.
+	diffRows          []diffRow
+	diffCursor        int    // index into diffRows
+	diffCx            int    // rune column within the cursor row (Ctrl+J targeting)
+	diffScrollY       int
+	diffBase          string // "" = HEAD; else the user-typed revision
+	diffNewFile       bool   // base has no such path: the whole file is added
+	diffAdds          int
+	diffDels          int
+	diffLoading       bool
+	diffGen           int
+	diffPendingCursor int
+	diffPendingScroll int
+	diffHasPending    bool
 
 	// Undo timeline: snapshot seqs only; content lives in the store.
 	undoSeqs   []int64
@@ -552,6 +573,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case diffReadyMsg:
+		return m.handleDiffReady(msg)
+
 	case grepBatchMsg:
 		return m.handleGrepBatch(msg)
 
@@ -642,6 +666,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleSearchExecKey(msg)
 		case modeInspect:
 			return m.handleInspectKey(msg)
+		case modeDiff:
+			return m.handleDiffKey(msg)
 		}
 	}
 	return m, nil
@@ -662,6 +688,7 @@ func (m Model) handlePaste(text string) (tea.Model, tea.Cmd) {
 	if m.grepOpen {
 		return m.grepPaste(text)
 	}
+	// modeDiff has no case: diff review is read-only, pastes are inert.
 	switch m.mode {
 	case modeQuery:
 		m = m.adoptPreview()
@@ -780,6 +807,7 @@ func (m Model) openFileAt(rel string) Model {
 	m.fileScrollX, m.fileScrollY = 0, 0
 	m.selectedCommand = rel // sidebar keeps tracking the open file
 	m.jumpStack = nil       // a deliberate open starts a fresh navigation trail
+	m = m.clearDiffState()  // and ends any diff review of the file being left
 	_ = m.db.TouchOpened(store.OpenedFile{Path: rel, LastOpenedAt: time.Now().UnixMilli()})
 	if client, ok := m.lsp.ClientFor(f.Path); ok {
 		client.DidOpen(f.Path, f.Content)
@@ -810,9 +838,9 @@ func (m Model) refreshFileHighlights() Model {
 		return m
 	}
 	content := m.openFile.Content
-	// Search modes always sit on top of a live edit session, so the buffer —
-	// not the on-disk snapshot — is the truth there too.
-	if m.mode == modeEdit || m.mode == modeSearch || m.mode == modeSearchExec {
+	// Search and diff-review modes always sit on top of a live edit session,
+	// so the buffer — not the on-disk snapshot — is the truth there too.
+	if m.mode == modeEdit || m.mode == modeSearch || m.mode == modeSearchExec || m.mode == modeDiff {
 		content = m.edit.content()
 	}
 	m.fileLines = view.NormalizeLines(content)

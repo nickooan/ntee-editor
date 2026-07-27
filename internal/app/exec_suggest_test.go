@@ -24,7 +24,9 @@ func TestExecSuggestionsTable(t *testing.T) {
 		{"jump ", []string{"top", "end"}},
 		{"tab ", []string{"cl", "cr", "util.ts", "main.go"}},
 		{"tab m", []string{"main.go"}},
-		{"git ", []string{"scf"}},
+		{"git ", []string{"scf", "diff"}},
+		{"git d", []string{"diff"}},
+		{"git diff ", nil}, // the revision arg stays free-form
 		{"git scf ", nil},       // no conflict blocks in the buffer
 		{"copy all extra", nil}, // past any known argument
 		{"zz", nil},             // unknown prefix

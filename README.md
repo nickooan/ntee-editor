@@ -152,6 +152,7 @@ Editor commands with Tab-completed suggestions:
 | `copy` (`cp`) `[a-b\|all\|fpath]` | copy the selection, a line range, the whole buffer, or the file's path |
 | `jump` (`jp`) `<line\|top\|end>` | go to a line (lands ~30% from the top) |
 | `git scf <head\|branch\|both>` | **s**olve **c**on**f**lict: resolve the git conflict block at the cursor/selection, keeping the named side (or both) — one undo step |
+| `git diff [rev]` | review the file's uncommitted changes (or its diff against `rev`) in a read-only GitHub-style view: added lines green with a `+` gutter marker, removed lines red with `-` (no number). `↑/↓`/`PgUp`/`PgDn` review, `Ctrl+J` jump to definition (`Ctrl+O` returns to the review), `Esc` back to editing at the reviewed line |
 | `tab <name\|cl\|cr>` | switch tab / close-left / close-right |
 
 ### Command bar (`:`)

@@ -87,7 +87,7 @@ func (m Model) runExecCommand(cmd string) (tea.Model, tea.Cmd) {
 	case "jump", "jp":
 		m = m.execJump(arg)
 	case "git":
-		m = m.execGit(arg)
+		return m.execGit(arg)
 	case "cpfp":
 		m = m.execCopyPath(m.openRel)
 	case "cpafp":
@@ -162,21 +162,26 @@ func (m Model) execCopyPath(path string) Model {
 	return m
 }
 
-// execGit dispatches the "git" namespace of editor commands. Today the only
-// subcommand is "scf" (solve conflict); it splits "scf <side>" and delegates.
-// Errors stay in exec mode (no execPrevMode restore) so the user can correct.
-func (m Model) execGit(arg string) Model {
+// execGit dispatches the "git" namespace of editor commands: "scf <side>"
+// (solve conflict, synchronous) and "diff [rev]" (enters the async diff
+// review mode). Errors stay in exec mode (no execPrevMode restore) so the
+// user can correct the input.
+func (m Model) execGit(arg string) (tea.Model, tea.Cmd) {
 	sub, rest, _ := strings.Cut(arg, " ")
 	rest = strings.TrimSpace(rest)
 	switch sub {
 	case "scf":
-		return m.execSolveConflict(rest)
+		return m.execSolveConflict(rest), nil
+	case "diff":
+		// Success switches straight to modeDiff (Esc from the review lands in
+		// edit mode, deliberately bypassing execPrevMode).
+		return m.enterDiff(rest)
 	case "":
-		m.errText = "git needs a subcommand (scf)"
+		m.errText = "git needs a subcommand (scf, diff)"
 	default:
 		m.errText = "unknown git command: " + sub
 	}
-	return m
+	return m, nil
 }
 
 // execSolveConflict resolves the git conflict block(s) touching the current

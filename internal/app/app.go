@@ -24,7 +24,7 @@ import (
 )
 
 // Version is the release version, printed by --version and on the splash.
-const Version = "0.2.0"
+const Version = "0.3.1"
 
 type mode int
 

@@ -108,24 +108,6 @@ const (
 	sideBoth                       // ours then theirs, markers dropped
 )
 
-// matchConflictSide resolves target (case-insensitive) to a side of block b:
-// the ours label, the theirs label, or the keyword "both" (kept last so a
-// branch literally named "both" still wins by label). ok is false when nothing
-// matches.
-func matchConflictSide(b conflictBlock, target string) (side conflictSide, ok bool) {
-	t := strings.ToLower(strings.TrimSpace(target))
-	switch {
-	case t == strings.ToLower(b.oursLabel):
-		return sideOurs, true
-	case t == strings.ToLower(b.theirsLabel):
-		return sideTheirs, true
-	case t == "both":
-		return sideBoth, true
-	default:
-		return 0, false
-	}
-}
-
 // resolveConflicts replaces each block in blocks with its chosen side's content
 // (the diff3 base section is always dropped; sideBoth keeps ours then theirs)
 // and returns the new line slice. Blocks are spliced back-to-front so earlier

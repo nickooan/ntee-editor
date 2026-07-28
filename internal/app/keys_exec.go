@@ -162,16 +162,24 @@ func (m Model) execCopyPath(path string) Model {
 	return m
 }
 
-// execGit dispatches the "git" namespace of editor commands: "scf <side>"
-// (solve conflict, synchronous) and "diff [rev]" (enters the async diff
-// review mode). Errors stay in exec mode (no execPrevMode restore) so the
-// user can correct the input.
+// execGit dispatches the "git" namespace of editor commands: "scf" (enters
+// the interactive conflict-solving mode) and "diff [rev]" (enters the async
+// diff review mode). Errors stay in exec mode (no execPrevMode restore) so
+// the user can correct the input.
 func (m Model) execGit(arg string) (tea.Model, tea.Cmd) {
 	sub, rest, _ := strings.Cut(arg, " ")
 	rest = strings.TrimSpace(rest)
 	switch sub {
 	case "scf":
-		return m.execSolveConflict(rest), nil
+		// The old form took a side argument; reject it loudly so muscle-memory
+		// "git scf head" errors instead of silently doing something new.
+		if rest != "" {
+			m.errText = "git scf takes no argument"
+			return m, nil
+		}
+		// Success switches straight to modeConflict (Esc lands in edit mode,
+		// deliberately bypassing execPrevMode, like "git diff").
+		return m.enterConflict(), nil
 	case "diff":
 		// Success switches straight to modeDiff (Esc from the review lands in
 		// edit mode, deliberately bypassing execPrevMode).
@@ -182,82 +190,6 @@ func (m Model) execGit(arg string) (tea.Model, tea.Cmd) {
 		m.errText = "unknown git command: " + sub
 	}
 	return m, nil
-}
-
-// execSolveConflict resolves the git conflict block(s) touching the current
-// line-wise selection (or the cursor line when nothing is selected), keeping the
-// side whose marker label matches target (case-insensitive, e.g. "head" or a
-// branch name) — or both sides in order for "both" — and deleting the markers
-// and any losing content. The whole resolve is one undoable snapshot. On any
-// error it edits nothing and stays in exec mode.
-func (m Model) execSolveConflict(target string) Model {
-	if target == "" {
-		m.errText = "git scf needs a side (head, a branch name, or both)"
-		return m
-	}
-	blocks := findConflictBlocks(m.edit.lines)
-	if len(blocks) == 0 {
-		m.errText = "no conflict markers in this file"
-		return m
-	}
-
-	// Region: the line-wise selection, else just the cursor line.
-	lo, hi := m.edit.cy, m.edit.cy
-	selecting := m.edit.selLineMode
-	if selecting {
-		lo, hi = m.edit.selLineAnchor, m.edit.cy
-		if lo > hi {
-			lo, hi = hi, lo
-		}
-	}
-
-	var sel []conflictBlock
-	for _, b := range blocks {
-		if b.start > hi || b.end < lo {
-			continue // block does not touch the region
-		}
-		// An explicit selection must cover a block end to end; a selection that
-		// stops short of a marker is almost certainly a mistake, so refuse it
-		// rather than silently resolving lines the user didn't select.
-		if selecting && (b.start < lo || b.end > hi) {
-			m.errText = "conflict block not fully selected — include <<<<<<< through >>>>>>>"
-			return m
-		}
-		sel = append(sel, b)
-	}
-	if len(sel) == 0 {
-		m.errText = "no conflict block in selection"
-		return m
-	}
-
-	// Validate the target against every intersecting block before touching the
-	// buffer, so a bad label leaves it untouched (no partial resolve).
-	sides := make([]conflictSide, len(sel))
-	for i, b := range sel {
-		side, ok := matchConflictSide(b, target)
-		if !ok {
-			m.errText = "git scf: '" + target + "' matches neither side (" +
-				b.oursLabel + " | " + b.theirsLabel + " | both)"
-			return m
-		}
-		sides[i] = side
-	}
-
-	m = m.flushBurst() // checkpoint pending typing as the undo pre-state
-	newLines := resolveConflicts(m.edit.lines, sel, sides)
-	m.edit.lines = newLines
-	m.edit.cy = input.Clamp(sel[0].start, 0, len(newLines)-1)
-	m.edit.cx = 0
-	m.edit.clearSelection()
-	m.edit.clampCursor()
-	m.edit.dirty = true
-	m.edit.rev++ // buffer changed: force a highlight rescan (see edit.go)
-	m.snapDirty = true
-	m = m.pushSnapshot("edit") // the resolve is one undoable step
-	m = m.refreshFileHighlights()
-	m.notice = "resolved " + strconv.Itoa(len(sel)) + " conflict(s) → " + target
-	m.mode = m.execPrevMode
-	return m
 }
 
 // execJump moves the cursor to a target line and scrolls it ~30% from the top

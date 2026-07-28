@@ -2,7 +2,6 @@ package app
 
 import (
 	"reflect"
-	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -26,8 +25,8 @@ func TestExecSuggestionsTable(t *testing.T) {
 		{"tab m", []string{"main.go"}},
 		{"git ", []string{"scf", "diff"}},
 		{"git d", []string{"diff"}},
-		{"git diff ", nil}, // the revision arg stays free-form
-		{"git scf ", nil},       // no conflict blocks in the buffer
+		{"git diff ", nil},      // the revision arg stays free-form
+		{"git scf ", nil},       // scf takes no argument
 		{"copy all extra", nil}, // past any known argument
 		{"zz", nil},             // unknown prefix
 	}
@@ -38,37 +37,8 @@ func TestExecSuggestionsTable(t *testing.T) {
 	}
 }
 
-func TestExecSuggestionsConflictLabels(t *testing.T) {
-	m, _ := newTestModel(t, nil)
-	m.edit = newEditor(strings.Join([]string{
-		"<<<<<<< HEAD",
-		"a",
-		"=======",
-		"b",
-		">>>>>>> feature/login",
-		"x",
-		"<<<<<<< HEAD", // duplicate label across blocks must dedup
-		"c",
-		"=======",
-		"d",
-		">>>>>>> other/branch",
-	}, "\n"))
-
-	want := []string{"HEAD", "feature/login", "other/branch", "both"}
-	if got := m.execSuggestions("git scf "); !reflect.DeepEqual(got, want) {
-		t.Fatalf("labels = %v, want %v", got, want)
-	}
-	// Case-insensitive prefix filter.
-	if got := m.execSuggestions("git scf h"); !reflect.DeepEqual(got, []string{"HEAD"}) {
-		t.Fatalf("prefix h = %v", got)
-	}
-	if got := m.execSuggestions("git scf bo"); !reflect.DeepEqual(got, []string{"both"}) {
-		t.Fatalf("prefix bo = %v", got)
-	}
-}
-
-// Tab chains token completions: g<Tab> → "git ", s<Tab> → "git scf ", then a
-// label pick + Enter resolves the conflict.
+// Tab chains token completions: g<Tab> → "git ", s<Tab> → "git scf ", then
+// Enter opens the conflict-solving mode.
 func TestExecTabCompletionChain(t *testing.T) {
 	m := conflictFixture(t, 2)
 	m = key(m, ctrlKey('e'))
@@ -83,17 +53,9 @@ func TestExecTabCompletionChain(t *testing.T) {
 	if m.execInput != "git scf " {
 		t.Fatalf("after s<Tab>: %q", m.execInput)
 	}
-	// First candidate is the ours label (HEAD in the fixture).
-	m = key(m, keyPress(tea.KeyTab))
-	if m.execInput != "git scf HEAD " {
-		t.Fatalf("after label<Tab>: %q", m.execInput)
-	}
 	m = key(m, keyPress(tea.KeyEnter))
-	if m.mode != modeEdit {
-		t.Fatalf("resolve should land in edit mode, got %v (err=%q)", m.mode, m.errText)
-	}
-	if got := m.edit.content(); strings.Contains(got, "<<<<<<<") || !strings.Contains(got, `"prod"`) {
-		t.Fatalf("conflict should resolve to ours: %q", got)
+	if m.mode != modeConflict {
+		t.Fatalf("git scf should enter conflict mode, got %v (err=%q)", m.mode, m.errText)
 	}
 }
 

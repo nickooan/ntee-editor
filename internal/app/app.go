@@ -37,6 +37,7 @@ const (
 	modeSearchExec // "@search … >" replace-command bar (Ctrl+E from search mode)
 	modeInspect    // "@inspection >" dashboard (Ctrl+T): store stats + lsp control
 	modeDiff       // read-only git-diff review of the open file ("git diff" in @exec)
+	modeConflict   // interactive conflict resolution over the live buffer ("git scf" in @exec)
 )
 
 // inBarMode reports whether keystrokes are feeding a text-input bar, where
@@ -115,8 +116,8 @@ type Model struct {
 	// guarded against staleness by diffGen. diffPending* carry a Ctrl+O
 	// restore position, applied when the recomputed diff lands.
 	diffRows          []diffRow
-	diffCursor        int    // index into diffRows
-	diffCx            int    // rune column within the cursor row (Ctrl+J targeting)
+	diffCursor        int // index into diffRows
+	diffCx            int // rune column within the cursor row (Ctrl+J targeting)
 	diffScrollY       int
 	diffBase          string // "" = HEAD; else the user-typed revision
 	diffNewFile       bool   // base has no such path: the whole file is added
@@ -127,6 +128,14 @@ type Model struct {
 	diffPendingCursor int
 	diffPendingScroll int
 	diffHasPending    bool
+
+	// Conflict-solving mode ("git scf" in the @exec bar): browses and mutates
+	// the LIVE edit buffer, so cursor and scroll are the edit session's own
+	// (m.edit.cy/cx, m.fileScrollY) — Esc needs no position mapping.
+	// conflictBlocks is re-parsed from the buffer after every apply.
+	conflictBlocks    []conflictBlock
+	conflictChoice    int // popup option: 0 ours, 1 theirs, 2 both
+	conflictChoiceIdx int // block index the choice belongs to; -1 = none
 
 	// Undo timeline: snapshot seqs only; content lives in the store.
 	undoSeqs   []int64
@@ -668,6 +677,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleInspectKey(msg)
 		case modeDiff:
 			return m.handleDiffKey(msg)
+		case modeConflict:
+			return m.handleConflictKey(msg)
 		}
 	}
 	return m, nil
@@ -688,7 +699,8 @@ func (m Model) handlePaste(text string) (tea.Model, tea.Cmd) {
 	if m.grepOpen {
 		return m.grepPaste(text)
 	}
-	// modeDiff has no case: diff review is read-only, pastes are inert.
+	// modeDiff and modeConflict have no case: both are read-only to typing
+	// (conflict mode edits only through Enter on a marker), so pastes are inert.
 	switch m.mode {
 	case modeQuery:
 		m = m.adoptPreview()
@@ -805,9 +817,10 @@ func (m Model) openFileAt(rel string) Model {
 	m.openFile = &f
 	m.openRel = rel
 	m.fileScrollX, m.fileScrollY = 0, 0
-	m.selectedCommand = rel // sidebar keeps tracking the open file
-	m.jumpStack = nil       // a deliberate open starts a fresh navigation trail
-	m = m.clearDiffState()  // and ends any diff review of the file being left
+	m.selectedCommand = rel    // sidebar keeps tracking the open file
+	m.jumpStack = nil          // a deliberate open starts a fresh navigation trail
+	m = m.clearDiffState()     // and ends any diff review of the file being left
+	m = m.clearConflictState() // likewise any conflict-solving session
 	_ = m.db.TouchOpened(store.OpenedFile{Path: rel, LastOpenedAt: time.Now().UnixMilli()})
 	if client, ok := m.lsp.ClientFor(f.Path); ok {
 		client.DidOpen(f.Path, f.Content)
@@ -838,9 +851,11 @@ func (m Model) refreshFileHighlights() Model {
 		return m
 	}
 	content := m.openFile.Content
-	// Search and diff-review modes always sit on top of a live edit session,
-	// so the buffer — not the on-disk snapshot — is the truth there too.
-	if m.mode == modeEdit || m.mode == modeSearch || m.mode == modeSearchExec || m.mode == modeDiff {
+	// Search, diff-review, and conflict-solving modes always sit on top of a
+	// live edit session, so the buffer — not the on-disk snapshot — is the
+	// truth there too (conflict mode even mutates it in place).
+	if m.mode == modeEdit || m.mode == modeSearch || m.mode == modeSearchExec ||
+		m.mode == modeDiff || m.mode == modeConflict {
 		content = m.edit.content()
 	}
 	m.fileLines = view.NormalizeLines(content)

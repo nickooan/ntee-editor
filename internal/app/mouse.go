@@ -96,6 +96,12 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				}
 				return next, nil
 			}
+			if m.mode == modeConflict {
+				// Plain cursor placement only (no Ctrl+click jump): the click
+				// math is edit mode's, plus a popup realign for the new line.
+				next, _ := m.handleEditClick(mo.X, mo.Y)
+				return next.syncConflictChoice(), nil
+			}
 			next, hit := m.handleEditClick(mo.X, mo.Y)
 			if hit && ctrl {
 				return next.jumpToReference() // Ctrl+click = jump to definition
@@ -122,7 +128,7 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 // clicking the top visible line pages up (that line re-renders at the bottom)
 // and clicking the bottom visible line pages down (it re-renders at the top).
 func (m Model) handleEditClick(x, y int) (Model, bool) {
-	if m.mode != modeEdit || m.openFile == nil {
+	if (m.mode != modeEdit && m.mode != modeConflict) || m.openFile == nil {
 		return m, false
 	}
 	line, col, ok := m.editClickTarget(x, y)
@@ -230,6 +236,8 @@ func (m Model) wheelScroll(dir int) Model {
 		return m.moveEditCursor(0, dir*wheelScrollLines)
 	case m.mode == modeDiff && m.openFile != nil:
 		return m.moveDiffCursor(dir * wheelScrollLines)
+	case m.mode == modeConflict && m.openFile != nil:
+		return m.moveConflictCursor(0, dir*wheelScrollLines)
 	case (m.mode == modeQuery || m.mode == modeCommand) && m.openFile != nil:
 		m.fileScrollY = input.Clamp(m.fileScrollY+dir*wheelScrollLines, 0, max(0, len(m.fileLines)-1))
 	}

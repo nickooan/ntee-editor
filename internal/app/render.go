@@ -77,6 +77,8 @@ func (m Model) render() string {
 		mainBody = m.renderQueryMain(mainWidth-4, innerH)
 	case m.mode == modeDiff:
 		mainBody = m.renderDiff(mainWidth-4, innerH)
+	case m.mode == modeConflict:
+		mainBody = m.renderConflict(mainWidth-4, innerH)
 	case m.openFile != nil:
 		mainBody = m.renderFile(mainWidth-4, innerH)
 	default:
@@ -162,6 +164,8 @@ func (m Model) renderStatusLine() string {
 			statusTextStyle.Render("   ") + hintStyle.Render("jump <line|top|end> · tab <name|cl|cr> · revert")
 	case modeDiff:
 		return m.renderDiffStatus()
+	case modeConflict:
+		return m.renderConflictStatus()
 	case modeInspect:
 		bar := execPromptStyle.Render("@inspection >") +
 			renderInputLineStyled(m.inspectInput, m.inspectCursor, execTextStyle) +
@@ -300,7 +304,7 @@ func (m Model) renderSidebar(width, height int) string {
 // static usage hint.
 func (m Model) renderExecSugs() string {
 	if len(m.execSugs) == 0 {
-		return execHintStyle.Render("copy [a-b|all|fpath] · jump <line|top|end> · tab <name|cl|cr> · git scf <side> · git diff [rev] · Esc cancel")
+		return execHintStyle.Render("copy [a-b|all|fpath] · jump <line|top|end> · tab <name|cl|cr> · git scf · git diff [rev] · Esc cancel")
 	}
 	const maxShown = 6
 	sel := input.Clamp(m.execSugIndex, 0, len(m.execSugs)-1)
@@ -1020,16 +1024,17 @@ func colorFor(name string) color.Color {
 // Background hexes that thread through segStyleWithBg — string form so they
 // can key the segStyles memo map.
 const (
-	hexBg        = "#282828" // editor background
-	hexDiffAddBg = "#32361a" // diff review: added line (desaturated dark green)
-	hexDiffDelBg = "#3c2422" // diff review: removed line (desaturated dark red)
+	hexBg           = "#282828" // editor background
+	hexDiffAddBg    = "#32361a" // diff review: added line (desaturated dark green)
+	hexDiffDelBg    = "#3c2422" // diff review: removed line (desaturated dark red)
+	hexConflictInBg = "#1d3040" // conflict solving: incoming/theirs side (desaturated dark blue)
 )
 
 // Gruvbox-dark palette (matches the default grammar style). Every emitted
 // run carries its own background — wrapping already-styled strings would
 // break on their inner ANSI resets.
 var (
-	colBg        = lipgloss.Color(hexBg) // editor background
+	colBg        = lipgloss.Color(hexBg)     // editor background
 	colBgChrome  = lipgloss.Color("#1d2021") // header / status chrome (bg0_h)
 	colFg        = lipgloss.Color("#ebdbb2") // cream foreground
 	colLineHl    = lipgloss.Color("#3c3836") // cursor-line highlight (bg1)
@@ -1082,6 +1087,17 @@ var (
 	// slot the diagnostics gutter uses for its ● badge.
 	diffMarkAddStyle = lipgloss.NewStyle().Foreground(colGreen).Bold(true).Background(colDiffAddBg)
 	diffMarkDelStyle = lipgloss.NewStyle().Foreground(colRed).Bold(true).Background(colDiffDelBg)
+
+	// Conflict-solving mode: ours reuses the diff green ("current"), theirs
+	// gets a blue tint ("incoming" — red would read as removed), the diff3
+	// base section renders gray (it is always discarded), and the marker lines
+	// pop in bold yellow — they are the interactive anchors for the popup.
+	colConflictInBg         = lipgloss.Color(hexConflictInBg)
+	conflictGutterInStyle   = lipgloss.NewStyle().Foreground(colGutter).Background(colConflictInBg)
+	conflictInTextStyle     = lipgloss.NewStyle().Foreground(colFg).Background(colConflictInBg)
+	conflictBaseTextStyle   = lipgloss.NewStyle().Foreground(colComment).Background(colBg)
+	conflictMarkerStyle     = lipgloss.NewStyle().Foreground(colYellow).Bold(true).Background(colLineHl)
+	conflictGutterMarkStyle = lipgloss.NewStyle().Foreground(colGutter).Background(colLineHl)
 
 	cursorLineStyle    = lipgloss.NewStyle().Foreground(colFg).Background(colLineHl)
 	selectedEntryStyle = lipgloss.NewStyle().Foreground(colFg).Background(colSelection)

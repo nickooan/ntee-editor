@@ -11,9 +11,8 @@ var execVerbs = []string{"copy", "cp", "cpfp", "cpafp", "jump", "jp", "tab", "gi
 // execSuggestions returns completion candidates for the bar input's trailing
 // token (the text after the last space; an empty trailing token offers every
 // option for that position). Static verbs and args come from a fixed table;
-// `tab` also offers the open tabs' base names, and `git scf` offers the
-// conflict labels actually present in the buffer plus "both". Candidates are
-// prefix-filtered against the token, case-insensitively.
+// `tab` also offers the open tabs' base names. Candidates are prefix-filtered
+// against the token, case-insensitively.
 func (m Model) execSuggestions(input string) []string {
 	// Leading spaces carry no meaning; trailing ones do (they start a new token).
 	input = strings.TrimLeft(input, " ")
@@ -30,9 +29,7 @@ func (m Model) execSuggestions(input string) []string {
 	case prev == "tab":
 		cands = append([]string{"cl", "cr"}, tabBaseNames(m.tabs)...)
 	case prev == "git":
-		cands = []string{"scf", "diff"} // diff's revision arg stays free-form
-	case prev == "git scf":
-		cands = m.conflictSideCandidates()
+		cands = []string{"scf", "diff"} // scf takes no argument; diff's revision stays free-form
 	default:
 		return nil // position past any known argument
 	}
@@ -71,33 +68,9 @@ func tabBaseNames(tabs []string) []string {
 	return out
 }
 
-// conflictSideCandidates lists the marker labels of every conflict block in
-// the current buffer (deduped, encounter order) plus "both" — the exact
-// targets `git scf` accepts. Empty when the buffer has no conflict blocks:
-// there is nothing valid to suggest.
-func (m Model) conflictSideCandidates() []string {
-	blocks := findConflictBlocks(m.edit.lines)
-	if len(blocks) == 0 {
-		return nil
-	}
-	seen := map[string]bool{}
-	var out []string
-	add := func(label string) {
-		if label != "" && !seen[label] {
-			seen[label] = true
-			out = append(out, label)
-		}
-	}
-	for _, b := range blocks {
-		add(b.oursLabel)
-		add(b.theirsLabel)
-	}
-	return append(out, "both")
-}
-
 // acceptExecSuggestion replaces the input's trailing token with s plus a
 // trailing space (harmless — runExecCommand trims — and it chains multi-token
-// completions like git<Tab>scf<Tab>).
+// completions like git<Tab>diff<Tab>).
 func acceptExecSuggestion(input, s string) string {
 	if i := strings.LastIndex(input, " "); i != -1 {
 		return input[:i+1] + s + " "

@@ -36,6 +36,6 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Optional: a PAT with write access to nickooan/homebrew-tap.
-          # Absent, the Homebrew cask upload is skipped (see .goreleaser.yaml).
+          # A PAT with Contents read/write on nickooan/homebrew-tap, used by
+          # GoReleaser to push the cask (see .goreleaser.yaml).
           TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}

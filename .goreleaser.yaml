@@ -3,8 +3,8 @@
 # Triggered by the release workflow on every v* tag: cross-compiles both mac
 # architectures from a Linux runner (pure Go, CGO off), fuses them into one
 # universal binary, publishes the archives + checksums to a GitHub Release,
-# and — once a TAP_GITHUB_TOKEN secret exists — pushes a Homebrew cask to
-# nickooan/homebrew-tap.
+# and pushes a Homebrew cask to nickooan/homebrew-tap (authenticated by the
+# TAP_GITHUB_TOKEN Actions secret).
 version: 2
 
 project_name: ntee
@@ -52,12 +52,11 @@ homebrew_casks:
     repository:
       owner: nickooan
       name: homebrew-tap
-      token: "{{ envOrDefault \"TAP_GITHUB_TOKEN\" \"\" }}"
+      # A PAT with Contents read/write on homebrew-tap (the TAP_GITHUB_TOKEN
+      # Actions secret). The release fails here if it is missing or expired.
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
     homepage: https://github.com/nickooan/ntee-editor
     description: Terminal text editor with LSP, git diff review, and conflict solving
-    # Publishing to the tap needs a PAT with write access to homebrew-tap;
-    # until that secret is configured the cask step skips instead of failing.
-    skip_upload: '{{ if eq (envOrDefault "TAP_GITHUB_TOKEN" "") "" }}true{{ else }}false{{ end }}'
     # The binary is unsigned (no Apple Developer membership): strip the
     # quarantine flag Homebrew Cask applies on download, so Gatekeeper
     # doesn't block the first launch.

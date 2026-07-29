@@ -1,0 +1,69 @@
+# GoReleaser v2 — release automation for ntee-editor.
+#
+# Triggered by the release workflow on every v* tag: cross-compiles both mac
+# architectures from a Linux runner (pure Go, CGO off), fuses them into one
+# universal binary, publishes the archives + checksums to a GitHub Release,
+# and — once a TAP_GITHUB_TOKEN secret exists — pushes a Homebrew cask to
+# nickooan/homebrew-tap.
+version: 2
+
+project_name: ntee
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - main: ./cmd/ntee
+    binary: ntee
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/nickooan/ntee-editor/internal/app.Version={{ .Version }}
+
+# One fat binary per release instead of separate Intel/Apple Silicon
+# downloads — users never have to know their CPU type.
+universal_binaries:
+  - replace: true
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs"
+      - "^test"
+      - "^chore"
+
+homebrew_casks:
+  - name: ntee
+    repository:
+      owner: nickooan
+      name: homebrew-tap
+      token: "{{ envOrDefault \"TAP_GITHUB_TOKEN\" \"\" }}"
+    homepage: https://github.com/nickooan/ntee-editor
+    description: Terminal text editor with LSP, git diff review, and conflict solving
+    # Publishing to the tap needs a PAT with write access to homebrew-tap;
+    # until that secret is configured the cask step skips instead of failing.
+    skip_upload: '{{ if eq (envOrDefault "TAP_GITHUB_TOKEN" "") "" }}true{{ else }}false{{ end }}'
+    # The binary is unsigned (no Apple Developer membership): strip the
+    # quarantine flag Homebrew Cask applies on download, so Gatekeeper
+    # doesn't block the first launch.
+    hooks:
+      post:
+        install: |
+          if system_command("/usr/bin/xattr", args: ["-h"]).exit_status == 0
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/ntee"]
+          end

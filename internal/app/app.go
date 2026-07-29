@@ -24,7 +24,10 @@ import (
 )
 
 // Version is the release version, printed by --version and on the splash.
-const Version = "0.3.1"
+// Release builds inject the git tag via
+// -ldflags "-X github.com/nickooan/ntee-editor/internal/app.Version=…";
+// "dev" marks a plain `go build` / `go install`.
+var Version = "dev"
 
 type mode int
 

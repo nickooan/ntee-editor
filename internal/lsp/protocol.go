@@ -71,15 +71,22 @@ type completionParams struct {
 	Position     Position               `json:"position"`
 }
 
+// CompletionLabelDetails mirrors LSP 3.17 completionItem.labelDetails.
+type CompletionLabelDetails struct {
+	Detail      string `json:"detail"`      // signature suffix, e.g. "(s []T, e ...T)"
+	Description string `json:"description"` // origin, e.g. the import path
+}
+
 // CompletionItem is the subset of an LSP completion candidate the editor uses.
 // InsertText falls back to Label when empty; FilterText falls back to Label.
 type CompletionItem struct {
-	Label      string `json:"label"`
-	Kind       int    `json:"kind"`
-	Detail     string `json:"detail"`
-	InsertText string `json:"insertText"`
-	SortText   string `json:"sortText"`
-	FilterText string `json:"filterText"`
+	Label        string                  `json:"label"`
+	Kind         int                     `json:"kind"`
+	Detail       string                  `json:"detail"`
+	InsertText   string                  `json:"insertText"`
+	SortText     string                  `json:"sortText"`
+	FilterText   string                  `json:"filterText"`
+	LabelDetails *CompletionLabelDetails `json:"labelDetails,omitempty"`
 }
 
 type completionList struct {
@@ -148,7 +155,11 @@ var clientCapabilities = map[string]any{
 		"publishDiagnostics": map[string]any{},
 		"definition":         map[string]any{},
 		"references":         map[string]any{},
-		"completion":         map[string]any{},
+		// labelDetailsSupport makes servers (gopls et al.) attach the
+		// signature suffix and origin package to each candidate.
+		"completion": map[string]any{
+			"completionItem": map[string]any{"labelDetailsSupport": true},
+		},
 	},
 	"workspace": map[string]any{
 		"configuration":    true,

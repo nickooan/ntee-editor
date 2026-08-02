@@ -2,6 +2,7 @@ package app
 
 import (
 	"errors"
+	"slices"
 	"sort"
 	"strings"
 
@@ -10,16 +11,23 @@ import (
 	"github.com/nickooan/ntee-editor/internal/config"
 	"github.com/nickooan/ntee-editor/internal/input"
 	"github.com/nickooan/ntee-editor/internal/store"
+	"github.com/nickooan/ntee-editor/internal/syntax"
 )
 
 // inspectMenuItems are the left-pane rows of the inspection dashboard, in
 // display order. inspectMenu indexes into this list.
-var inspectMenuItems = []string{"ntee-db", "lsp"}
+var inspectMenuItems = []string{"ntee-db", "lsp", "system"}
 
 const (
 	inspectMenuDB = iota
 	inspectMenuLSP
+	inspectMenuSystem
 )
+
+// syntaxStyles is the curated set of chroma styles offered by `syscolor`.
+// syntax.SetStyle silently falls back to gruvbox for unknown names, so
+// validation happens here, against this list.
+var syntaxStyles = []string{"gruvbox", "monokai", "dracula", "nord", "solarized-dark", "github-dark"}
 
 type inspectStatsMsg struct {
 	info store.DBInfo
@@ -97,9 +105,9 @@ func (m Model) handleInspectKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// runInspectCommand dispatches "db compact|relieve" and
-// "lsp enable|disable <lang|all>". On error it stays in the bar so the user
-// can correct the input.
+// runInspectCommand dispatches "db compact|relieve",
+// "lsp enable|disable <lang|all>", and "syscolor <style>". On error it stays
+// in the bar so the user can correct the input.
 func (m Model) runInspectCommand(cmd string) (tea.Model, tea.Cmd) {
 	ns, rest, _ := strings.Cut(cmd, " ")
 	rest = strings.TrimSpace(rest)
@@ -110,6 +118,8 @@ func (m Model) runInspectCommand(cmd string) (tea.Model, tea.Cmd) {
 		return m.inspectDBCommand(rest)
 	case "lsp":
 		return m.inspectLSPCommand(rest)
+	case "syscolor":
+		return m.inspectSyscolorCommand(rest)
 	default:
 		m.errText = "unknown command: " + ns
 		return m, nil
@@ -202,5 +212,28 @@ func (m Model) inspectLSPCommand(rest string) (tea.Model, tea.Cmd) {
 	}
 	m.inspectMenu = inspectMenuLSP
 	m.inspectInput, m.inspectCursor = "", 0
+	return m, nil
+}
+
+// inspectSyscolorCommand validates, persists, and live-applies a syntax color
+// style (same persist-first order as the lsp command).
+func (m Model) inspectSyscolorCommand(name string) (tea.Model, tea.Cmd) {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if !slices.Contains(syntaxStyles, name) {
+		m.errText = "usage: syscolor <" + strings.Join(syntaxStyles, "|") + ">"
+		return m, nil
+	}
+	if _, err := config.SetThemeSyntax(name); err != nil {
+		m.errText = "config write failed: " + err.Error()
+		return m, nil
+	}
+	syntax.SetStyle(name) // also resets the syntax package's entry cache
+	// Theme is an unshared value field — safe to mutate, unlike the Languages
+	// map (see inspectLSPCommand).
+	m.cfg.Theme.Syntax = name
+	m = m.invalidateHighlightCaches()
+	m.inspectMenu = inspectMenuSystem
+	m.inspectInput, m.inspectCursor = "", 0
+	m.notice = "syntax style: " + name + " (config updated)"
 	return m, nil
 }

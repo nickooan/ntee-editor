@@ -126,6 +126,24 @@ func (m Model) filterCompletions() Model {
 	return m
 }
 
+// completionDetail is the dimmed signature column: labelDetails.detail wins,
+// else the legacy Detail field (gopls puts the type/signature there).
+func completionDetail(it lsp.CompletionItem) string {
+	if it.LabelDetails != nil && it.LabelDetails.Detail != "" {
+		return it.LabelDetails.Detail
+	}
+	return it.Detail
+}
+
+// completionOrigin is the right-aligned origin column: the candidate's package
+// or import path (labelDetails.description).
+func completionOrigin(it lsp.CompletionItem) string {
+	if it.LabelDetails == nil {
+		return ""
+	}
+	return it.LabelDetails.Description
+}
+
 func completionSortKey(it lsp.CompletionItem) string {
 	if it.SortText != "" {
 		return it.SortText
@@ -145,6 +163,8 @@ func (m Model) acceptCompletion() Model {
 	if text == "" {
 		text = it.Label
 	}
+	itCopy := it
+	m.sigLastAccepted = &itCopy // a "(" typed next still pins this item
 	start := identStart(m.edit.line(), m.edit.cx)
 	// Select the partial word so insert() replaces it (insert deletes the
 	// selection first).
@@ -193,6 +213,12 @@ func (m Model) afterEditType(typed string) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	default:
+		switch typed {
+		case "(":
+			m = m.pinSignatureOnParen()
+		case ")":
+			m = m.sigCloseParen()
+		}
 		// Non-identifier char ends the word: drop the popup and its suppression.
 		m.completionOpen = false
 		m.completionDismissed = false
@@ -214,11 +240,134 @@ func (m Model) afterEditBackspace() (tea.Model, tea.Cmd) {
 	return m.filterCompletions(), nil
 }
 
-// closeCompletion clears popup state (used when leaving edit mode / opening an
-// overlay).
-func (m Model) closeCompletion() Model {
+// dismissPopup clears the dropdown alone (any non-typing key while it is
+// open); the signature pin survives — arrowing around the argument list must
+// not lose it.
+func (m Model) dismissPopup() Model {
 	m.completionOpen = false
 	m.completionPending = false
 	m.completionDismissed = false
+	return m
+}
+
+// closeCompletion clears popup state AND the signature pin (used when leaving
+// edit mode / opening an overlay).
+func (m Model) closeCompletion() Model {
+	return m.dismissPopup().sigUnpin()
+}
+
+// sigUnpin clears all pin state, including the accepted-item memory.
+func (m Model) sigUnpin() Model {
+	m.sigPinned = nil
+	m.sigDepth = 0
+	m.sigLine, m.sigCol, m.sigAnchor = 0, 0, 0
+	m.sigLastAccepted = nil
+	return m
+}
+
+// completionMatchesWord reports whether the typed word is this candidate:
+// its label, or its insert text (which is what accept actually wrote).
+func completionMatchesWord(it lsp.CompletionItem, word string) bool {
+	return it.Label == word || (it.InsertText != "" && it.InsertText == word)
+}
+
+// pinSignatureOnParen runs after a "(" was inserted (the cursor sits just past
+// it). An existing pin only deepens (a nested call); otherwise the word before
+// the paren is matched against the popup's candidates — selected row first,
+// then the filtered list, the raw list, and finally the just-accepted item —
+// and a match pins that function's signature row.
+func (m Model) pinSignatureOnParen() Model {
+	if m.sigPinned != nil {
+		m.sigDepth++
+		return m
+	}
+	line := m.edit.line()
+	parenCol := m.edit.cx - 1 // the "(" itself
+	if parenCol < 0 || parenCol > len(line) {
+		return m
+	}
+	start := identStart(line, parenCol)
+	if start == parenCol {
+		return m // no word before the paren (e.g. "if (")
+	}
+	word := string(line[start:parenCol])
+
+	var pick *lsp.CompletionItem
+	if m.completionOpen && len(m.completionItems) > 0 {
+		sel := m.completionItems[input.Clamp(m.completionIndex, 0, len(m.completionItems)-1)]
+		if completionMatchesWord(sel, word) {
+			pick = &sel
+		}
+	}
+	if pick == nil && m.completionOpen {
+		for _, it := range m.completionItems {
+			if completionMatchesWord(it, word) {
+				pick = &it
+				break
+			}
+		}
+		if pick == nil {
+			for _, it := range m.completionAll {
+				if completionMatchesWord(it, word) {
+					pick = &it
+					break
+				}
+			}
+		}
+	}
+	if pick == nil && m.sigLastAccepted != nil && completionMatchesWord(*m.sigLastAccepted, word) {
+		pick = m.sigLastAccepted
+	}
+	if pick == nil {
+		return m
+	}
+	it := *pick
+	m.sigPinned = &it
+	m.sigDepth = 1
+	m.sigLine, m.sigCol, m.sigAnchor = m.edit.cy, parenCol, start
+	return m
+}
+
+// sigCloseParen handles a typed ")": the pin drops when the depth unwinds.
+func (m Model) sigCloseParen() Model {
+	if m.sigPinned == nil {
+		return m
+	}
+	if m.sigDepth--; m.sigDepth <= 0 {
+		return m.sigUnpin()
+	}
+	return m
+}
+
+// sigAfterBackspace adjusts the pin after a delete: a selection delete or a
+// line join unpins outright; removing a "(" or ")" rebalances the depth; and
+// a delete that lands the cursor at or before the pinned "(" unpins.
+func (m Model) sigAfterBackspace(deleted rune, hadSel, joined bool) Model {
+	if m.sigPinned == nil {
+		return m
+	}
+	if hadSel || joined {
+		return m.sigUnpin()
+	}
+	switch deleted {
+	case '(':
+		if m.sigDepth--; m.sigDepth <= 0 {
+			return m.sigUnpin()
+		}
+	case ')':
+		m.sigDepth++
+	}
+	return m.sigCheckCursor()
+}
+
+// sigCheckCursor unpins when the cursor left the pinned call: a different
+// line, or walking back to (or past) the opening "(".
+func (m Model) sigCheckCursor() Model {
+	if m.sigPinned == nil {
+		return m
+	}
+	if m.edit.cy != m.sigLine || m.edit.cx <= m.sigCol {
+		return m.sigUnpin()
+	}
 	return m
 }

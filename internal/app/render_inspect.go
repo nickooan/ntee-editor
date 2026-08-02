@@ -29,9 +29,30 @@ func (m Model) renderInspectMain(width, height int) string {
 	switch m.inspectMenu {
 	case inspectMenuLSP:
 		return m.renderInspectLSP(width)
+	case inspectMenuSystem:
+		return m.renderInspectSystem(width)
 	default:
 		return m.renderInspectDB(width)
 	}
+}
+
+func (m Model) renderInspectSystem(width int) string {
+	title := dirStyle.Render(truncateRunes("system", width))
+	const labelW = len("color style") + 2
+	row := func(label, value string) string {
+		return baseStyle.Render(padTo(label, labelW) + value)
+	}
+	rows := []string{
+		title,
+		"",
+		row("version", versionTag()),
+		row("color style", m.cfg.Theme.Syntax),
+		"",
+		row("available", strings.Join(syntaxStyles, ", ")),
+		"",
+		hintStyle.Render(truncateRunes("syscolor <name> switches the grammar colors (chrome stays gruvbox)", width)),
+	}
+	return strings.Join(rows, "\n")
 }
 
 func (m Model) renderInspectDB(width int) string {

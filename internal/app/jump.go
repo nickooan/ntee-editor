@@ -499,6 +499,7 @@ func (m Model) jumpToLocation(rel string, line, utf16Col int) Model {
 		m.edit.cy = input.Clamp(line, 0, len(m.edit.lines)-1)
 		m.edit.cx = lsp.RuneCol(m.edit.lines[m.edit.cy], utf16Col)
 		m.edit.clampCursor()
+		m = m.sigCheckCursor()
 		return m.anchorCursorLine()
 	}
 
@@ -565,6 +566,7 @@ func (m Model) openJumpFile(rel string, cy, cx, scrollY int) (Model, bool) {
 	}
 	m = m.recordCursor()
 	m = m.stashDraftIfDirty()
+	m = m.sigUnpin() // the pin belongs to the buffer being left
 	m.openFile = &f
 	m.openRel = rel
 	m.selectedCommand = rel

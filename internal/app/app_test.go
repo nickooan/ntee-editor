@@ -9,6 +9,7 @@ import (
 	"unicode"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/nickooan/ntee-editor/internal/config"
 	"github.com/nickooan/ntee-editor/internal/store"
@@ -286,6 +287,24 @@ func TestEscFromEditReturnsToQuery(t *testing.T) {
 	}
 	if m.openFile == nil || m.fileLines == nil {
 		t.Fatal("the pane should keep showing the file")
+	}
+}
+
+func TestHeaderShowsVersion(t *testing.T) {
+	m, _ := newTestModel(t, nil)
+	frame := ansi.Strip(m.render())
+	firstLine, _, _ := strings.Cut(frame, "\n")
+	if !strings.Contains(firstLine, "ntee-editor dev") {
+		t.Fatalf("dev header missing the version tag: %q", firstLine)
+	}
+
+	prev := Version
+	t.Cleanup(func() { Version = prev })
+	Version = "1.2.3"
+	frame = ansi.Strip(m.render())
+	firstLine, _, _ = strings.Cut(frame, "\n")
+	if !strings.Contains(firstLine, "ntee-editor v1.2.3") {
+		t.Fatalf("release header missing v-prefixed version: %q", firstLine)
 	}
 }
 

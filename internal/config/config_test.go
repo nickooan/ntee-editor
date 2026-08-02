@@ -245,3 +245,35 @@ func TestSetLanguagesEnabledAll(t *testing.T) {
 		t.Fatal("'all' should re-enable global lsp.enabled")
 	}
 }
+
+func TestSetThemeSyntax(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	// Fresh file: seeded from defaults so lsp.enabled survives.
+	path, err := SetThemeSyntax("dracula")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != filepath.Join(dir, "ntee-editor", "config.yaml") {
+		t.Fatalf("path = %q", path)
+	}
+	out := Load(t.TempDir())
+	if out.Theme.Syntax != "dracula" {
+		t.Fatalf("theme.syntax = %q", out.Theme.Syntax)
+	}
+	if !out.LSP.Enabled {
+		t.Fatal("global lsp.enabled must survive the fresh-file seed")
+	}
+
+	// Existing file: other fields kept, prior content backed up.
+	if _, err := SetThemeSyntax("nord"); err != nil {
+		t.Fatal(err)
+	}
+	if out := Load(t.TempDir()); out.Theme.Syntax != "nord" {
+		t.Fatalf("theme.syntax after rewrite = %q", out.Theme.Syntax)
+	}
+	if _, err := os.Stat(path + ".bak"); err != nil {
+		t.Fatal("expected a .bak backup")
+	}
+}

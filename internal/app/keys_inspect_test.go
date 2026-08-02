@@ -14,6 +14,8 @@ import (
 	"github.com/nickooan/ntee-editor/internal/config"
 	"github.com/nickooan/ntee-editor/internal/lsp"
 	"github.com/nickooan/ntee-editor/internal/store"
+	"github.com/nickooan/ntee-editor/internal/syntax"
+	"github.com/nickooan/ntee-editor/internal/view"
 )
 
 // fakeMaintBackend wraps Memory with scriptable maintenance methods.
@@ -111,10 +113,15 @@ func TestInspectMenuSelection(t *testing.T) {
 	if m.inspectMenu != inspectMenuLSP {
 		t.Fatalf("Shift+Down should select lsp, got %d", m.inspectMenu)
 	}
+	m = key(m, shiftKey(tea.KeyDown))
+	if m.inspectMenu != inspectMenuSystem {
+		t.Fatalf("Shift+Down should select system, got %d", m.inspectMenu)
+	}
 	m = key(m, shiftKey(tea.KeyDown)) // clamped
-	if m.inspectMenu != inspectMenuLSP {
+	if m.inspectMenu != inspectMenuSystem {
 		t.Fatalf("selection should clamp at the last item, got %d", m.inspectMenu)
 	}
+	m = key(m, shiftKey(tea.KeyUp))
 	m = key(m, shiftKey(tea.KeyUp))
 	m = key(m, shiftKey(tea.KeyUp)) // clamped
 	if m.inspectMenu != inspectMenuDB {
@@ -350,5 +357,109 @@ func TestInspectConfigBackupWritten(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "config.yaml.bak")); err != nil {
 		t.Fatalf("backup not written: %v", err)
+	}
+}
+
+// hlColors flattens the colors of one highlight row for style comparison.
+func hlColors(segs []view.HighlightSegment) string {
+	var b strings.Builder
+	for _, s := range segs {
+		b.WriteString(s.Color)
+		b.WriteByte('|')
+	}
+	return b.String()
+}
+
+func TestInspectSystemPane(t *testing.T) {
+	m, _ := newTestModel(t, nil)
+	m = key(m, ctrlKey('t'))
+	m = key(m, shiftKey(tea.KeyDown))
+	m = key(m, shiftKey(tea.KeyDown))
+	if m.inspectMenu != inspectMenuSystem {
+		t.Fatalf("expected system pane, got %d", m.inspectMenu)
+	}
+	out := ansi.Strip(m.renderInspectMain(80, 20))
+	for _, want := range []string{"version", "dev", "color style", m.cfg.Theme.Syntax, "dracula"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("system pane missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestInspectSyscolorPersistsAndApplies(t *testing.T) {
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Cleanup(func() { syntax.SetStyle("gruvbox") }) // SetStyle is package-global
+
+	m, _ := newTestModel(t, nil)
+	m = m.openFileAt("main.go")
+	if len(m.hlLines) == 0 {
+		t.Fatal("main.go should have highlight rows")
+	}
+	before := hlColors(m.hlLines[0]) // "package main" keyword colors
+	m.grepHlRel, m.grepHl = "main.go", m.hlLines
+
+	m = key(m, ctrlKey('t'))
+	m = runes(m, "syscolor dracula")
+	m = key(m, keyPress(tea.KeyEnter))
+
+	if m.errText != "" {
+		t.Fatalf("errText = %q", m.errText)
+	}
+	if m.cfg.Theme.Syntax != "dracula" || m.inspectMenu != inspectMenuSystem || m.inspectInput != "" {
+		t.Fatalf("style=%q menu=%d input=%q", m.cfg.Theme.Syntax, m.inspectMenu, m.inspectInput)
+	}
+	if !strings.Contains(m.notice, "dracula") {
+		t.Fatalf("notice = %q", m.notice)
+	}
+	if m.grepHlRel != "" || m.grepHl != nil {
+		t.Fatal("grep preview highlight cache should be dropped")
+	}
+	if after := hlColors(m.hlLines[0]); after == before {
+		t.Fatalf("open buffer colors did not change: %q", after)
+	}
+
+	data, err := os.ReadFile(filepath.Join(xdg, "ntee-editor", "config.yaml"))
+	must(t, err)
+	var out config.Config
+	must(t, yaml.Unmarshal(data, &out))
+	if out.Theme.Syntax != "dracula" {
+		t.Fatalf("persisted theme.syntax = %q", out.Theme.Syntax)
+	}
+}
+
+func TestInspectSyscolorRejectsUnknown(t *testing.T) {
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+
+	m, _ := newTestModel(t, nil)
+	m = key(m, ctrlKey('t'))
+	for _, cmd := range []string{"syscolor", "syscolor nope"} {
+		next, _ := m.runInspectCommand(cmd)
+		m = next.(Model)
+		if !strings.HasPrefix(m.errText, "usage: syscolor <") || !strings.Contains(m.errText, "monokai") {
+			t.Fatalf("%q: errText = %q", cmd, m.errText)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(xdg, "ntee-editor", "config.yaml")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rejected command must not write config: %v", err)
+	}
+}
+
+func TestInspectSyscolorKeepsDirtyBuffer(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Cleanup(func() { syntax.SetStyle("gruvbox") })
+
+	m, _ := newTestModel(t, nil)
+	m = m.openFileAt("main.go")
+	m = runes(m, "// dirty ")
+	m = key(m, ctrlKey('t'))
+	m = runes(m, "syscolor monokai")
+	m = key(m, keyPress(tea.KeyEnter))
+
+	// The rebuilt line cache must reflect the live (dirty) edit buffer, not
+	// the on-disk snapshot the inspect mode sits over.
+	if len(m.fileLines) == 0 || !strings.Contains(m.fileLines[0], "// dirty") {
+		t.Fatalf("fileLines rebuilt from disk instead of the edit buffer: %q", m.fileLines[0])
 	}
 }

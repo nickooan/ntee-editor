@@ -33,7 +33,7 @@ func (m Model) render() string {
 		return m.renderSplash()
 	}
 
-	header := headerStyle.Width(m.width).Render("ntee-editor  ·  " + m.root)
+	header := headerStyle.Width(m.width).Render("ntee-editor " + versionTag() + "  ·  " + m.root)
 	status := m.padStatusRows(m.renderStatusLine())
 	bodyHeight := max(3, m.height-2-strings.Count(status, "\n"))
 
@@ -179,7 +179,7 @@ func (m Model) renderStatusLine() string {
 		if m.inspectBusy != "" {
 			bar += editingStyle.Render(m.inspectBusy+"…") + execTextStyle.Render("   ")
 		}
-		bar += hintStyle.Render("db compact|relieve · lsp enable|disable <lang|all> · Shift+↑/↓ pane · Esc back")
+		bar += hintStyle.Render("db compact|relieve · lsp enable|disable <lang|all> · syscolor <style> · Shift+↑/↓ pane · Esc back")
 		// Pre-pad in the exec background so padStatusRows leaves the row's
 		// color intact (same trick as the @exec bar).
 		if pad := m.width - lipgloss.Width(bar); pad > 0 {
@@ -509,6 +509,10 @@ func (m Model) renderFile(width, height int) string {
 	}
 	if editing && m.completionOpen {
 		rows = m.overlayCompletion(rows, start, gutterWidth, contentWidth, height)
+	} else if editing && m.sigPinned != nil {
+		// The popup wins while open (completing an inner argument); the
+		// pinned signature reappears when it closes.
+		rows = m.overlaySignature(rows, start, gutterWidth, contentWidth, height)
 	}
 	return strings.Join(rows, "\n")
 }
@@ -530,14 +534,9 @@ func (m Model) overlayCompletion(rows []string, start, gutterWidth, contentWidth
 		top = sel - n + 1
 	}
 
-	// Popup width: longest visible label + padding, capped to the content area.
-	w := 12
-	for i := 0; i < n; i++ {
-		if lw := lipgloss.Width(items[top+i].Label) + 2; lw > w {
-			w = lw
-		}
-	}
-	w = min(w, contentWidth)
+	// Popup columns: label + dimmed signature + right-aligned origin package,
+	// sized over the visible window and capped to the content area.
+	labelW, detW, originW, w := completionLayout(items[top:top+n], contentWidth)
 
 	// Anchor at the identifier start, within renderEditLine's horizontal window.
 	line := m.edit.line()
@@ -552,11 +551,7 @@ func (m Model) overlayCompletion(rows []string, start, gutterWidth, contentWidth
 	below := curRow+n < height // room beneath the cursor?
 	for i := 0; i < n; i++ {
 		idx := top + i
-		label := padTo(truncateRunes(items[idx].Label, w), w)
-		box := completionItemStyle.Render(label)
-		if idx == sel {
-			box = completionSelStyle.Render(label)
-		}
+		box := completionRow(items[idx], labelW, detW, originW, idx == sel)
 		rowIdx := curRow + 1 + i
 		if !below {
 			rowIdx = curRow - n + i
@@ -575,6 +570,102 @@ func (m Model) overlayCompletion(rows []string, start, gutterWidth, contentWidth
 		rows[rowIdx] = left + box + right
 	}
 	return rows
+}
+
+// overlaySignature splices the pinned one-row signature (label + signature +
+// origin) onto the file rows, anchored at the pinned call's name column, on
+// the row below the cursor line like the popup it continues from (flipping
+// above on the bottom row). It keeps the popup's selected-row styling so the
+// suggestion visibly carries on through the argument list.
+func (m Model) overlaySignature(rows []string, start, gutterWidth, contentWidth, height int) []string {
+	it := *m.sigPinned
+	labelW, detW, originW, w := completionLayout([]lsp.CompletionItem{it}, contentWidth)
+	box := completionRow(it, labelW, detW, originW, true)
+
+	// Anchor at the call's name column within renderEditLine's horizontal
+	// window (the cursor is on the pinned line by invariant).
+	line := m.edit.line()
+	at := input.Clamp(m.edit.cx, 0, len(line))
+	off := 0
+	if at >= contentWidth {
+		off = at - contentWidth + 1
+	}
+	anchor := gutterWidth + 3 + input.Clamp(m.sigAnchor-off, 0, max(0, contentWidth-w))
+
+	curRow := m.edit.cy - start
+	rowIdx := curRow + 1
+	if rowIdx >= height { // bottom row: flip above
+		rowIdx = curRow - 1
+	}
+	if rowIdx < 0 || rowIdx >= len(rows) {
+		return rows
+	}
+	orig := rows[rowIdx]
+	left := ansi.Truncate(orig, anchor, "")
+	if pad := anchor - ansi.StringWidth(left); pad > 0 {
+		left += baseStyle.Render(strings.Repeat(" ", pad))
+	}
+	right := ansi.TruncateLeft(orig, anchor+w, "")
+	rows[rowIdx] = left + box + right
+	return rows
+}
+
+// completionLayout sizes the popup's columns for the visible rows within cap.
+// Shrink order when the cap is tight: the signature (detail) truncates first,
+// then the origin column is dropped whole, then the label truncates. total is
+// the exact display width every row must render to.
+func completionLayout(items []lsp.CompletionItem, cap int) (labelW, detW, originW, total int) {
+	for _, it := range items {
+		labelW = max(labelW, lipgloss.Width(it.Label))
+		detW = max(detW, lipgloss.Width(completionDetail(it)))
+		originW = max(originW, lipgloss.Width(completionOrigin(it)))
+	}
+	originW = min(originW, 24)
+	width := func() int {
+		t := 2 + labelW // side padding + label
+		if detW > 0 {
+			t += 1 + detW
+		}
+		if originW > 0 {
+			t += 2 + originW
+		}
+		return t
+	}
+	if over := width() - cap; over > 0 {
+		detW = max(0, detW-over)
+	}
+	if width() > cap {
+		originW = 0
+	}
+	if over := width() - cap; over > 0 {
+		labelW = max(1, labelW-over)
+	}
+	total = width()
+	// Keep the historic 12-cell floor so short labels still get a visible box
+	// (unless the cap itself is smaller).
+	if floor := min(12, cap); total < floor {
+		labelW += floor - total
+		total = floor
+	}
+	return labelW, detW, originW, total
+}
+
+// completionRow renders one dropdown row at exactly the layout's total width:
+// padded label, dimmed signature, right-aligned dimmed origin.
+func completionRow(it lsp.CompletionItem, labelW, detW, originW int, selected bool) string {
+	labelStyle, dimStyle := completionItemStyle, completionDetailStyle
+	if selected {
+		labelStyle, dimStyle = completionSelStyle, completionSelDetailStyle
+	}
+	out := labelStyle.Render(" " + padTo(truncateRunes(it.Label, labelW), labelW))
+	if detW > 0 {
+		out += dimStyle.Render(" " + padTo(truncateRunes(completionDetail(it), detW), detW))
+	}
+	if originW > 0 {
+		origin := truncateRunes(completionOrigin(it), originW)
+		out += dimStyle.Render("  " + strings.Repeat(" ", originW-lipgloss.Width(origin)) + origin)
+	}
+	return out + labelStyle.Render(" ")
 }
 
 // renderContentLine draws one non-cursor line: styled from the highlight cache
@@ -1111,8 +1202,10 @@ var (
 	uncommittedDirStyle  = lipgloss.NewStyle().Foreground(colYellow).Bold(true).Background(colBg)
 
 	// Autocomplete dropdown rows.
-	completionItemStyle = lipgloss.NewStyle().Foreground(colFg).Background(colBgChrome)
-	completionSelStyle  = lipgloss.NewStyle().Foreground(colBg).Background(colAqua)
+	completionItemStyle      = lipgloss.NewStyle().Foreground(colFg).Background(colBgChrome)
+	completionSelStyle       = lipgloss.NewStyle().Foreground(colBg).Background(colAqua)
+	completionDetailStyle    = lipgloss.NewStyle().Foreground(colComment).Background(colBgChrome)
+	completionSelDetailStyle = lipgloss.NewStyle().Foreground(colBg).Faint(true).Background(colAqua)
 
 	// Tab strip (top of the main pane). Red name = unsaved.
 	tabActiveStyle        = lipgloss.NewStyle().Foreground(colFg).Background(colSelection).Bold(true)

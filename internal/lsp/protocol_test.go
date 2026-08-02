@@ -22,6 +22,45 @@ func TestParseCompletion(t *testing.T) {
 	}
 }
 
+func TestParseCompletionLabelDetails(t *testing.T) {
+	list := parseCompletion(json.RawMessage(
+		`{"items":[{"label":"Append","detail":"func","labelDetails":{"detail":"(s []T, e ...T)","description":"golang.org/x/exp/slices"}}]}`))
+	if len(list) != 1 || list[0].LabelDetails == nil {
+		t.Fatalf("labelDetails missing: %+v", list)
+	}
+	ld := list[0].LabelDetails
+	if ld.Detail != "(s []T, e ...T)" || ld.Description != "golang.org/x/exp/slices" {
+		t.Fatalf("labelDetails fields: %+v", ld)
+	}
+	// Absent labelDetails stays nil (render falls back to the Detail field).
+	plain := parseCompletion(json.RawMessage(`[{"label":"x"}]`))
+	if plain[0].LabelDetails != nil {
+		t.Fatal("absent labelDetails should stay nil")
+	}
+}
+
+func TestClientCapabilitiesAdvertiseLabelDetails(t *testing.T) {
+	data, err := json.Marshal(clientCapabilities)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		TextDocument struct {
+			Completion struct {
+				CompletionItem struct {
+					LabelDetailsSupport bool `json:"labelDetailsSupport"`
+				} `json:"completionItem"`
+			} `json:"completion"`
+		} `json:"textDocument"`
+	}
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.TextDocument.Completion.CompletionItem.LabelDetailsSupport {
+		t.Fatalf("labelDetailsSupport not advertised: %s", data)
+	}
+}
+
 func TestURIRoundTrip(t *testing.T) {
 	for _, path := range []string{
 		"/Users/x/project/main.go",

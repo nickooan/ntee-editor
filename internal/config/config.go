@@ -265,6 +265,20 @@ func SetLanguagesEnabled(names []string, enabled bool) (string, error) {
 	return path, nil
 }
 
+// SetThemeSyntax writes theme.syntax into the user config file, creating it if
+// needed (prior content backed up to config.yaml.bak). Returns the path written.
+func SetThemeSyntax(name string) (string, error) {
+	file, existing, path, err := readUserConfig()
+	if err != nil {
+		return "", err
+	}
+	file.Theme.Syntax = name
+	if err := writeUserConfig(path, &file, existing); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
 func merge(cfg *Config, path string) {
 	data, err := os.ReadFile(path)
 	if err != nil {

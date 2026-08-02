@@ -34,7 +34,7 @@ var splashSpinner = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 // in the background. Any key skips it (see Update's splash guard).
 func (m Model) renderSplash() string {
 	title := modalTitleStyle.Foreground(colAqua).Render("ntee-editor")
-	version := overlayHintStyle.Render("v" + Version)
+	version := overlayHintStyle.Render(versionTag())
 	spinner := splashSpinner[m.splashFrame%len(splashSpinner)]
 	loading := modalTitleStyle.Render(spinner) + overlayHintStyle.Render(" building file tree…")
 	root := overlayHintStyle.Render(truncateRunes(m.root, 48))

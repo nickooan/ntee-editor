@@ -153,7 +153,7 @@ func (m Model) handleEditClick(x, y int) (Model, bool) {
 	m.edit.clearSelection()
 	m.edit.cy, m.edit.cx = line, col
 	m.edit.clampCursor()
-	return m, true
+	return m.sigCheckCursor(), true
 }
 
 // diffClickTarget maps a terminal cell (x, y) to a diff display row and rune

@@ -31,7 +31,7 @@ func TestColdStartShowsSplash(t *testing.T) {
 		t.Fatalf("cold start: splash=%v rebuilding=%v, want both true", m.splash, m.corpusRebuilding)
 	}
 	out := ansi.Strip(m.render())
-	for _, want := range []string{"ntee-editor", "v" + Version, "building file tree"} {
+	for _, want := range []string{"ntee-editor", versionTag(), "building file tree"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("splash missing %q:\n%s", want, out)
 		}

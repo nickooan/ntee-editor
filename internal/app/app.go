@@ -29,6 +29,14 @@ import (
 // "dev" marks a plain `go build` / `go install`.
 var Version = "dev"
 
+// versionTag renders Version for chrome: "v0.3.1" for releases, "dev" as-is.
+func versionTag() string {
+	if Version == "dev" {
+		return Version
+	}
+	return "v" + Version
+}
+
 type mode int
 
 const (
@@ -181,11 +189,11 @@ type Model struct {
 	execSugs     []string
 	execSugIndex int
 
-	// Inspection dashboard (Ctrl+T): left menu (ntee-db / lsp), right info
-	// pane, "@inspection >" command bar. Store stats are fetched async on
-	// entry and after maintenance ops (BlobUsage does I/O).
+	// Inspection dashboard (Ctrl+T): left menu (ntee-db / lsp / system),
+	// right info pane, "@inspection >" command bar. Store stats are fetched
+	// async on entry and after maintenance ops (BlobUsage does I/O).
 	inspectPrevMode mode
-	inspectMenu     int // 0 = ntee-db, 1 = lsp
+	inspectMenu     int // indexes inspectMenuItems
 	inspectInput    string
 	inspectCursor   int
 	inspectInfo     store.DBInfo
@@ -250,6 +258,19 @@ type Model struct {
 	completionStart     int
 	completionPending   bool // a request is in flight
 	completionDismissed bool // Esc'd — suppress auto-reopen until a word boundary
+
+	// Pinned signature row: typing "(" after a known function keeps a one-row
+	// overlay (label + signature) visible while the arguments are typed.
+	// sigDepth counts parens opened since the pin — the pin drops when the
+	// matching ")" lands. sigLine/sigCol locate the opening "(" (leaving them
+	// unpins); sigAnchor is the function name's start column (render anchor).
+	// sigLastAccepted remembers the just-accepted completion so a "(" typed
+	// right after accepting (the popup already closed) can still pin it.
+	sigPinned       *lsp.CompletionItem
+	sigDepth        int
+	sigLine, sigCol int
+	sigAnchor       int
+	sigLastAccepted *lsp.CompletionItem
 
 	// Repo-wide content search overlay (Ctrl+G). All heavy work is async: the
 	// snapshot loads via grepLoadedMsg (guarded by grepGen), searches are
@@ -777,12 +798,19 @@ func (m Model) treeEntries() []filetree.FileTreeEntry {
 
 // sidebarCommand is the path that drives directory EXPANSION.
 func (m Model) sidebarCommand() string {
+	if p := m.fuzzySelectedPath(); p != "" {
+		return p
+	}
 	return filetree.ResolveSidebarCommand(m.command, m.selectedCommand)
 }
 
 // highlightedSidebarCommand is the path that drives the sidebar HIGHLIGHT:
-// keyboard/popup navigation wins over the typed path.
+// the open finder owns the sidebar, then keyboard/popup navigation, then
+// the typed path.
 func (m Model) highlightedSidebarCommand() string {
+	if p := m.fuzzySelectedPath(); p != "" {
+		return p
+	}
 	if m.keyboardSelectedCommand != "" {
 		return m.keyboardSelectedCommand
 	}
@@ -817,6 +845,7 @@ func (m Model) openFileAt(rel string) Model {
 			client.DidClose(m.openFile.Path)
 		}
 	}
+	m = m.sigUnpin() // the pin belongs to the buffer being left
 	m.openFile = &f
 	m.openRel = rel
 	m.fileScrollX, m.fileScrollY = 0, 0
@@ -856,9 +885,14 @@ func (m Model) refreshFileHighlights() Model {
 	content := m.openFile.Content
 	// Search, diff-review, and conflict-solving modes always sit on top of a
 	// live edit session, so the buffer — not the on-disk snapshot — is the
-	// truth there too (conflict mode even mutates it in place).
-	if m.mode == modeEdit || m.mode == modeSearch || m.mode == modeSearchExec ||
-		m.mode == modeDiff || m.mode == modeConflict {
+	// truth there too (conflict mode even mutates it in place). The inspection
+	// dashboard only pauses whatever mode it opened over.
+	md := m.mode
+	if md == modeInspect {
+		md = m.inspectPrevMode
+	}
+	if md == modeEdit || md == modeSearch || md == modeSearchExec ||
+		md == modeDiff || md == modeConflict {
 		content = m.edit.content()
 	}
 	m.fileLines = view.NormalizeLines(content)
@@ -869,6 +903,20 @@ func (m Model) refreshFileHighlights() Model {
 		return m
 	}
 	m.hlLines = syntax.HighlightLines(m.openFile.FileName, content)
+	return m
+}
+
+// invalidateHighlightCaches recomputes or clears every cached highlight
+// segment after a syntax.SetStyle switch, so the new colors show immediately.
+// segStyles (render.go) needs no reset — it is keyed by color hex — and the
+// syntax package's entry cache is reset by SetStyle itself.
+func (m Model) invalidateHighlightCaches() Model {
+	m = m.refreshFileHighlights()
+	if m.searchHl != nil && m.openFile != nil { // frozen at enterSearch
+		m.searchHl = syntax.HighlightLines(m.openFile.FileName, m.searchContent)
+	}
+	m.grepHlRel, m.grepHl = "", nil // refreshGrepPreview recomputes on next selection
+	m.defPickPrevRel, m.defPickPrevLines, m.defPickPrevHl = "", nil, nil
 	return m
 }
 

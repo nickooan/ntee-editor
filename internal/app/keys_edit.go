@@ -43,7 +43,9 @@ func (m Model) handleEditKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return next, cmd
 		}
 		if !isText && k != "backspace" {
-			m = m.closeCompletion()
+			// Popup only — the signature pin survives e.g. arrowing through
+			// the argument list.
+			m = m.dismissPopup()
 		}
 	} else if !isText && k != "backspace" {
 		// Any non-typing key is a word boundary: lift an Esc dismissal so the
@@ -55,6 +57,11 @@ func (m Model) handleEditKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	switch k {
 	case "esc":
+		// Esc peels state in order: popup (consumed above by completionKey),
+		// then the pinned signature, then a selection, then the mode itself.
+		if m.sigPinned != nil {
+			return m.sigUnpin(), nil
+		}
 		// First Esc clears a selection; the next discards unsaved edits and
 		// returns to the query bar (the pane keeps showing the on-disk file).
 		if m.edit.sel != nil {
@@ -76,7 +83,8 @@ func (m Model) handleEditKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.notice = "unsaved changes discarded"
 		}
 		m.mode = modeQuery
-		m.jumpStack = nil // quitting edit mode ends the jump trail
+		m.jumpStack = nil       // quitting edit mode ends the jump trail
+		m = m.closeCompletion() // pending request + pin die with the mode
 		return m.refreshFileHighlights(), nil
 
 	case "ctrl+s":
@@ -89,10 +97,11 @@ func (m Model) handleEditKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "ctrl+z":
-		return m.undo(), nil
+		// History rewrites can remove the pinned call outright.
+		return m.undo().sigUnpin(), nil
 
 	case "ctrl+y":
-		return m.redo(), nil
+		return m.redo().sigUnpin(), nil
 
 	case "ctrl+f":
 		m = m.flushBurst()
@@ -132,13 +141,14 @@ func (m Model) handleEditKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "home":
 		m.edit.clearSelection()
 		m.edit.cx = 0
-		return m.flushBurst(), nil
+		return m.sigCheckCursor().flushBurst(), nil
 	case "end":
 		m.edit.clearSelection()
 		m.edit.cx = len(m.edit.line())
 		return m.flushBurst(), nil
 
 	case "enter":
+		m = m.sigUnpin() // a pin never survives leaving its line
 		cy := m.edit.cy
 		m.edit.newline()
 		m = m.hlMarkLine(cy)
@@ -149,25 +159,34 @@ func (m Model) handleEditKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "backspace":
 		linesBefore := len(m.edit.lines)
 		cyBefore := m.edit.cy
+		hadSel := m.edit.sel != nil
+		var deleted rune
+		if line := m.edit.line(); !hadSel && m.edit.cx > 0 && m.edit.cx <= len(line) {
+			deleted = line[m.edit.cx-1]
+		}
 		m.edit.backspace()
-		if len(m.edit.lines) < linesBefore {
+		joined := len(m.edit.lines) < linesBefore
+		if joined {
 			m = m.hlRemoveLine(cyBefore)
 		}
 		m = m.hlMarkLine(m.edit.cy)
 		m.snapDirty = true
+		m = m.sigAfterBackspace(deleted, hadSel, joined)
 		return m.afterEditBackspace()
 
 	case "delete":
 		if m.edit.deleteSelection() {
 			m = m.hlMarkLine(m.edit.cy)
 			m.snapDirty = true
-			return m, nil
+			return m.sigUnpin(), nil
 		}
 		if m.edit.cx < len(m.edit.line()) {
+			deleted := m.edit.line()[m.edit.cx]
 			m.edit.cx++
 			m.edit.backspace()
 			m = m.hlMarkLine(m.edit.cy)
 			m.snapDirty = true
+			m = m.sigAfterBackspace(deleted, false, false)
 		}
 		return m, nil
 
@@ -216,6 +235,9 @@ func (m Model) editPaste(text string) (tea.Model, tea.Cmd) {
 		}
 	}
 	m.snapDirty = true
+	// Pasted text can contain unbalanced parens — depth tracking can't
+	// follow, so the pin drops.
+	m = m.sigUnpin()
 	return m.flushBurst(), nil // a paste is one burst boundary
 }
 
@@ -234,7 +256,7 @@ func (m Model) pageEdit(dir int) Model {
 	m.edit.cy = input.Clamp(m.edit.cy+dir*step, 0, total-1)
 	m.edit.clampCursor()
 	m.fileScrollY = input.Clamp(top+dir*step, 0, max(0, total-h))
-	return m
+	return m.sigCheckCursor()
 }
 
 // moveEditCursor moves the cursor; leaving the line is a burst boundary.
@@ -244,7 +266,7 @@ func (m Model) moveEditCursor(dx, dy int) Model {
 	if m.edit.cy != prevCy {
 		m = m.flushBurst()
 	}
-	return m
+	return m.sigCheckCursor()
 }
 
 // saveEdit writes the buffer to disk, checkpoints a "save" snapshot, and syncs

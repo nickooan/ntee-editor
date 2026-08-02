@@ -248,6 +248,24 @@ func (m Model) handleFuzzyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// fuzzySelectedPath mirrors the finder's current position in the sidebar:
+// the selected candidate, or the drilled-in directory prefix when the
+// filter has no matches. Empty when the finder is closed.
+func (m Model) fuzzySelectedPath() string {
+	if !m.fuzzyOpen {
+		return ""
+	}
+	if len(m.fuzzyMatches) > 0 {
+		idx := input.Clamp(m.fuzzyIndex, 0, len(m.fuzzyMatches)-1)
+		return m.fuzzyCorpus[m.fuzzyMatches[idx].Index].Text
+	}
+	// No matches: keep the tree anchored to the query's directory part.
+	if i := strings.LastIndex(m.fuzzyQuery, "/"); i >= 0 {
+		return m.fuzzyQuery[:i+1]
+	}
+	return ""
+}
+
 func (m Model) refreshFuzzy() Model {
 	m.fuzzyMatches = fuzzy.Filter(m.fuzzyQuery, m.fuzzyCorpus)
 	// After Enter-on-a-directory sets the query to that directory, the dir

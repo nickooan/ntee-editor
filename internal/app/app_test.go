@@ -342,6 +342,51 @@ func TestFuzzyOverlayDirDrillDown(t *testing.T) {
 	}
 }
 
+func TestFuzzyOverlayDrivesSidebar(t *testing.T) {
+	m, _ := newTestModel(t, nil)
+	m = key(m, ctrlKey('p'))
+
+	// The sidebar follows the selected candidate: highlight and expansion
+	// both derive from it while the finder is open.
+	m = runes(m, "util")
+	if got := m.sidebarCommand(); got != "lib/util.ts" {
+		t.Fatalf("sidebar should track the selected match, got %q", got)
+	}
+	if got := m.highlightedSidebarCommand(); got != "lib/util.ts" {
+		t.Fatalf("sidebar highlight should track the selected match, got %q", got)
+	}
+	entries := m.treeEntries()
+	idx := m.highlightedEntryIndex(entries)
+	if idx < 0 || entries[idx].RelativePath != "lib/util.ts" {
+		t.Fatalf("tree should expand lib/ and highlight util.ts, idx=%d", idx)
+	}
+
+	// A filter with no matches keeps the tree anchored to the query's dir part.
+	m = runes(m, "zz")
+	if len(m.fuzzyMatches) != 0 {
+		t.Fatalf("want no matches for 'utilzz', got %d", len(m.fuzzyMatches))
+	}
+	if got := m.fuzzySelectedPath(); got != "" {
+		t.Fatalf("no matches and no dir prefix should yield no path, got %q", got)
+	}
+
+	// Drilling into a directory anchors the tree there even with no matches.
+	m.fuzzyQuery = "lib/zz"
+	m = m.refreshFuzzy()
+	if got := m.fuzzySelectedPath(); got != "lib/" {
+		t.Fatalf("no matches should fall back to the dir prefix, got %q", got)
+	}
+
+	// Esc reverts the sidebar to its usual drivers.
+	m = key(m, keyPress(tea.KeyEsc))
+	if m.fuzzyOpen {
+		t.Fatal("esc should close the finder")
+	}
+	if got := m.fuzzySelectedPath(); got != "" {
+		t.Fatalf("closed finder should not drive the sidebar, got %q", got)
+	}
+}
+
 func TestHighlightCacheStaysAlignedAcrossNewline(t *testing.T) {
 	m, _ := newTestModel(t, nil)
 	m = m.openFileAt("main.go")

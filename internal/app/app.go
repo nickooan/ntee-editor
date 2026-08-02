@@ -777,12 +777,19 @@ func (m Model) treeEntries() []filetree.FileTreeEntry {
 
 // sidebarCommand is the path that drives directory EXPANSION.
 func (m Model) sidebarCommand() string {
+	if p := m.fuzzySelectedPath(); p != "" {
+		return p
+	}
 	return filetree.ResolveSidebarCommand(m.command, m.selectedCommand)
 }
 
 // highlightedSidebarCommand is the path that drives the sidebar HIGHLIGHT:
-// keyboard/popup navigation wins over the typed path.
+// the open finder owns the sidebar, then keyboard/popup navigation, then
+// the typed path.
 func (m Model) highlightedSidebarCommand() string {
+	if p := m.fuzzySelectedPath(); p != "" {
+		return p
+	}
 	if m.keyboardSelectedCommand != "" {
 		return m.keyboardSelectedCommand
 	}

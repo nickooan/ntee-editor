@@ -32,27 +32,28 @@ undo history, and session all survive relaunch.
 
 ## Install
 
-One command (macOS or Linux). It checks Go (installs via brew/apt/dnf/pacman if
-missing), builds the **latest release tag** of `ntee` into `~/go/bin` (never an
-untagged commit — while the repo has no tags yet it warns and builds the
-default branch), and installs language servers for **TypeScript, Vue, and
-Kotlin** when their runtimes are present:
+macOS — one command via our Homebrew tap. Each release ships a universal
+binary (Intel + Apple Silicon), so there's nothing to pick:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/nickooan/ntee-editor/main/install.sh | bash
+brew install --cask nickooan/tap/ntee
 ```
 
-Other languages (Go, Python, Ruby, Java) are one command away — see
-[Installing language servers](#installing-language-servers).
+**Updating**: `brew upgrade --cask ntee`.
 
-From a local checkout: `./install.sh` (builds the checkout as-is, for
-development). **Updating** is the same curl command — it fetches tags and
-rebuilds the newest release.
+On Linux, or to build from source, install with Go (1.25+) — the binary lands
+in `~/go/bin`, make sure it's on your PATH:
 
-Make sure `~/go/bin` is on your PATH (the script prints the exact `export` line
-if it isn't). Knobs: `NTEE_INSTALL_DIR=<dir>` overrides the clone destination
-(default `~/.ntee-editor/src`); `NTEE_SKIP_LSP=1` skips the language-server step
-(run `ntee --prepare-lsp` later).
+```sh
+go install github.com/nickooan/ntee-editor/cmd/ntee@latest
+```
+
+Then set up language servers for the languages you use — one command, see
+[Installing language servers](#installing-language-servers):
+
+```sh
+ntee --prepare-lsp
+```
 
 ## Quick start
 
@@ -152,7 +153,7 @@ Editor commands with Tab-completed suggestions:
 | `copy` (`cp`) `[a-b\|all\|fpath]` | copy the selection, a line range, the whole buffer, or the file's path |
 | `jump` (`jp`) `<line\|top\|end>` | go to a line (lands ~30% from the top) |
 | `git scf` | **s**olve **c**on**f**lict: review the buffer's conflicts interactively — ours tinted green, theirs blue, markers yellow. `↑/↓` move line by line, `Shift+↑/↓` jump between conflict blocks; on a marker line a picker pops up: `←/→` choose **Use HEAD / Use \<branch\> / Use both**, `Enter` applies (each apply is one `Ctrl+Z` step), `Esc` back to editing at the cursor — applied resolutions stay, untouched conflicts remain |
-| `git diff [rev]` | review the file's uncommitted changes (or its diff against `rev`) in a read-only GitHub-style view: added lines green with a `+` gutter marker, removed lines red with `-` (no number). `↑/↓`/`PgUp`/`PgDn` review, `Ctrl+J` jump to definition (`Ctrl+O` returns to the review), `Esc` back to editing at the reviewed line |
+| `git diff [rev]` | review the file's uncommitted changes (or its diff against `rev`) in a read-only GitHub-style view: added lines green with a `+` gutter marker, removed lines red with `-` (no number). `↑/↓`/`PgUp`/`PgDn` review, `Shift+↑/↓` jump between change hunks, `Ctrl+J` jump to definition (`Ctrl+O` returns to the review), `Esc` back to editing at the reviewed line |
 | `tab <name\|cl\|cr>` | switch tab / close-left / close-right |
 
 ### Command bar (`:`)
@@ -226,9 +227,7 @@ ntee --prepare-lsp --yes go java          # skip the prompt (flags before names)
 
 Built-in recipes: **go** (gopls) · **typescript/js/react** (typescript-language-server) ·
 **python** (pyright) · **ruby** (ruby-lsp) · **java** (jdtls) · **kotlin**
-(kotlin-language-server) · **vue** (@vue/language-server). `install.sh` runs
-only the typescript/vue/kotlin recipes; install the rest with the commands
-above whenever you need them. Installs use the platform's native tool
+(kotlin-language-server) · **vue** (@vue/language-server). Installs use the platform's native tool
 (`brew` / `go install` / `npm` / `gem`), skip languages whose runtime is
 absent (telling you what to install), keep your tuned config entries, and back
 the old file up to `config.yaml.bak`. Recipes can be overridden per language

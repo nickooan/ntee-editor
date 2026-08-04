@@ -24,6 +24,11 @@ func (m Model) handleDiffKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "down":
 		return m.moveDiffCursor(1), nil
 
+	case "shift+up":
+		return m.jumpDiffHunk(-1), nil
+	case "shift+down":
+		return m.jumpDiffHunk(1), nil
+
 	case "left":
 		m.diffCx = max(0, m.diffCx-1)
 		return m, nil
@@ -77,6 +82,38 @@ func (m Model) moveDiffCursor(dy int) Model {
 	}
 	m.diffCursor = input.Clamp(m.diffCursor+dy, 0, len(m.diffRows)-1)
 	m.diffCx = input.Clamp(m.diffCx, 0, len([]rune(m.diffRowText(m.diffCursor))))
+	return m
+}
+
+// jumpDiffHunk moves the review cursor to the previous (dir<0) or next
+// (dir>0) hunk's first row, anchored ~30% from the top like conflict-block
+// jumps. A hunk is a maximal run of non-context rows. No wraparound; inert
+// when there is no hunk in that direction. From inside a hunk, jumping up
+// lands on that hunk's own start.
+func (m Model) jumpDiffHunk(dir int) Model {
+	if len(m.diffRows) == 0 {
+		return m // still loading
+	}
+	target := -1
+	for i, row := range m.diffRows {
+		if row.kind == diffCtx || (i > 0 && m.diffRows[i-1].kind != diffCtx) {
+			continue // not a hunk start
+		}
+		if dir < 0 {
+			if i < m.diffCursor {
+				target = i
+			}
+		} else if i > m.diffCursor {
+			target = i
+			break
+		}
+	}
+	if target == -1 {
+		return m
+	}
+	m.diffCursor = target
+	m.diffCx = input.Clamp(m.diffCx, 0, len([]rune(m.diffRowText(target))))
+	m.diffScrollY = anchorScroll(target, m.contentHeight()+1, len(m.diffRows))
 	return m
 }
 

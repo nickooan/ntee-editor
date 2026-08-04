@@ -159,5 +159,5 @@ func (m Model) renderDiffStatus() string {
 		line += statusTextStyle.Render("   ") + errStyle.Render(m.errText)
 	}
 	return line + statusTextStyle.Render("   ") +
-		hintStyle.Render("↑/↓ review · PgUp/PgDn page · Ctrl+ J def, O back · Esc exit")
+		hintStyle.Render("↑/↓ review · Shift+↑/↓ hunk · PgUp/PgDn page · Ctrl+ J def, O back · Esc exit")
 }

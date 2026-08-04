@@ -223,6 +223,54 @@ func TestDiffNavigationAndEsc(t *testing.T) {
 	_ = rows
 }
 
+func TestDiffShiftJumpsBetweenHunks(t *testing.T) {
+	m, _ := diffFixture(t) // hunk starts: row 3 (add), row 6 (del)
+	m.diffCursor, m.diffCx, m.diffScrollY = 0, 0, 0
+
+	m = key(m, shiftKey(tea.KeyDown))
+	if m.diffCursor != 3 {
+		t.Fatalf("shift+down: cursor = %d, want hunk 1 start (3)", m.diffCursor)
+	}
+	m = key(m, shiftKey(tea.KeyDown))
+	if m.diffCursor != 6 {
+		t.Fatalf("shift+down: cursor = %d, want hunk 2 start (6)", m.diffCursor)
+	}
+	m = key(m, shiftKey(tea.KeyDown)) // no hunk below: inert
+	if m.diffCursor != 6 {
+		t.Fatalf("shift+down past the last hunk moved to %d", m.diffCursor)
+	}
+	m = key(m, shiftKey(tea.KeyUp))
+	if m.diffCursor != 3 {
+		t.Fatalf("shift+up: cursor = %d, want hunk 1 start (3)", m.diffCursor)
+	}
+	m = key(m, shiftKey(tea.KeyUp)) // no hunk above: inert
+	if m.diffCursor != 3 {
+		t.Fatalf("shift+up past the first hunk moved to %d", m.diffCursor)
+	}
+
+	// A del+add run is one hunk: rows ctx del del add add ctx, start at 1.
+	// From inside it, shift+up lands on its own start.
+	rows, _, _ := buildDiffRows([]string{"a", "x", "y", "d"}, []string{"a", "b", "c", "d"})
+	m.diffRows = rows
+	m.diffCursor = 3
+	m = key(m, shiftKey(tea.KeyUp))
+	if m.diffCursor != 1 {
+		t.Fatalf("shift+up inside a hunk: cursor = %d, want its start (1)", m.diffCursor)
+	}
+	m = key(m, shiftKey(tea.KeyDown)) // the same hunk's tail is not a new hunk
+	if m.diffCursor != 1 {
+		t.Fatalf("shift+down with no hunk below moved to %d", m.diffCursor)
+	}
+
+	// Inert while the diff is still loading.
+	m.diffRows = nil
+	m.diffCursor = 0
+	m = key(m, shiftKey(tea.KeyDown))
+	if m.diffCursor != 0 {
+		t.Fatalf("shift+down while loading moved to %d", m.diffCursor)
+	}
+}
+
 func TestDiffEscWhileLoading(t *testing.T) {
 	m, _ := newTestModel(t, nil)
 	m = m.openFileAt("main.go")

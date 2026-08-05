@@ -47,6 +47,10 @@ func (m Model) render() string {
 		// Inspection owns both panes: the file tree gives way to the menu.
 		sidebarBody = m.renderInspectMenu(sidebarWidth-4, bodyHeight-2)
 	}
+	if m.mode == modeOpenAPI {
+		// The OpenAPI preview replaces the file tree with the spec outline.
+		sidebarBody = m.renderOpenAPISidebar(sidebarWidth-4, bodyHeight-2)
+	}
 	// lipgloss v2: Width/Height include the border, so the panes take the
 	// full slot (v1 set the inner size and the border grew them by 2).
 	sidebar := paneStyle.Width(sidebarWidth).Height(bodyHeight).Render(sidebarBody)
@@ -79,6 +83,8 @@ func (m Model) render() string {
 		mainBody = m.renderDiff(mainWidth-4, innerH)
 	case m.mode == modeConflict:
 		mainBody = m.renderConflict(mainWidth-4, innerH)
+	case m.mode == modeOpenAPI:
+		mainBody = m.renderOpenAPI(mainWidth-4, innerH)
 	case m.openFile != nil:
 		mainBody = m.renderFile(mainWidth-4, innerH)
 	default:
@@ -125,7 +131,16 @@ func (m Model) renderStatusLine() string {
 		// The @exec bar replaces the @edit status line while active (the @edit
 		// line returns on exit); its lighter dark background signals the mode.
 		bar := execPromptStyle.Render("@exec >") + renderInputLineStyled(m.execInput, m.execCursor, execTextStyle) +
-			"   " + m.renderExecSugs()
+			execTextStyle.Render("   ")
+		// Failed commands stay in the bar with errText set (so the input can be
+		// corrected) — it must render here or the failure is invisible.
+		if m.errText != "" {
+			bar += errStyle.Render(m.errText) + execTextStyle.Render("   ")
+		}
+		if m.notice != "" {
+			bar += noticeStyle.Render(m.notice) + execTextStyle.Render("   ")
+		}
+		bar += m.renderExecSugs()
 		// Pre-pad to full width in the exec background so padStatusRows (which
 		// pads with the chrome style) leaves this row's color intact.
 		if pad := m.width - lipgloss.Width(bar); pad > 0 {
@@ -166,6 +181,8 @@ func (m Model) renderStatusLine() string {
 		return m.renderDiffStatus()
 	case modeConflict:
 		return m.renderConflictStatus()
+	case modeOpenAPI:
+		return m.renderOpenAPIStatus()
 	case modeInspect:
 		bar := execPromptStyle.Render("@inspection >") +
 			renderInputLineStyled(m.inspectInput, m.inspectCursor, execTextStyle) +
@@ -1119,6 +1136,7 @@ const (
 	hexDiffAddBg    = "#32361a" // diff review: added line (desaturated dark green)
 	hexDiffDelBg    = "#3c2422" // diff review: removed line (desaturated dark red)
 	hexConflictInBg = "#1d3040" // conflict solving: incoming/theirs side (desaturated dark blue)
+	hexLineHl       = "#3c3836" // openapi preview: cursor row (bg1, matches cursorLineStyle)
 )
 
 // Gruvbox-dark palette (matches the default grammar style). Every emitted

@@ -236,6 +236,8 @@ func (m Model) wheelScroll(dir int) Model {
 		return m.moveEditCursor(0, dir*wheelScrollLines)
 	case m.mode == modeDiff && m.openFile != nil:
 		return m.moveDiffCursor(dir * wheelScrollLines)
+	case m.mode == modeOpenAPI && m.openFile != nil:
+		return m.moveOpenAPICursor(dir * wheelScrollLines)
 	case m.mode == modeConflict && m.openFile != nil:
 		return m.moveConflictCursor(0, dir*wheelScrollLines)
 	case (m.mode == modeQuery || m.mode == modeCommand) && m.openFile != nil:

@@ -1,0 +1,162 @@
+openapi: 3.0.3
+info:
+  title: Petstore API
+  version: 1.0.0
+  description: A sample API for managing pets.
+tags:
+  - name: pets
+    description: Everything about pets
+paths:
+  /pets:
+    get:
+      tags: [pets]
+      operationId: listPets
+      summary: List all pets, paginated.
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            format: int32
+          description: max records to return
+        - name: X-Trace-Id
+          in: header
+          schema:
+            type: string
+            format: uuid
+          description: correlation id
+      responses:
+        "200":
+          description: A paged list of pets
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Pet"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      tags: [pets]
+      operationId: createPet
+      summary: Create a new pet.
+      parameters:
+        - name: X-Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+          description: dedupe key
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NewPet"
+          application/xml:
+            schema:
+              $ref: "#/components/schemas/NewPet"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Pet"
+  /pets/{petId}:
+    patch:
+      tags: [pets]
+      operationId: updatePet
+      parameters:
+        - name: petId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+          description: pet to update
+      requestBody:
+        content:
+          application/merge-patch+json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                status:
+                  oneOf:
+                    - type: string
+                      enum: [available, pending, sold]
+                    - type: "null"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Pet"
+components:
+  schemas:
+    Pet:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: integer
+          format: int64
+          readOnly: true
+        name:
+          type: string
+        status:
+          type: string
+          enum: [available, pending, sold]
+          default: available
+        vaccinated:
+          type: boolean
+          nullable: true
+        tags:
+          type: array
+          items:
+            type: string
+        category:
+          $ref: "#/components/schemas/Category"
+        owner:
+          $ref: "./common.yaml#/components/schemas/Owner"
+        attributes:
+          type: object
+          additionalProperties:
+            type: string
+    Category:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        parent:
+          $ref: "#/components/schemas/Category"
+    NewPet:
+      allOf:
+        - $ref: "#/components/schemas/PetBase"
+        - type: object
+          properties:
+            vaccinated:
+              type: boolean
+              nullable: true
+    PetBase:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        status:
+          type: string
+          default: available
+  responses:
+    NotFound:
+      description: Pet not found
+      content:
+        application/json:
+          schema:
+            $ref: "./common.yaml#/components/schemas/Error"

@@ -88,6 +88,15 @@ func (m Model) runExecCommand(cmd string) (tea.Model, tea.Cmd) {
 		m = m.execJump(arg)
 	case "git":
 		return m.execGit(arg)
+	case "openapi", "opapi":
+		// Success switches straight to modeOpenAPI (Esc from the preview lands
+		// in edit mode at the reviewed content's source, deliberately bypassing
+		// execPrevMode, like "git diff").
+		if arg != "" {
+			m.errText = "openapi takes no argument"
+			return m, nil
+		}
+		return m.enterOpenAPI()
 	case "cpfp":
 		m = m.execCopyPath(m.openRel)
 	case "cpafp":

@@ -47,6 +47,10 @@ func (m Model) render() string {
 		// Inspection owns both panes: the file tree gives way to the menu.
 		sidebarBody = m.renderInspectMenu(sidebarWidth-4, bodyHeight-2)
 	}
+	if m.mode == modeOpenAPI {
+		// The OpenAPI preview replaces the file tree with the spec outline.
+		sidebarBody = m.renderOpenAPISidebar(sidebarWidth-4, bodyHeight-2)
+	}
 	// lipgloss v2: Width/Height include the border, so the panes take the
 	// full slot (v1 set the inner size and the border grew them by 2).
 	sidebar := paneStyle.Width(sidebarWidth).Height(bodyHeight).Render(sidebarBody)
@@ -79,6 +83,8 @@ func (m Model) render() string {
 		mainBody = m.renderDiff(mainWidth-4, innerH)
 	case m.mode == modeConflict:
 		mainBody = m.renderConflict(mainWidth-4, innerH)
+	case m.mode == modeOpenAPI:
+		mainBody = m.renderOpenAPI(mainWidth-4, innerH)
 	case m.openFile != nil:
 		mainBody = m.renderFile(mainWidth-4, innerH)
 	default:
@@ -166,6 +172,8 @@ func (m Model) renderStatusLine() string {
 		return m.renderDiffStatus()
 	case modeConflict:
 		return m.renderConflictStatus()
+	case modeOpenAPI:
+		return m.renderOpenAPIStatus()
 	case modeInspect:
 		bar := execPromptStyle.Render("@inspection >") +
 			renderInputLineStyled(m.inspectInput, m.inspectCursor, execTextStyle) +
@@ -1119,6 +1127,7 @@ const (
 	hexDiffAddBg    = "#32361a" // diff review: added line (desaturated dark green)
 	hexDiffDelBg    = "#3c2422" // diff review: removed line (desaturated dark red)
 	hexConflictInBg = "#1d3040" // conflict solving: incoming/theirs side (desaturated dark blue)
+	hexLineHl       = "#3c3836" // openapi preview: cursor row (bg1, matches cursorLineStyle)
 )
 
 // Gruvbox-dark palette (matches the default grammar style). Every emitted

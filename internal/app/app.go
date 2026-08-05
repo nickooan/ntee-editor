@@ -18,6 +18,7 @@ import (
 	"github.com/nickooan/ntee-editor/internal/fuzzy"
 	"github.com/nickooan/ntee-editor/internal/input"
 	"github.com/nickooan/ntee-editor/internal/lsp"
+	"github.com/nickooan/ntee-editor/internal/openapi"
 	"github.com/nickooan/ntee-editor/internal/store"
 	"github.com/nickooan/ntee-editor/internal/syntax"
 	"github.com/nickooan/ntee-editor/internal/view"
@@ -49,13 +50,15 @@ const (
 	modeInspect    // "@inspection >" dashboard (Ctrl+T): store stats + lsp control
 	modeDiff       // read-only git-diff review of the open file ("git diff" in @exec)
 	modeConflict   // interactive conflict resolution over the live buffer ("git scf" in @exec)
+	modeOpenAPI    // read-only OpenAPI v3 preview of the open spec file ("openapi" in @exec)
 )
 
 // inBarMode reports whether keystrokes are feeding a text-input bar, where
 // global chords (Ctrl+P/U/G, Shift+Tab) must not fire.
 func (m Model) inBarMode() bool {
 	return m.mode == modeCommand || m.mode == modeSearch || m.mode == modeExec ||
-		m.mode == modeSearchExec || m.mode == modeInspect
+		m.mode == modeSearchExec || m.mode == modeInspect ||
+		(m.mode == modeOpenAPI && m.openapiSearching)
 }
 
 type Model struct {
@@ -139,6 +142,25 @@ type Model struct {
 	diffPendingCursor int
 	diffPendingScroll int
 	diffHasPending    bool
+
+	// OpenAPI preview mode ("openapi" in the @exec bar): a read-only rendered
+	// view of the open spec file, built once per entry by renderOpenAPICmd
+	// (guarded by openapiGen). openapiCursor is the highlighted document row —
+	// the Esc source-jump target; every rendered row carries a {file, line}
+	// anchor back into the YAML, including rows from cross-file $refs.
+	openapiLines     []openapi.Line
+	openapiOutline   []openapi.OutlineEntry
+	openapiPlain     []string // per-row plain text (search + match overlay)
+	openapiCorpus    string   // plain rows joined with \n (the search corpus)
+	openapiScrollY   int
+	openapiCursor    int
+	openapiSel       int // outline selection index
+	openapiSearching bool
+	openapiSearch    string
+	openapiFocused   int // focused match index
+	openapiLoading   bool
+	openapiGen       int
+	openapiTitle     string // "Petstore API  v1.0.0" for the status bar
 
 	// Conflict-solving mode ("git scf" in the @exec bar): browses and mutates
 	// the LIVE edit buffer, so cursor and scroll are the edit session's own
@@ -609,6 +631,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case diffReadyMsg:
 		return m.handleDiffReady(msg)
 
+	case openapiReadyMsg:
+		return m.handleOpenAPIReady(msg)
+
 	case grepBatchMsg:
 		return m.handleGrepBatch(msg)
 
@@ -703,6 +728,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleDiffKey(msg)
 		case modeConflict:
 			return m.handleConflictKey(msg)
+		case modeOpenAPI:
+			return m.handleOpenAPIKey(msg)
 		}
 	}
 	return m, nil
@@ -745,6 +772,11 @@ func (m Model) handlePaste(text string) (tea.Model, tea.Cmd) {
 		m.searchExecInput, m.searchExecCursor = input.InsertAtCursor(m.searchExecInput, m.searchExecCursor, pasteLine(text))
 	case modeInspect:
 		m.inspectInput, m.inspectCursor = input.InsertAtCursor(m.inspectInput, m.inspectCursor, pasteLine(text))
+	case modeOpenAPI:
+		if m.openapiSearching {
+			m.openapiSearch += pasteLine(text)
+			m = m.focusOpenAPIMatch()
+		}
 	}
 	return m, nil
 }
@@ -853,6 +885,7 @@ func (m Model) openFileAt(rel string) Model {
 	m.jumpStack = nil          // a deliberate open starts a fresh navigation trail
 	m = m.clearDiffState()     // and ends any diff review of the file being left
 	m = m.clearConflictState() // likewise any conflict-solving session
+	m = m.clearOpenAPIState()  // and any OpenAPI preview
 	_ = m.db.TouchOpened(store.OpenedFile{Path: rel, LastOpenedAt: time.Now().UnixMilli()})
 	if client, ok := m.lsp.ClientFor(f.Path); ok {
 		client.DidOpen(f.Path, f.Content)
@@ -892,7 +925,7 @@ func (m Model) refreshFileHighlights() Model {
 		md = m.inspectPrevMode
 	}
 	if md == modeEdit || md == modeSearch || md == modeSearchExec ||
-		md == modeDiff || md == modeConflict {
+		md == modeDiff || md == modeConflict || md == modeOpenAPI {
 		content = m.edit.content()
 	}
 	m.fileLines = view.NormalizeLines(content)

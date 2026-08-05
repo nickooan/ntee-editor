@@ -34,7 +34,7 @@ func (m Model) enterOpenAPI() (tea.Model, tea.Cmd) {
 	}
 	content := m.edit.content()
 	if !openapi.Detect(content) {
-		m.errText = "not an OpenAPI v3 document (missing openapi: 3.x)"
+		m.errText = "invalid openapi yml (missing openapi: 3.x)"
 		return m, nil
 	}
 	m = m.clearOpenAPIState()
@@ -68,7 +68,7 @@ func (m Model) renderOpenAPICmd(content string) tea.Cmd {
 		msg := openapiReadyMsg{gen: gen, rel: rel}
 		doc, err := openapi.Parse([]byte(content))
 		if err != nil {
-			msg.err = "openapi: " + firstErrLine(err)
+			msg.err = "invalid openapi yml: " + firstErrLine(err)
 			return msg
 		}
 		doc.File = rel

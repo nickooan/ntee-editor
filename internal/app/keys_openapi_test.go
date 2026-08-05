@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 const testSpec = `openapi: 3.0.3
@@ -97,22 +98,64 @@ func TestOpenAPIEntryRejectsNonSpec(t *testing.T) {
 	if m.mode != modeExec {
 		t.Fatalf("non-spec file must stay in the exec bar, got %v", m.mode)
 	}
-	if !strings.Contains(m.errText, "not an OpenAPI v3 document") {
+	if !strings.Contains(m.errText, "invalid openapi yml") {
+		t.Fatalf("errText = %q", m.errText)
+	}
+}
+
+// The exec bar stays open on a failed entry, so the error must be visible in
+// the rendered status line itself — the field being set is not enough.
+func TestOpenAPIErrorVisibleInExecBar(t *testing.T) {
+	m, _ := newTestModel(t, nil)
+	m = m.openFileAt("main.go")
+	m = key(m, ctrlKey('e'))
+	m = runes(m, "openapi")
+	m = key(m, keyPress(tea.KeyEnter))
+	if m.mode != modeExec {
+		t.Fatalf("mode = %v, want modeExec", m.mode)
+	}
+	status := ansi.Strip(m.renderStatusLine())
+	if !strings.Contains(status, "invalid openapi yml") {
+		t.Fatalf("exec status bar must show the error, got %q", status)
+	}
+}
+
+func TestOpenAPIEntryRejectsMalformedSpec(t *testing.T) {
+	m, root := newTestModel(t, nil)
+	// Detects as OpenAPI (openapi: 3 present) but is not valid YAML.
+	broken := "openapi: 3.0.0\npaths: [\n  bad: {\n"
+	must(t, os.WriteFile(filepath.Join(root, "broken.yaml"), []byte(broken), 0o644))
+	m = m.openFileAt("broken.yaml")
+	m = key(m, ctrlKey('e'))
+	m = runes(m, "openapi")
+	next, cmd := m.Update(keyPress(tea.KeyEnter))
+	m = next.(Model)
+	if m.mode != modeOpenAPI || cmd == nil {
+		t.Fatalf("detect passes, so entry must start the async render (mode=%v)", m.mode)
+	}
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if m.mode != modeEdit {
+		t.Fatalf("parse failure must fall back to edit mode, got %v", m.mode)
+	}
+	if !strings.Contains(m.errText, "invalid openapi yml") {
 		t.Fatalf("errText = %q", m.errText)
 	}
 }
 
 func TestOpenAPINotReachableFromCommandBar(t *testing.T) {
-	m, _ := newTestModel(t, nil)
-	m = m.openFileAt("main.go")
-	m = key(m, ctrlKey('l')) // : command bar from edit mode
-	if m.mode != modeCommand {
-		t.Skipf("command bar not on ctrl+l in this build, mode=%v", m.mode)
-	}
+	m, root := newTestModel(t, nil)
+	must(t, os.WriteFile(filepath.Join(root, "spec.yaml"), []byte(testSpec), 0o644))
+	must(t, os.WriteFile(filepath.Join(root, "common.yaml"), []byte(testCommon), 0o644))
+	m = m.openFileAt("spec.yaml")
+	m = m.enterCommand()
 	m = runes(m, "openapi")
 	m = key(m, keyPress(tea.KeyEnter))
 	if m.mode == modeOpenAPI {
 		t.Fatal("openapi must not be reachable from the : bar")
+	}
+	if !strings.Contains(m.errText, "unknown command") {
+		t.Fatalf("errText = %q", m.errText)
 	}
 }
 

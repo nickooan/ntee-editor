@@ -131,7 +131,16 @@ func (m Model) renderStatusLine() string {
 		// The @exec bar replaces the @edit status line while active (the @edit
 		// line returns on exit); its lighter dark background signals the mode.
 		bar := execPromptStyle.Render("@exec >") + renderInputLineStyled(m.execInput, m.execCursor, execTextStyle) +
-			"   " + m.renderExecSugs()
+			execTextStyle.Render("   ")
+		// Failed commands stay in the bar with errText set (so the input can be
+		// corrected) — it must render here or the failure is invisible.
+		if m.errText != "" {
+			bar += errStyle.Render(m.errText) + execTextStyle.Render("   ")
+		}
+		if m.notice != "" {
+			bar += noticeStyle.Render(m.notice) + execTextStyle.Render("   ")
+		}
+		bar += m.renderExecSugs()
 		// Pre-pad to full width in the exec background so padStatusRows (which
 		// pads with the chrome style) leaves this row's color intact.
 		if pad := m.width - lipgloss.Width(bar); pad > 0 {

@@ -154,6 +154,7 @@ Editor commands with Tab-completed suggestions:
 | `jump` (`jp`) `<line\|top\|end>` | go to a line (lands ~30% from the top) |
 | `git scf` | **s**olve **c**on**f**lict: review the buffer's conflicts interactively — ours tinted green, theirs blue, markers yellow. `↑/↓` move line by line, `Shift+↑/↓` jump between conflict blocks; on a marker line a picker pops up: `←/→` choose **Use HEAD / Use \<branch\> / Use both**, `Enter` applies (each apply is one `Ctrl+Z` step), `Esc` back to editing at the cursor — applied resolutions stay, untouched conflicts remain |
 | `git diff [rev]` | review the file's uncommitted changes (or its diff against `rev`) in a read-only GitHub-style view: added lines green with a `+` gutter marker, removed lines red with `-` (no number). `↑/↓`/`PgUp`/`PgDn` review, `Shift+↑/↓` jump between change hunks, `Ctrl+J` jump to definition (`Ctrl+O` returns to the review), `Esc` back to editing at the reviewed line |
+| `git blame` | annotate every line with its author and commit date in a read-only view — the gutter shows `author date │` instead of line numbers; unsaved or uncommitted lines show a dimmed `uncommitted` placeholder. `↑/↓`/`PgUp`/`PgDn` move, `Shift+↑/↓` jump between commit groups, `Ctrl+J` jump to definition (`Ctrl+O` returns to the blame), `Esc` back to editing at the cursor line |
 | `tab <name\|cl\|cr>` | switch tab / close-left / close-right |
 
 ### Command bar (`:`)

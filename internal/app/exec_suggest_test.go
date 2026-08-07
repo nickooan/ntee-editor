@@ -25,10 +25,12 @@ func TestExecSuggestionsTable(t *testing.T) {
 		{"jump ", []string{"top", "end"}},
 		{"tab ", []string{"cl", "cr", "util.ts", "main.go"}},
 		{"tab m", []string{"main.go"}},
-		{"git ", []string{"scf", "diff"}},
+		{"git ", []string{"scf", "diff", "blame"}},
 		{"git d", []string{"diff"}},
+		{"git b", []string{"blame"}},
 		{"git diff ", nil},      // the revision arg stays free-form
 		{"git scf ", nil},       // scf takes no argument
+		{"git blame ", nil},     // blame takes no argument
 		{"copy all extra", nil}, // past any known argument
 		{"zz", nil},             // unknown prefix
 	}

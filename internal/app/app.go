@@ -51,6 +51,7 @@ const (
 	modeDiff       // read-only git-diff review of the open file ("git diff" in @exec)
 	modeConflict   // interactive conflict resolution over the live buffer ("git scf" in @exec)
 	modeOpenAPI    // read-only OpenAPI v3 preview of the open spec file ("openapi" in @exec)
+	modeBlame      // read-only git-blame annotation of the open file ("git blame" in @exec)
 )
 
 // inBarMode reports whether keystrokes are feeding a text-input bar, where
@@ -142,6 +143,23 @@ type Model struct {
 	diffPendingCursor int
 	diffPendingScroll int
 	diffHasPending    bool
+
+	// Blame mode ("git blame" in the @exec bar): a read-only view of the edit
+	// buffer with a per-line author+date gutter (no line numbers). blameRows
+	// map 1:1 to buffer lines; computed once per entry by an async
+	// computeBlameCmd and guarded against staleness by blameGen.
+	// blamePending* carry a Ctrl+O restore position.
+	blameRows          []blameRow
+	blameCursor        int // index into blameRows == buffer line
+	blameCx            int // rune column within the cursor row (Ctrl+J targeting)
+	blameScrollY       int
+	blameAuthorW       int  // author column width: min(longest author, blameAuthorCap)
+	blameNewFile       bool // untracked path or empty repo: everything uncommitted
+	blameLoading       bool
+	blameGen           int
+	blamePendingCursor int
+	blamePendingScroll int
+	blameHasPending    bool
 
 	// OpenAPI preview mode ("openapi" in the @exec bar): a read-only rendered
 	// view of the open spec file, built once per entry by renderOpenAPICmd
@@ -631,6 +649,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case diffReadyMsg:
 		return m.handleDiffReady(msg)
 
+	case blameReadyMsg:
+		return m.handleBlameReady(msg)
+
 	case openapiReadyMsg:
 		return m.handleOpenAPIReady(msg)
 
@@ -726,6 +747,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleInspectKey(msg)
 		case modeDiff:
 			return m.handleDiffKey(msg)
+		case modeBlame:
+			return m.handleBlameKey(msg)
 		case modeConflict:
 			return m.handleConflictKey(msg)
 		case modeOpenAPI:
@@ -750,8 +773,9 @@ func (m Model) handlePaste(text string) (tea.Model, tea.Cmd) {
 	if m.grepOpen {
 		return m.grepPaste(text)
 	}
-	// modeDiff and modeConflict have no case: both are read-only to typing
-	// (conflict mode edits only through Enter on a marker), so pastes are inert.
+	// modeDiff, modeBlame, and modeConflict have no case: all are read-only to
+	// typing (conflict mode edits only through Enter on a marker), so pastes
+	// are inert.
 	switch m.mode {
 	case modeQuery:
 		m = m.adoptPreview()
@@ -925,7 +949,7 @@ func (m Model) refreshFileHighlights() Model {
 		md = m.inspectPrevMode
 	}
 	if md == modeEdit || md == modeSearch || md == modeSearchExec ||
-		md == modeDiff || md == modeConflict || md == modeOpenAPI {
+		md == modeDiff || md == modeConflict || md == modeOpenAPI || md == modeBlame {
 		content = m.edit.content()
 	}
 	m.fileLines = view.NormalizeLines(content)

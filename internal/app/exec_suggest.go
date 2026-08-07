@@ -29,7 +29,7 @@ func (m Model) execSuggestions(input string) []string {
 	case prev == "tab":
 		cands = append([]string{"cl", "cr"}, tabBaseNames(m.tabs)...)
 	case prev == "git":
-		cands = []string{"scf", "diff"} // scf takes no argument; diff's revision stays free-form
+		cands = []string{"scf", "diff", "blame"} // scf and blame take no argument; diff's revision stays free-form
 	default:
 		return nil // position past any known argument
 	}

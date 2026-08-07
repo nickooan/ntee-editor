@@ -81,6 +81,8 @@ func (m Model) render() string {
 		mainBody = m.renderQueryMain(mainWidth-4, innerH)
 	case m.mode == modeDiff:
 		mainBody = m.renderDiff(mainWidth-4, innerH)
+	case m.mode == modeBlame:
+		mainBody = m.renderBlame(mainWidth-4, innerH)
 	case m.mode == modeConflict:
 		mainBody = m.renderConflict(mainWidth-4, innerH)
 	case m.mode == modeOpenAPI:
@@ -179,6 +181,8 @@ func (m Model) renderStatusLine() string {
 			statusTextStyle.Render("   ") + hintStyle.Render("jump <line|top|end> · tab <name|cl|cr> · revert")
 	case modeDiff:
 		return m.renderDiffStatus()
+	case modeBlame:
+		return m.renderBlameStatus()
 	case modeConflict:
 		return m.renderConflictStatus()
 	case modeOpenAPI:
@@ -1196,6 +1200,13 @@ var (
 	// slot the diagnostics gutter uses for its ● badge.
 	diffMarkAddStyle = lipgloss.NewStyle().Foreground(colGreen).Bold(true).Background(colDiffAddBg)
 	diffMarkDelStyle = lipgloss.NewStyle().Foreground(colRed).Bold(true).Background(colDiffDelBg)
+
+	// Blame mode gutter: author pops in aqua, the date recedes into the gutter
+	// gray, and uncommitted lines dim the whole annotation to a faint
+	// placeholder — the eye should catch names, not dates.
+	blameAuthorStyle = lipgloss.NewStyle().Foreground(colAqua).Background(colBg)
+	blameDateStyle   = lipgloss.NewStyle().Foreground(colGutter).Background(colBg)
+	blameDimStyle    = lipgloss.NewStyle().Foreground(colComment).Faint(true).Background(colBg)
 
 	// Conflict-solving mode: ours reuses the diff green ("current"), theirs
 	// gets a blue tint ("incoming" — red would read as removed), the diff3

@@ -96,6 +96,13 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				}
 				return next, nil
 			}
+			if m.mode == modeBlame {
+				next, hit := m.handleBlameClick(mo.X, mo.Y)
+				if hit && ctrl {
+					return next.blameJumpToReference() // Ctrl+click = jump to definition
+				}
+				return next, nil
+			}
 			if m.mode == modeConflict {
 				// Plain cursor placement only (no Ctrl+click jump): the click
 				// math is edit mode's, plus a popup realign for the new line.
@@ -226,6 +233,75 @@ func (m Model) handleDiffClick(x, y int) (Model, bool) {
 	return m, true
 }
 
+// blameClickTarget maps a terminal cell (x, y) to a blame row and rune
+// column — diffClickTarget's math with the author+date gutter instead of
+// line numbers, and rows are buffer lines directly.
+func (m Model) blameClickTarget(x, y int) (int, int, bool) {
+	height := m.contentHeight() + 1 // rendered rows: single-line status, like edit mode
+	total := len(m.blameRows)
+	if total == 0 {
+		return 0, 0, false
+	}
+
+	paneRow := y - 2 - m.tabRows()
+	if paneRow < 0 || paneRow >= height {
+		return 0, 0, false
+	}
+	start := fileViewportTop(m.blameCursor, m.blameScrollY, height, total)
+	row := start + paneRow
+	if row >= total {
+		return 0, 0, false // pane background below the last row
+	}
+
+	sidebar := m.sidebarWidth()
+	mainWidth := max(3, m.width-sidebar)
+	paneCol := x - (sidebar + 1)
+	if paneCol < 0 || paneCol >= mainWidth-2 {
+		return 0, 0, false
+	}
+	gutterWidth := m.blameGutterWidth()
+	contentCol := max(0, paneCol-(gutterWidth+3)) // gutter click → column 0
+
+	text := []rune(m.blameRowText(row))
+	off := 0
+	if row == m.blameCursor {
+		contentWidth := max(1, (mainWidth-4)-gutterWidth-3)
+		if at := input.Clamp(m.blameCx, 0, len(text)); at >= contentWidth {
+			off = at - contentWidth + 1
+		}
+	}
+	col := input.Clamp(off+contentCol, 0, len(text))
+	return row, col, true
+}
+
+// handleBlameClick moves the blame cursor to a clicked row, with
+// handleEditClick's viewport anchoring: an ordinary click freezes the window,
+// clicking the top visible row pages up, the bottom visible row pages down.
+func (m Model) handleBlameClick(x, y int) (Model, bool) {
+	if m.mode != modeBlame || m.openFile == nil {
+		return m, false
+	}
+	row, col, ok := m.blameClickTarget(x, y)
+	if !ok {
+		return m, false
+	}
+	h := m.contentHeight() + 1
+	total := len(m.blameRows)
+	top := fileViewportTop(m.blameCursor, m.blameScrollY, h, total)
+	bottom := min(top+h-1, total-1)
+	switch {
+	case row == top && top > 0:
+		m.blameScrollY = max(0, row-h+1) // clicked top row → page up, row lands at the bottom
+	case row == bottom && bottom < total-1:
+		m.blameScrollY = row // clicked bottom row → page down, row lands at the top
+	default:
+		m.blameScrollY = top // ordinary click: the viewport stays put
+	}
+	m.blameCursor = row
+	m.blameCx = col
+	return m, true
+}
+
 // wheelScroll handles a vertical wheel notch (dir = -1 up, +1 down). In edit
 // and diff-review modes it moves the cursor (the viewport follows via
 // fileViewportTop); in the query/command file view it nudges the scroll
@@ -236,6 +312,8 @@ func (m Model) wheelScroll(dir int) Model {
 		return m.moveEditCursor(0, dir*wheelScrollLines)
 	case m.mode == modeDiff && m.openFile != nil:
 		return m.moveDiffCursor(dir * wheelScrollLines)
+	case m.mode == modeBlame && m.openFile != nil:
+		return m.moveBlameCursor(dir * wheelScrollLines)
 	case m.mode == modeOpenAPI && m.openFile != nil:
 		return m.moveOpenAPICursor(dir * wheelScrollLines)
 	case m.mode == modeConflict && m.openFile != nil:

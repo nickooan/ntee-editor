@@ -172,9 +172,9 @@ func (m Model) execCopyPath(path string) Model {
 }
 
 // execGit dispatches the "git" namespace of editor commands: "scf" (enters
-// the interactive conflict-solving mode) and "diff [rev]" (enters the async
-// diff review mode). Errors stay in exec mode (no execPrevMode restore) so
-// the user can correct the input.
+// the interactive conflict-solving mode), "diff [rev]" (enters the async
+// diff review mode), and "blame" (enters the async blame view). Errors stay
+// in exec mode (no execPrevMode restore) so the user can correct the input.
 func (m Model) execGit(arg string) (tea.Model, tea.Cmd) {
 	sub, rest, _ := strings.Cut(arg, " ")
 	rest = strings.TrimSpace(rest)
@@ -193,8 +193,16 @@ func (m Model) execGit(arg string) (tea.Model, tea.Cmd) {
 		// Success switches straight to modeDiff (Esc from the review lands in
 		// edit mode, deliberately bypassing execPrevMode).
 		return m.enterDiff(rest)
+	case "blame":
+		if rest != "" {
+			m.errText = "git blame takes no argument"
+			return m, nil
+		}
+		// Success switches straight to modeBlame (Esc lands in edit mode,
+		// deliberately bypassing execPrevMode, like "git diff").
+		return m.enterBlame()
 	case "":
-		m.errText = "git needs a subcommand (scf, diff)"
+		m.errText = "git needs a subcommand (scf, diff, blame)"
 	default:
 		m.errText = "unknown git command: " + sub
 	}

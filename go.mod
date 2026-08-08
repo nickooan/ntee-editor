@@ -8,6 +8,7 @@ require (
 	github.com/alecthomas/chroma/v2 v2.27.0
 	github.com/charmbracelet/x/ansi v0.11.7
 	github.com/nickooan/ntee-db v0.2.0
+	github.com/vektah/gqlparser/v2 v2.5.36
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -20,6 +21,7 @@ require (
 	github.com/clipperhouse/displaywidth v0.11.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/dlclark/regexp2/v2 v2.2.1 // indirect
+	github.com/kr/text v0.2.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.4.0 // indirect
 	github.com/mattn/go-runewidth v0.0.23 // indirect
 	github.com/muesli/cancelreader v0.2.2 // indirect

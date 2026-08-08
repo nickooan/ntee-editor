@@ -316,6 +316,8 @@ func (m Model) wheelScroll(dir int) Model {
 		return m.moveBlameCursor(dir * wheelScrollLines)
 	case m.mode == modeOpenAPI && m.openFile != nil:
 		return m.moveOpenAPICursor(dir * wheelScrollLines)
+	case m.mode == modeGraphQL && m.openFile != nil:
+		return m.moveGraphQLCursor(dir * wheelScrollLines)
 	case m.mode == modeConflict && m.openFile != nil:
 		return m.moveConflictCursor(0, dir*wheelScrollLines)
 	case (m.mode == modeQuery || m.mode == modeCommand) && m.openFile != nil:

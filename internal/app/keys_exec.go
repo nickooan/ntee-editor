@@ -97,6 +97,15 @@ func (m Model) runExecCommand(cmd string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m.enterOpenAPI()
+	case "graphql", "gql":
+		// Success switches straight to modeGraphQL (Esc from the preview lands
+		// in edit mode at the reviewed content's source, deliberately bypassing
+		// execPrevMode, like "openapi").
+		if arg != "" {
+			m.errText = "graphql takes no argument"
+			return m, nil
+		}
+		return m.enterGraphQL()
 	case "cpfp":
 		m = m.execCopyPath(m.openRel)
 	case "cpafp":

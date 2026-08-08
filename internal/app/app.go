@@ -16,6 +16,7 @@ import (
 	"github.com/nickooan/ntee-editor/internal/config"
 	"github.com/nickooan/ntee-editor/internal/filetree"
 	"github.com/nickooan/ntee-editor/internal/fuzzy"
+	"github.com/nickooan/ntee-editor/internal/graphql"
 	"github.com/nickooan/ntee-editor/internal/input"
 	"github.com/nickooan/ntee-editor/internal/lsp"
 	"github.com/nickooan/ntee-editor/internal/openapi"
@@ -52,6 +53,7 @@ const (
 	modeConflict   // interactive conflict resolution over the live buffer ("git scf" in @exec)
 	modeOpenAPI    // read-only OpenAPI v3 preview of the open spec file ("openapi" in @exec)
 	modeBlame      // read-only git-blame annotation of the open file ("git blame" in @exec)
+	modeGraphQL    // read-only GraphQL SDL schema preview ("graphql" in @exec)
 )
 
 // inBarMode reports whether keystrokes are feeding a text-input bar, where
@@ -59,7 +61,8 @@ const (
 func (m Model) inBarMode() bool {
 	return m.mode == modeCommand || m.mode == modeSearch || m.mode == modeExec ||
 		m.mode == modeSearchExec || m.mode == modeInspect ||
-		(m.mode == modeOpenAPI && m.openapiSearching)
+		(m.mode == modeOpenAPI && m.openapiSearching) ||
+		(m.mode == modeGraphQL && m.graphqlSearching)
 }
 
 type Model struct {
@@ -179,6 +182,25 @@ type Model struct {
 	openapiLoading   bool
 	openapiGen       int
 	openapiTitle     string // "Petstore API  v1.0.0" for the status bar
+
+	// GraphQL preview mode ("graphql" in the @exec bar): the OpenAPI mode's
+	// structure applied to SDL — the schema file set is gathered (same dir or
+	// graphqlrc globs), merged, and rendered once per entry by
+	// renderGraphQLCmd (guarded by graphqlGen). Every rendered row carries a
+	// {file, line} anchor, including rows merged from sibling schema files.
+	graphqlLines     []graphql.Line
+	graphqlOutline   []graphql.OutlineEntry
+	graphqlPlain     []string // per-row plain text (search + match overlay)
+	graphqlCorpus    string   // plain rows joined with \n (the search corpus)
+	graphqlScrollY   int
+	graphqlCursor    int
+	graphqlSel       int // outline selection index
+	graphqlSearching bool
+	graphqlSearch    string
+	graphqlFocused   int // focused match index
+	graphqlLoading   bool
+	graphqlGen       int
+	graphqlTitle     string // "12 types · 3 files" for the status bar
 
 	// Conflict-solving mode ("git scf" in the @exec bar): browses and mutates
 	// the LIVE edit buffer, so cursor and scroll are the edit session's own
@@ -655,6 +677,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case openapiReadyMsg:
 		return m.handleOpenAPIReady(msg)
 
+	case graphqlReadyMsg:
+		return m.handleGraphQLReady(msg)
+
 	case grepBatchMsg:
 		return m.handleGrepBatch(msg)
 
@@ -753,6 +778,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleConflictKey(msg)
 		case modeOpenAPI:
 			return m.handleOpenAPIKey(msg)
+		case modeGraphQL:
+			return m.handleGraphQLKey(msg)
 		}
 	}
 	return m, nil
@@ -800,6 +827,11 @@ func (m Model) handlePaste(text string) (tea.Model, tea.Cmd) {
 		if m.openapiSearching {
 			m.openapiSearch += pasteLine(text)
 			m = m.focusOpenAPIMatch()
+		}
+	case modeGraphQL:
+		if m.graphqlSearching {
+			m.graphqlSearch += pasteLine(text)
+			m = m.focusGraphQLMatch()
 		}
 	}
 	return m, nil
@@ -910,6 +942,7 @@ func (m Model) openFileAt(rel string) Model {
 	m = m.clearDiffState()     // and ends any diff review of the file being left
 	m = m.clearConflictState() // likewise any conflict-solving session
 	m = m.clearOpenAPIState()  // and any OpenAPI preview
+	m = m.clearGraphQLState()  // and any GraphQL preview
 	_ = m.db.TouchOpened(store.OpenedFile{Path: rel, LastOpenedAt: time.Now().UnixMilli()})
 	if client, ok := m.lsp.ClientFor(f.Path); ok {
 		client.DidOpen(f.Path, f.Content)
@@ -949,7 +982,8 @@ func (m Model) refreshFileHighlights() Model {
 		md = m.inspectPrevMode
 	}
 	if md == modeEdit || md == modeSearch || md == modeSearchExec ||
-		md == modeDiff || md == modeConflict || md == modeOpenAPI || md == modeBlame {
+		md == modeDiff || md == modeConflict || md == modeOpenAPI ||
+		md == modeBlame || md == modeGraphQL {
 		content = m.edit.content()
 	}
 	m.fileLines = view.NormalizeLines(content)

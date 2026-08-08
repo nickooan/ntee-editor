@@ -15,8 +15,10 @@ func TestExecSuggestionsTable(t *testing.T) {
 		input string
 		want  []string
 	}{
-		{"", []string{"copy", "cp", "cpfp", "cpafp", "jump", "jp", "tab", "git", "openapi", "opapi"}},
-		{"g", []string{"git"}},
+		{"", []string{"copy", "cp", "cpfp", "cpafp", "jump", "jp", "tab", "git", "openapi", "opapi", "graphql", "gql"}},
+		{"g", []string{"git", "graphql", "gql"}},
+		{"gr", []string{"graphql"}},
+		{"gq", []string{"gql"}},
 		{"op", []string{"openapi", "opapi"}},
 		{"opa", []string{"opapi"}},
 		{"ju", []string{"jump"}}, // jp does not start with "ju"
@@ -66,7 +68,7 @@ func TestExecTabCompletionChain(t *testing.T) {
 func TestExecSuggestionCycle(t *testing.T) {
 	m := execLineFixture(t, 3) // Ctrl+E is bound in edit mode
 	m = key(m, ctrlKey('e'))
-	if len(m.execSugs) != 10 {
+	if len(m.execSugs) != 12 {
 		t.Fatalf("empty bar must offer all verbs, got %v", m.execSugs)
 	}
 

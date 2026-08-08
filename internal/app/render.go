@@ -51,6 +51,10 @@ func (m Model) render() string {
 		// The OpenAPI preview replaces the file tree with the spec outline.
 		sidebarBody = m.renderOpenAPISidebar(sidebarWidth-4, bodyHeight-2)
 	}
+	if m.mode == modeGraphQL {
+		// The GraphQL preview replaces the file tree with the schema outline.
+		sidebarBody = m.renderGraphQLSidebar(sidebarWidth-4, bodyHeight-2)
+	}
 	// lipgloss v2: Width/Height include the border, so the panes take the
 	// full slot (v1 set the inner size and the border grew them by 2).
 	sidebar := paneStyle.Width(sidebarWidth).Height(bodyHeight).Render(sidebarBody)
@@ -87,6 +91,8 @@ func (m Model) render() string {
 		mainBody = m.renderConflict(mainWidth-4, innerH)
 	case m.mode == modeOpenAPI:
 		mainBody = m.renderOpenAPI(mainWidth-4, innerH)
+	case m.mode == modeGraphQL:
+		mainBody = m.renderGraphQL(mainWidth-4, innerH)
 	case m.openFile != nil:
 		mainBody = m.renderFile(mainWidth-4, innerH)
 	default:
@@ -187,6 +193,8 @@ func (m Model) renderStatusLine() string {
 		return m.renderConflictStatus()
 	case modeOpenAPI:
 		return m.renderOpenAPIStatus()
+	case modeGraphQL:
+		return m.renderGraphQLStatus()
 	case modeInspect:
 		bar := execPromptStyle.Render("@inspection >") +
 			renderInputLineStyled(m.inspectInput, m.inspectCursor, execTextStyle) +

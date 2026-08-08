@@ -62,3 +62,32 @@ func ReadViewFile(root, relativePath string) (OpenViewFile, bool) {
 func WriteViewFile(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0o644)
 }
+
+// ListDirFiles lists the non-directory entry names in one directory under
+// root ("" = the root itself), jailed like ReadViewFile. Names come back in
+// os.ReadDir's sorted order. ok is false when the path escapes the root or
+// cannot be read.
+func ListDirFiles(root, dirRel string) ([]string, bool) {
+	if root == "" {
+		return nil, false
+	}
+	resolvedRoot, err := filepath.Abs(root)
+	if err != nil {
+		return nil, false
+	}
+	resolvedDir := filepath.Join(resolvedRoot, dirRel)
+	if !isInsideRoot(resolvedRoot, resolvedDir) {
+		return nil, false
+	}
+	entries, err := os.ReadDir(resolvedDir)
+	if err != nil {
+		return nil, false
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() {
+			names = append(names, e.Name())
+		}
+	}
+	return names, true
+}

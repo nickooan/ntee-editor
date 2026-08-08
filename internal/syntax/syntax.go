@@ -17,15 +17,18 @@ import (
 // explicitLexers pins the first-class languages; everything else falls back to
 // chroma's filename matcher.
 var explicitLexers = map[string]string{
-	".go":   "go",
-	".ts":   "typescript",
-	".tsx":  "tsx",
-	".json": "json",
-	".yaml": "yaml",
-	".yml":  "yaml",
-	".sh":   "bash",
-	".bash": "bash",
-	".zsh":  "bash",
+	".go":       "go",
+	".ts":       "typescript",
+	".tsx":      "tsx",
+	".json":     "json",
+	".yaml":     "yaml",
+	".yml":      "yaml",
+	".sh":       "bash",
+	".bash":     "bash",
+	".zsh":      "bash",
+	".graphql":  "graphql",
+	".graphqls": "graphql",
+	".gql":      "graphql", // no built-in chroma filename glob for .gql
 }
 
 // customLexers are app-defined chroma lexers (ntee-r1quest's request and data

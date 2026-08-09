@@ -430,7 +430,6 @@ func (m Model) grepPaste(text string) (Model, tea.Cmd) {
 	return m.queueGrepSearch()
 }
 
-// grepInsert inserts text at the query cursor.
 func (m Model) grepInsert(s string) Model {
 	m.grepQuery, m.grepCursor = input.InsertAtCursor(m.grepQuery, m.grepCursor, s)
 	return m

@@ -13,6 +13,11 @@ ntee-editor is a Sublime-style TUI text editor built on Bubble Tea. Architecture
 - When adding a new function or feature, add it to the correct `doc/<package>.md` — important functions get a short plain-language explanation of what they do and why; trivial helpers go into the file's italic roll-up line.
 - A change that adds a package needs a new `doc/<package>.md` (Introduction / Architecture / Functions template) plus a row in `doc/README.md`'s table.
 
+## Code comments
+
+- Keep comments sparse. The high-level "what this does and why it exists" story belongs in [doc/](doc/), not repeated inline — don't append comments that restate the code or duplicate the docs.
+- Comment only the genuinely important things the code can't say itself: a non-obvious invariant, a concurrency/lock-ordering rule, a deliberate trade-off, or a subtle edge case that would trip the next reader.
+
 ## Performance and user convenience
 
 - Every editor change must consider both. Nothing may block the UI goroutine: slow work (file walks, git, LSP, parsing/rendering) runs on `tea.Cmd` goroutines and lands back as messages guarded by generation counters.

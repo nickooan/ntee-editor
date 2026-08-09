@@ -132,7 +132,6 @@ func (e *editor) backspace() {
 	if e.cy == 0 {
 		return
 	}
-	// Merge with the previous line.
 	prev := []rune(e.lines[e.cy-1])
 	e.cx = len(prev)
 	e.lines[e.cy-1] = string(prev) + e.lines[e.cy]
@@ -174,7 +173,6 @@ func (e *editor) deleteSelection() bool {
 		}
 		lo = input.Clamp(lo, 0, len(e.lines)-1)
 		hi = input.Clamp(hi, 0, len(e.lines)-1)
-		// Replace the whole-line range with a single empty line.
 		rest := append([]string{""}, e.lines[hi+1:]...)
 		e.lines = append(e.lines[:lo], rest...)
 		e.cy = lo

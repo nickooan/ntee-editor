@@ -163,13 +163,13 @@ func (s stdioConn) Close() error {
 	return s.stdout.Close()
 }
 
-// resolveBinary finds the server executable: absolute path, then PATH, then
-// ~/go/bin (where go install puts gopls, often missing from GUI-shell PATHs).
 // ResolveBinary reports the resolved path of a server command using the same
-// rules the editor uses (absolute path, PATH, then ~/go/bin). Exposed so the
-// --prepare-lsp tooling can verify installs identically.
+// rules the editor uses. Exposed so the --prepare-lsp tooling can verify
+// installs identically.
 func ResolveBinary(command string) (string, error) { return resolveBinary(command) }
 
+// resolveBinary finds the server executable: absolute path, then PATH, then
+// ~/go/bin (where go install puts gopls, often missing from GUI-shell PATHs).
 func resolveBinary(command string) (string, error) {
 	if filepath.IsAbs(command) {
 		if info, err := os.Stat(command); err == nil && info.Mode().IsRegular() {
@@ -262,8 +262,7 @@ func (c *serverClient) start() {
 		fail("lsp: " + err.Error())
 		return
 	}
-	// Retain the tail of stderr so a crash can be explained (previously discarded,
-	// which turned every server crash into an opaque "connection is closed").
+	// Retain the tail of stderr so a crash can be explained.
 	c.stderr = &tailBuffer{max: stderrTailBytes}
 	cmd.Stderr = c.stderr
 	if err := cmd.Start(); err != nil {

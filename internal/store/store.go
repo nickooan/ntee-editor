@@ -65,8 +65,7 @@ type DraftStep struct {
 
 // Draft is a file's unsaved edit state, stashed when the user switches away and
 // restored on reopen. Steps (oldest→newest, capped app-side) carry the undo
-// history inline so a draft is self-contained — versions: records can be
-// evicted by the file index's MaxPerValue, drafts must not be.
+// history inline so a draft is self-contained.
 type Draft struct {
 	Path    string      `json:"path"` // relative to the project root
 	Content string      `json:"content"`

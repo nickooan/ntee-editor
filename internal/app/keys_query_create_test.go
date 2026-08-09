@@ -14,6 +14,17 @@ func queryEnter(m Model, s string) Model {
 	return key(m, keyPress(tea.KeyEnter))
 }
 
+// queryRm submits "<path> :rm" and confirms the modal — the two-step flow a
+// destructive delete now requires.
+func queryRm(t *testing.T, m Model, s string) Model {
+	t.Helper()
+	m = queryEnter(m, s)
+	if m.confirmRm == "" {
+		t.Fatalf(":rm %q should arm the confirmation modal (err=%q)", s, m.errText)
+	}
+	return key(m, keyPress(tea.KeyEnter))
+}
+
 func TestQueryMkdirCreatesAndEnters(t *testing.T) {
 	m, root := newTestModel(t, nil)
 	m = queryEnter(m, "lib :mkdir new/new1/new-dir")
@@ -133,7 +144,7 @@ func TestParseInlineFs(t *testing.T) {
 
 func TestQueryRmFile(t *testing.T) {
 	m, root := newTestModel(t, nil)
-	m = queryEnter(m, "lib/util.ts :rm")
+	m = queryRm(t, m, "lib/util.ts :rm")
 
 	if _, err := os.Stat(filepath.Join(root, "lib", "util.ts")); !os.IsNotExist(err) {
 		t.Fatalf("file should be gone, stat err=%v", err)
@@ -151,7 +162,7 @@ func TestQueryRmDirRecursive(t *testing.T) {
 	must(t, os.MkdirAll(filepath.Join(root, "lib", "sub"), 0o755))
 	must(t, os.WriteFile(filepath.Join(root, "lib", "sub", "x.go"), []byte("x"), 0o644))
 
-	m = queryEnter(m, "lib :rm")
+	m = queryRm(t, m, "lib :rm")
 	if _, err := os.Stat(filepath.Join(root, "lib")); !os.IsNotExist(err) {
 		t.Fatalf("dir subtree should be gone, stat err=%v", err)
 	}
@@ -168,7 +179,7 @@ func TestQueryRmOpenFileClosesIt(t *testing.T) {
 	}
 	m.mode = modeQuery // the bar drives rm from query mode
 
-	m = queryEnter(m, "lib :rm")
+	m = queryRm(t, m, "lib :rm")
 	if m.openFile != nil || m.openRel != "" {
 		t.Fatalf("open file under the removed dir must close: openRel=%q", m.openRel)
 	}
@@ -191,5 +202,52 @@ func TestQueryRmMissingPathErrors(t *testing.T) {
 	m = queryEnter(m, "nope/missing :rm")
 	if m.errText == "" {
 		t.Fatal("removing a nonexistent path must set errText")
+	}
+}
+
+func TestQueryRmConfirmCancelAndSwallow(t *testing.T) {
+	m, root := newTestModel(t, nil)
+	target := filepath.Join(root, "lib", "util.ts")
+
+	// Esc cancels: nothing deleted, modal closed, notice set.
+	m = queryEnter(m, "lib/util.ts :rm")
+	if m.confirmRm != "lib/util.ts" || m.confirmRmDir {
+		t.Fatalf("confirm not armed: rm=%q dir=%v", m.confirmRm, m.confirmRmDir)
+	}
+	m = key(m, keyPress(tea.KeyEsc))
+	if m.confirmRm != "" {
+		t.Fatal("esc should close the modal")
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Fatal("cancelled rm must not delete:", err)
+	}
+	if m.notice != "rm cancelled" {
+		t.Fatalf("notice = %q", m.notice)
+	}
+
+	// Stray keys are swallowed while the modal is open (no typing leaks into
+	// the query bar, no deletion). Reset the bar first — cancelling keeps its
+	// text so the user can correct it.
+	m.command, m.qCursor = "", 0
+	m = queryEnter(m, "lib/util.ts :rm")
+	before := m.command
+	m = runes(m, "zz")
+	if m.confirmRm == "" || m.command != before {
+		t.Fatalf("stray keys must be swallowed: rm=%q command=%q", m.confirmRm, m.command)
+	}
+	// A directory arms with the directory wording flag.
+	m = key(m, keyPress(tea.KeyEsc))
+	m.command, m.qCursor = "", 0
+	m = queryEnter(m, "lib :rm")
+	if m.confirmRm != "lib" || !m.confirmRmDir {
+		t.Fatalf("dir confirm: rm=%q dir=%v", m.confirmRm, m.confirmRmDir)
+	}
+	// y confirms like enter.
+	m = key(m, typeRune('y'))
+	if m.confirmRm != "" {
+		t.Fatal("y should resolve the modal")
+	}
+	if _, err := os.Stat(filepath.Join(root, "lib")); !os.IsNotExist(err) {
+		t.Fatalf("y should delete the directory, stat err=%v", err)
 	}
 }

@@ -1,8 +1,10 @@
 package lsp
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nickooan/ntee-editor/internal/config"
 )
@@ -108,4 +110,77 @@ func TestNoopRegistryStubs(t *testing.T) {
 		t.Fatalf("noop Enable = (%v, %q)", started, reason)
 	}
 	r.Disable("go") // must not panic
+}
+
+// The sink is program.Send — an unbuffered handoff to the UI goroutine, which
+// may itself be calling into the Manager (View → Statuses, Update → ClientFor).
+// A notice emitted while m.mu is held therefore deadlocks. This pins the
+// collect-then-emit fix with the worst case: a sink that re-enters the Manager.
+func TestEmitNeverRunsUnderManagerLock(t *testing.T) {
+	m := testManager(t)
+	m.SetSink(func(any) {
+		// Re-entrant call: deadlocks if the notice was emitted under m.mu.
+		m.ClientFor(filepath.Join(m.root, "other.go"))
+		m.Statuses()
+	})
+
+	done := make(chan struct{})
+	go func() {
+		// Missing binary → getOrStartLocked produces a "not found" notice.
+		m.ClientFor(filepath.Join(m.root, "a.go"))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("notice emitted while holding m.mu (deadlock)")
+	}
+}
+
+// projectRootFor memoizes per directory — the second resolve for a sibling
+// file must come from the cache (indirectly asserted: cache is populated).
+func TestProjectRootForMemoizes(t *testing.T) {
+	m := testManager(t)
+	a := m.projectRootFor(filepath.Join(m.root, "sub", "a.go"))
+	if _, ok := m.rootCache.Load(filepath.Join(m.root, "sub")); !ok {
+		t.Fatal("rootCache not populated")
+	}
+	b := m.projectRootFor(filepath.Join(m.root, "sub", "b.go"))
+	if a != b {
+		t.Fatalf("sibling files resolved different roots: %q vs %q", a, b)
+	}
+}
+
+func TestBridgeCycleDisablesLanguage(t *testing.T) {
+	mk := func(to string) *config.LSPServerConfig {
+		return &config.LSPServerConfig{Command: "x", Bridge: &config.BridgeConfig{To: to, Command: "relay"}}
+	}
+	// Self-bridge.
+	m := NewManager(config.Config{Languages: map[string]config.LanguageConfig{
+		"vue": {Extensions: []string{".vue"}, LSP: mk("vue")},
+	}}, t.TempDir())
+	if !strings.Contains(m.UnavailableReason("/p/a.vue"), "bridge cycle") {
+		t.Fatalf("self-bridge not disabled: %q", m.UnavailableReason("/p/a.vue"))
+	}
+
+	// Two-cycle: both ends disabled.
+	m = NewManager(config.Config{Languages: map[string]config.LanguageConfig{
+		"a": {Extensions: []string{".aa"}, LSP: mk("b")},
+		"b": {Extensions: []string{".bb"}, LSP: mk("a")},
+	}}, t.TempDir())
+	for _, f := range []string{"/p/x.aa", "/p/x.bb"} {
+		if !strings.Contains(m.UnavailableReason(f), "bridge cycle") {
+			t.Fatalf("cycle member not disabled for %s: %q", f, m.UnavailableReason(f))
+		}
+	}
+
+	// A chain merely reaching a cycle disables too; the valid vue→typescript
+	// shape does not.
+	m = NewManager(config.Config{Languages: map[string]config.LanguageConfig{
+		"vue":        {Extensions: []string{".vue"}, LSP: mk("typescript")},
+		"typescript": {Extensions: []string{".ts"}, LSP: &config.LSPServerConfig{Command: "x"}},
+	}}, t.TempDir())
+	if r := m.UnavailableReason("/p/a.vue"); r != "" {
+		t.Fatalf("valid bridge chain wrongly disabled: %q", r)
+	}
 }

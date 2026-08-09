@@ -17,10 +17,8 @@ import (
 	"github.com/nickooan/ntee-editor/internal/config"
 	"github.com/nickooan/ntee-editor/internal/filetree"
 	"github.com/nickooan/ntee-editor/internal/fuzzy"
-	"github.com/nickooan/ntee-editor/internal/graphql"
 	"github.com/nickooan/ntee-editor/internal/input"
 	"github.com/nickooan/ntee-editor/internal/lsp"
-	"github.com/nickooan/ntee-editor/internal/openapi"
 	"github.com/nickooan/ntee-editor/internal/store"
 	"github.com/nickooan/ntee-editor/internal/syntax"
 	"github.com/nickooan/ntee-editor/internal/view"
@@ -62,8 +60,7 @@ const (
 func (m Model) inBarMode() bool {
 	return m.mode == modeCommand || m.mode == modeSearch || m.mode == modeExec ||
 		m.mode == modeSearchExec || m.mode == modeInspect ||
-		(m.mode == modeOpenAPI && m.openapiSearching) ||
-		(m.mode == modeGraphQL && m.graphqlSearching)
+		((m.mode == modeOpenAPI || m.mode == modeGraphQL) && m.preview.searching)
 }
 
 type Model struct {
@@ -88,6 +85,12 @@ type Model struct {
 	gitRepo          bool
 	gitDirty         map[string]bool
 	gitStatusRunning bool
+	gitStatusFailed  bool // latch: notice fires once per healthy→failed transition
+
+	// Idle/focus tracking for the status poll: no input for gitIdleThreshold
+	// (or a blurred terminal) pauses the 3s git status loop.
+	lastInputAt time.Time
+	termFocused bool
 
 	width, height int
 	ready         bool
@@ -96,6 +99,11 @@ type Model struct {
 	notice         string // transient status note, cleared on the next keypress
 	errText        string // transient error, cleared on the next keypress
 	messageOverlay string // dismissible centered message (e.g. binary file)
+
+	// :rm confirmation modal — armed by the query bar's rm command, resolved
+	// by enter/y (delete) or esc/n (cancel). "" = closed.
+	confirmRm    string
+	confirmRmDir bool
 
 	// Query input bar (home mode). Three-way state split, ported from
 	// r1quest: `command` is the editable typed text; `selectedCommand` is the
@@ -165,43 +173,13 @@ type Model struct {
 	blamePendingScroll int
 	blameHasPending    bool
 
-	// OpenAPI preview mode ("openapi" in the @exec bar): a read-only rendered
-	// view of the open spec file, built once per entry by renderOpenAPICmd
-	// (guarded by openapiGen). openapiCursor is the highlighted document row —
-	// the Esc source-jump target; every rendered row carries a {file, line}
-	// anchor back into the YAML, including rows from cross-file $refs.
-	openapiLines     []openapi.Line
-	openapiOutline   []openapi.OutlineEntry
-	openapiPlain     []string // per-row plain text (search + match overlay)
-	openapiCorpus    string   // plain rows joined with \n (the search corpus)
-	openapiScrollY   int
-	openapiCursor    int
-	openapiSel       int // outline selection index
-	openapiSearching bool
-	openapiSearch    string
-	openapiFocused   int // focused match index
-	openapiLoading   bool
-	openapiGen       int
-	openapiTitle     string // "Petstore API  v1.0.0" for the status bar
-
-	// GraphQL preview mode ("graphql" in the @exec bar): the OpenAPI mode's
-	// structure applied to SDL — the schema file set is gathered (same dir or
-	// graphqlrc globs), merged, and rendered once per entry by
-	// renderGraphQLCmd (guarded by graphqlGen). Every rendered row carries a
-	// {file, line} anchor, including rows merged from sibling schema files.
-	graphqlLines     []graphql.Line
-	graphqlOutline   []graphql.OutlineEntry
-	graphqlPlain     []string // per-row plain text (search + match overlay)
-	graphqlCorpus    string   // plain rows joined with \n (the search corpus)
-	graphqlScrollY   int
-	graphqlCursor    int
-	graphqlSel       int // outline selection index
-	graphqlSearching bool
-	graphqlSearch    string
-	graphqlFocused   int // focused match index
-	graphqlLoading   bool
-	graphqlGen       int
-	graphqlTitle     string // "12 types · 3 files" for the status bar
+	// Document preview modes ("openapi"/"graphql" in the @exec bar): one
+	// read-only rendered document shared by both modes (they are mutually
+	// exclusive; the active previewKind descriptor derives from m.mode).
+	// preview.cursor is the highlighted document row — the Esc source-jump
+	// target; every rendered row carries a {file, line} anchor back into its
+	// source, including rows from cross-file $refs / sibling schema files.
+	preview previewState
 
 	// Conflict-solving mode ("git scf" in the @exec bar): browses and mutates
 	// the LIVE edit buffer, so cursor and scroll are the edit session's own
@@ -211,9 +189,13 @@ type Model struct {
 	conflictChoice    int // popup option: 0 ours, 1 theirs, 2 both
 	conflictChoiceIdx int // block index the choice belongs to; -1 = none
 
-	// Undo timeline: snapshot seqs only; content lives in the store.
+	// Undo timeline: snapshot seqs only; content lives in the store. snapMeta
+	// remembers each written snapshot's content hash + kind (a reference type,
+	// shared by Model copies like draftSet) so the burst-boundary dedupe never
+	// re-reads the store; reset per edit session.
 	undoSeqs   []int64
 	undoCursor int
+	snapMeta   map[int64]snapMetaEntry
 	nextSeq    int64
 	snapDirty  bool // edits since the last snapshot
 
@@ -228,8 +210,7 @@ type Model struct {
 	// Shared by all Model copies (pointer): per-(content,query) match memos
 	// for search mode and the openapi/graphql preview searches.
 	searchMC      *matchCache
-	openapiMC     *matchCache
-	graphqlMC     *matchCache
+	previewMC     *matchCache
 	frames        *frameCache
 	grepPreviewRC *regexCache
 
@@ -392,10 +373,11 @@ func New(cfg config.Config, db store.Backend, root, notice string, reg lsp.Regis
 		draftSet:      map[string]bool{},
 		cursorMem:     map[string]store.TabCursor{},
 		searchMC:      &matchCache{},
-		openapiMC:     &matchCache{},
-		graphqlMC:     &matchCache{},
+		previewMC:     &matchCache{},
 		frames:        &frameCache{},
 		grepPreviewRC: &regexCache{},
+		lastInputAt:   time.Now(),
+		termFocused:   true,
 	}
 	lastFile := ""
 	if sess, ok := db.LoadSession(); ok {
@@ -503,6 +485,24 @@ func (m Model) refreshGitStatusCmd() tea.Cmd {
 		return gitStatusMsg{dirty: dirty, ok: ok}
 	}
 }
+
+// maybeGitRefresh is the one gate for spawning a git status refresh: no-op
+// outside a repo or while one is already in flight (previously Ctrl+S,
+// :refresh, and Ctrl+U bypassed the in-flight guard and could stack spawns
+// against the poller).
+func (m Model) maybeGitRefresh() (Model, tea.Cmd) {
+	if !m.gitRepo || m.gitStatusRunning {
+		return m, nil
+	}
+	m.gitStatusRunning = true
+	return m, m.refreshGitStatusCmd()
+}
+
+// gitIdleThreshold pauses the status poll when the editor has seen no input
+// for this long (or the terminal is unfocused) — an idle editor should not
+// run `git status` every 3 seconds forever. The tick keeps re-arming, so the
+// first input after an idle stretch resumes polling within one interval.
+const gitIdleThreshold = 60 * time.Second
 
 // signatureValid stat-sweeps a persisted index's directory-mtime map against
 // the current tree. It returns false on the first missing or changed directory
@@ -686,18 +686,37 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, splashTick()
 
 	case gitStatusTickMsg:
-		// Poll heartbeat: refresh unless one is already in flight, and always
-		// re-arm the next tick so the loop survives a skipped round.
-		if m.gitStatusRunning {
+		// Poll heartbeat: refresh unless one is already in flight or the
+		// editor is idle/unfocused; always re-arm the next tick so the loop
+		// survives every skipped round.
+		if !m.termFocused || time.Since(m.lastInputAt) > gitIdleThreshold {
 			return m, gitStatusTick()
 		}
-		m.gitStatusRunning = true
-		return m, tea.Batch(m.refreshGitStatusCmd(), gitStatusTick())
+		m, cmd := m.maybeGitRefresh()
+		return m, tea.Batch(cmd, gitStatusTick())
+
+	case tea.FocusMsg:
+		// Regaining focus counts as activity, and external processes may have
+		// changed the tree while we were away — refresh now.
+		m.termFocused = true
+		m.lastInputAt = time.Now()
+		return m.maybeGitRefresh()
+
+	case tea.BlurMsg:
+		m.termFocused = false
+		return m, nil
 
 	case gitStatusMsg:
 		m.gitStatusRunning = false
 		if msg.ok {
 			m.gitDirty = msg.dirty
+			m.gitStatusFailed = false
+		} else if !m.gitStatusFailed {
+			// Surface a git-status failure once per healthy→failed transition
+			// (not per 3s tick); the previous dirty set is kept rather than
+			// blanked, so the sidebar shows stale markers instead of none.
+			m.gitStatusFailed = true
+			m.notice = "git status failed — sidebar change markers may be stale"
 		}
 		return m, nil
 
@@ -707,11 +726,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case blameReadyMsg:
 		return m.handleBlameReady(msg)
 
-	case openapiReadyMsg:
-		return m.handleOpenAPIReady(msg)
-
-	case graphqlReadyMsg:
-		return m.handleGraphQLReady(msg)
+	case previewReadyMsg:
+		return m.handlePreviewReady(msg)
 
 	case grepBatchMsg:
 		return m.handleGrepBatch(msg)
@@ -732,6 +748,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleCompletion(msg)
 
 	case tea.MouseMsg:
+		m.lastInputAt = time.Now()
 		if m.splash {
 			return m, nil
 		}
@@ -744,6 +761,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handlePaste(msg.Content)
 
 	case tea.KeyPressMsg:
+		m.lastInputAt = time.Now()
 		k := msg.String()
 		if k == "ctrl+c" || k == "ctrl+q" {
 			return m.quit()
@@ -760,6 +778,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.messageOverlay != "" {
 			if k == "enter" || k == "esc" {
 				m.messageOverlay = ""
+			}
+			return m, nil
+		}
+
+		if m.confirmRm != "" {
+			// The :rm confirmation modal: enter/y deletes, esc/n cancels,
+			// everything else is swallowed (the messageOverlay contract).
+			rel := m.confirmRm
+			switch k {
+			case "enter", "y":
+				m.confirmRm, m.confirmRmDir = "", false
+				return m.queryRemove(rel)
+			case "esc", "n":
+				m.confirmRm, m.confirmRmDir = "", false
+				m.notice = "rm cancelled"
 			}
 			return m, nil
 		}
@@ -809,10 +842,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleBlameKey(msg)
 		case modeConflict:
 			return m.handleConflictKey(msg)
-		case modeOpenAPI:
-			return m.handleOpenAPIKey(msg)
-		case modeGraphQL:
-			return m.handleGraphQLKey(msg)
+		case modeOpenAPI, modeGraphQL:
+			return m.handlePreviewKey(msg)
 		}
 	}
 	return m, nil
@@ -823,7 +854,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // Only the grep query and the edit buffer are multi-line — the single-line
 // bars take the paste with newlines collapsed to spaces.
 func (m Model) handlePaste(text string) (tea.Model, tea.Cmd) {
-	if m.messageOverlay != "" || m.defPickOpen {
+	if m.messageOverlay != "" || m.defPickOpen || m.confirmRm != "" {
 		return m, nil
 	}
 	if m.fuzzyOpen {
@@ -856,15 +887,10 @@ func (m Model) handlePaste(text string) (tea.Model, tea.Cmd) {
 		m.searchExecInput, m.searchExecCursor = input.InsertAtCursor(m.searchExecInput, m.searchExecCursor, pasteLine(text))
 	case modeInspect:
 		m.inspectInput, m.inspectCursor = input.InsertAtCursor(m.inspectInput, m.inspectCursor, pasteLine(text))
-	case modeOpenAPI:
-		if m.openapiSearching {
-			m.openapiSearch += pasteLine(text)
-			m = m.focusOpenAPIMatch()
-		}
-	case modeGraphQL:
-		if m.graphqlSearching {
-			m.graphqlSearch += pasteLine(text)
-			m = m.focusGraphQLMatch()
+	case modeOpenAPI, modeGraphQL:
+		if m.preview.searching {
+			m.preview.search += pasteLine(text)
+			m = m.focusPreviewMatch()
 		}
 	}
 	return m, nil
@@ -1008,8 +1034,7 @@ func (m Model) openFileAt(rel string) Model {
 	m.jumpStack = nil          // a deliberate open starts a fresh navigation trail
 	m = m.clearDiffState()     // and ends any diff review of the file being left
 	m = m.clearConflictState() // likewise any conflict-solving session
-	m = m.clearOpenAPIState()  // and any OpenAPI preview
-	m = m.clearGraphQLState()  // and any GraphQL preview
+	m = m.clearPreviewState()  // and any OpenAPI/GraphQL preview
 	_ = m.db.TouchOpened(store.OpenedFile{Path: rel, LastOpenedAt: time.Now().UnixMilli()})
 	if client, ok := m.lsp.ClientFor(f.Path); ok {
 		client.DidOpen(f.Path, f.Content)

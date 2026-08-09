@@ -194,6 +194,20 @@ func (m Model) queryCreate(verb, rel string) (tea.Model, tea.Cmd) {
 	return m.openFileAt(rel), nil
 }
 
+// armRemoveConfirm stats the :rm target and opens the confirmation modal —
+// deletion is irreversible (no trash, and dropRemovedPath also forgets tabs,
+// drafts, and cursor memory), so a single Enter never deletes directly.
+func (m Model) armRemoveConfirm(rel string) (tea.Model, tea.Cmd) {
+	info, err := os.Stat(filepath.Join(m.root, filepath.FromSlash(rel)))
+	if err != nil {
+		m.errText = "rm: no such path: " + rel
+		return m, nil
+	}
+	m.confirmRm = rel
+	m.confirmRmDir = info.IsDir()
+	return m, nil
+}
+
 // queryRemove deletes the typed path (file, or directory with its whole
 // subtree), prunes any editor state that pointed into it (tabs, drafts, the
 // open file), and moves the bar to the parent directory.
@@ -330,7 +344,7 @@ func (m Model) submitQuery(entries []filetree.FileTreeEntry, suggestions []filet
 	// executeCommand.
 	if verb, rel, ok := parseInlineFs(trimmed); ok {
 		if verb == "rm" {
-			return m.queryRemove(rel)
+			return m.armRemoveConfirm(rel)
 		}
 		return m.queryCreate(verb, rel)
 	}

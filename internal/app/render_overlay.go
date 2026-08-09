@@ -59,6 +59,22 @@ func (m Model) renderMessageOverlay(width, height int) string {
 		lipgloss.WithWhitespaceStyle(whitespaceStyle))
 }
 
+// renderConfirmRmOverlay centers the :rm confirmation box in the main pane —
+// the wording distinguishes a recursive directory delete from a single file.
+func (m Model) renderConfirmRmOverlay(width, height int) string {
+	title := "remove file " + m.confirmRm + "?"
+	if m.confirmRmDir {
+		title = "remove directory " + m.confirmRm + " and its contents?"
+	}
+	hint := "[enter] remove · [esc] cancel"
+	boxWidth := input.Clamp(max(len([]rune(title)), len([]rune(hint)))+4, 20, max(20, width-2))
+	box := modalStyle.Width(boxWidth + 2).Render(
+		modalTitleStyle.Render(title) + "\n\n" + overlayHintStyle.Render(hint),
+	)
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box,
+		lipgloss.WithWhitespaceStyle(whitespaceStyle))
+}
+
 // renderFuzzyOverlay draws the fuzzy file finder (Ctrl+P goto / Ctrl+U
 // uncommitted — fuzzyPrompt labels the source): query input on top, matches
 // beneath with the matched runes bold.

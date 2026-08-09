@@ -384,3 +384,40 @@ func TestPlanRespectsFilteredRecipes(t *testing.T) {
 		}
 	}
 }
+
+// Every non-brew recipe target must carry an explicit version pin — an
+// unpinned install would auto-execute whatever upstream publishes next.
+func TestRecipesArePinned(t *testing.T) {
+	for lang, lc := range Recipes() {
+		for _, s := range lc.Install {
+			switch s.Kind {
+			case "brew":
+				// brew install has no version syntax; accepted exception.
+			case "go", "gem":
+				if !strings.Contains(s.Package, "@") {
+					t.Errorf("%s: %s package %q is unpinned", lang, s.Kind, s.Package)
+				}
+			case "npm":
+				for _, p := range s.Packages {
+					// Scoped packages start with @; the version pin is a later @.
+					if !strings.Contains(p[1:], "@") {
+						t.Errorf("%s: npm package %q is unpinned", lang, p)
+					}
+				}
+			}
+		}
+	}
+}
+
+// A gem pin is encoded pkg@version but gem has no @ syntax — installCmd must
+// split it into -v.
+func TestInstallCmdSplitsGemVersion(t *testing.T) {
+	name, args := installCmd(config.InstallStrategy{Kind: "gem", Package: "ruby-lsp@0.26.10"})
+	if name != "gem" || strings.Join(args, " ") != "install ruby-lsp -v 0.26.10" {
+		t.Fatalf("gem cmd = %s %v", name, args)
+	}
+	name, args = installCmd(config.InstallStrategy{Kind: "gem", Package: "ruby-lsp"})
+	if name != "gem" || strings.Join(args, " ") != "install ruby-lsp" {
+		t.Fatalf("unpinned gem cmd = %s %v", name, args)
+	}
+}

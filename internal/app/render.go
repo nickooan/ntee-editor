@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image/color"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -22,6 +23,7 @@ func (m Model) View() tea.View {
 	v := tea.NewView(m.render())
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
+	v.ReportFocus = true // FocusMsg/BlurMsg pause the idle git-status poll
 	return v
 }
 
@@ -47,20 +49,16 @@ func (m Model) render() string {
 		// Inspection owns both panes: the file tree gives way to the menu.
 		sidebarBody = m.renderInspectMenu(sidebarWidth-4, bodyHeight-2)
 	}
-	if m.mode == modeOpenAPI {
-		// The OpenAPI preview replaces the file tree with the spec outline.
-		sidebarBody = m.renderOpenAPISidebar(sidebarWidth-4, bodyHeight-2)
-	}
-	if m.mode == modeGraphQL {
-		// The GraphQL preview replaces the file tree with the schema outline.
-		sidebarBody = m.renderGraphQLSidebar(sidebarWidth-4, bodyHeight-2)
+	if m.mode == modeOpenAPI || m.mode == modeGraphQL {
+		// The document preview replaces the file tree with its outline.
+		sidebarBody = m.renderPreviewSidebar(sidebarWidth-4, bodyHeight-2)
 	}
 	// lipgloss v2: Width/Height include the border, so the panes take the
 	// full slot (v1 set the inner size and the border grew them by 2).
 	sidebar := paneStyle.Width(sidebarWidth).Height(bodyHeight).Render(sidebarBody)
 
 	// Overlays own the whole pane; otherwise the tab strip steals the top row.
-	overlayOpen := m.fuzzyOpen || m.messageOverlay != "" || m.defPickOpen || m.grepOpen
+	overlayOpen := m.fuzzyOpen || m.messageOverlay != "" || m.defPickOpen || m.grepOpen || m.confirmRm != ""
 	showTabs := len(m.tabs) > 0 && !overlayOpen && m.mode != modeInspect
 	innerH := bodyHeight - 2
 	if showTabs {
@@ -73,6 +71,8 @@ func (m Model) render() string {
 		mainBody = m.renderFuzzyOverlay(mainWidth-4, bodyHeight-2)
 	case m.messageOverlay != "":
 		mainBody = m.renderMessageOverlay(mainWidth-4, bodyHeight-2)
+	case m.confirmRm != "":
+		mainBody = m.renderConfirmRmOverlay(mainWidth-4, bodyHeight-2)
 	case m.defPickOpen:
 		mainBody = m.renderDefPickOverlay(mainWidth-4, bodyHeight-2)
 	case m.grepOpen:
@@ -89,10 +89,8 @@ func (m Model) render() string {
 		mainBody = m.renderBlame(mainWidth-4, innerH)
 	case m.mode == modeConflict:
 		mainBody = m.renderConflict(mainWidth-4, innerH)
-	case m.mode == modeOpenAPI:
-		mainBody = m.renderOpenAPI(mainWidth-4, innerH)
-	case m.mode == modeGraphQL:
-		mainBody = m.renderGraphQL(mainWidth-4, innerH)
+	case m.mode == modeOpenAPI, m.mode == modeGraphQL:
+		mainBody = m.renderPreview(mainWidth-4, innerH)
 	case m.openFile != nil:
 		mainBody = m.renderFile(mainWidth-4, innerH)
 	default:
@@ -191,10 +189,8 @@ func (m Model) renderStatusLine() string {
 		return m.renderBlameStatus()
 	case modeConflict:
 		return m.renderConflictStatus()
-	case modeOpenAPI:
-		return m.renderOpenAPIStatus()
-	case modeGraphQL:
-		return m.renderGraphQLStatus()
+	case modeOpenAPI, modeGraphQL:
+		return m.renderPreviewStatus()
 	case modeInspect:
 		bar := execPromptStyle.Render("@inspection >") +
 			renderInputLineStyled(m.inspectInput, m.inspectCursor, execTextStyle) +
@@ -791,43 +787,50 @@ func renderEditLine(line string, cx, width int, sel *selRange) string {
 		selE = input.Clamp(e, off, end) - off
 	}
 
-	var b strings.Builder
+	// The row is at most 5 maximal runs — line-hl, selection, the cursor cell,
+	// selection, line-hl — so emit spans at the style boundaries instead of a
+	// Render per column (the batching renderSearchLine documents).
+	window := make([]rune, width)
 	for col := 0; col < width; col++ {
-		idx := off + col
-		ch := " "
-		if idx < end {
-			ch = string(runes[idx])
+		if idx := off + col; idx < end {
+			window[col] = runes[idx]
+		} else {
+			window[col] = ' '
 		}
+	}
+	cuts := []int{0, curCol, curCol + 1, width}
+	if selS >= 0 {
+		cuts = append(cuts, selS, selE)
+	}
+	sort.Ints(cuts)
+	var b strings.Builder
+	for i := 0; i+1 < len(cuts); i++ {
+		lo, hi := cuts[i], min(cuts[i+1], width)
+		if lo >= hi {
+			continue // duplicate or out-of-window boundary
+		}
+		st := cursorLineStyle // Sublime-style current-line highlight
 		switch {
-		case col == curCol:
-			b.WriteString(cursorStyle.Render(ch))
-		case selS >= 0 && col >= selS && col < selE:
-			b.WriteString(selectionStyle.Render(ch))
-		default:
-			// Sublime-style current-line highlight.
-			b.WriteString(cursorLineStyle.Render(ch))
+		case lo == curCol:
+			st = cursorStyle
+		case selS >= 0 && lo >= selS && lo < selE:
+			st = selectionStyle
 		}
+		b.WriteString(st.Render(string(window[lo:hi])))
 	}
 	return b.String()
 }
 
 // renderSelectedLine draws a whole line covered by a line-wise selection: its
 // runes on the selection background, padded to width. No cursor, no horizontal
-// scroll (line-wise selections start at column 0).
+// scroll (line-wise selections start at column 0). One uniform run — this is
+// called for every visible line of a line-wise selection, so a per-char Render
+// here was width×height lipgloss calls per frame.
 func renderSelectedLine(line string, width int) string {
 	if width < 1 {
 		width = 1
 	}
-	runes := []rune(line)
-	var b strings.Builder
-	for col := 0; col < width; col++ {
-		ch := " "
-		if col < len(runes) {
-			ch = string(runes[col])
-		}
-		b.WriteString(selectionStyle.Render(ch))
-	}
-	return b.String()
+	return plainWindowStyled(line, 0, width, selectionStyle)
 }
 
 func (m Model) renderSearch(width, height int) string {

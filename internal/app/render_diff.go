@@ -113,18 +113,23 @@ func renderDiffCursorLine(line string, cx, width int, lineStyle lipgloss.Style) 
 	end := min(off+width, n)
 	curCol := at - off
 
-	var b strings.Builder
+	// Three maximal runs — lineStyle prefix, the cursor cell, lineStyle
+	// suffix+padding — instead of a Render per column.
+	window := make([]rune, width)
 	for col := 0; col < width; col++ {
-		idx := off + col
-		ch := " "
-		if idx < end {
-			ch = string(runes[idx])
-		}
-		if col == curCol {
-			b.WriteString(cursorStyle.Render(ch))
+		if idx := off + col; idx < end {
+			window[col] = runes[idx]
 		} else {
-			b.WriteString(lineStyle.Render(ch))
+			window[col] = ' '
 		}
+	}
+	var b strings.Builder
+	if curCol > 0 {
+		b.WriteString(lineStyle.Render(string(window[:curCol])))
+	}
+	b.WriteString(cursorStyle.Render(string(window[curCol : curCol+1])))
+	if curCol+1 < width {
+		b.WriteString(lineStyle.Render(string(window[curCol+1:])))
 	}
 	return b.String()
 }

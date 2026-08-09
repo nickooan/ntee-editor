@@ -45,13 +45,13 @@ func graphQLFixture(t *testing.T) Model {
 	if m.mode != modeGraphQL {
 		t.Fatalf("graphql should enter modeGraphQL, got %v (err=%q)", m.mode, m.errText)
 	}
-	if !m.graphqlLoading || cmd == nil {
+	if !m.preview.loading || cmd == nil {
 		t.Fatal("entry must kick off the async render")
 	}
 	next, _ = m.Update(cmd())
 	m = next.(Model)
-	if m.graphqlLoading || len(m.graphqlLines) == 0 {
-		t.Fatalf("render did not land: loading=%v lines=%d err=%q", m.graphqlLoading, len(m.graphqlLines), m.errText)
+	if m.preview.loading || len(m.preview.lines) == 0 {
+		t.Fatalf("render did not land: loading=%v lines=%d err=%q", m.preview.loading, len(m.preview.lines), m.errText)
 	}
 	return m
 }
@@ -59,12 +59,12 @@ func graphQLFixture(t *testing.T) Model {
 // graphQLRow finds the first rendered row containing sub.
 func graphQLRow(t *testing.T, m Model, sub string) int {
 	t.Helper()
-	for i, l := range m.graphqlPlain {
+	for i, l := range m.preview.plain {
 		if strings.Contains(l, sub) {
 			return i
 		}
 	}
-	t.Fatalf("no rendered row contains %q:\n%s", sub, strings.Join(m.graphqlPlain, "\n"))
+	t.Fatalf("no rendered row contains %q:\n%s", sub, strings.Join(m.preview.plain, "\n"))
 	return -1
 }
 
@@ -158,7 +158,7 @@ func TestGraphQLRenderAndOutline(t *testing.T) {
 	graphQLRow(t, m, "(+1 extend)")
 
 	var labels []string
-	for _, e := range m.graphqlOutline {
+	for _, e := range m.preview.outline {
 		labels = append(labels, e.Label)
 	}
 	if got := strings.Join(labels, " "); got != "Queries user extra Types User" {
@@ -185,52 +185,52 @@ func TestGraphQLReadOnly(t *testing.T) {
 
 func TestGraphQLCursorAndOutlineJump(t *testing.T) {
 	m := graphQLFixture(t)
-	m.graphqlCursor, m.graphqlScrollY = 0, 0
+	m.preview.cursor, m.preview.scrollY = 0, 0
 	m = key(m, keyPress(tea.KeyDown))
 	m = key(m, keyPress(tea.KeyDown))
-	if m.graphqlCursor != 2 {
-		t.Fatalf("cursor = %d, want 2", m.graphqlCursor)
+	if m.preview.cursor != 2 {
+		t.Fatalf("cursor = %d, want 2", m.preview.cursor)
 	}
 
 	// Select the "user" entry in the outline and jump to it.
-	m.graphqlSel = 0
+	m.preview.sel = 0
 	m = key(m, shiftKey(tea.KeyDown))
-	if m.graphqlSel != 1 {
-		t.Fatalf("outline sel = %d, want 1", m.graphqlSel)
+	if m.preview.sel != 1 {
+		t.Fatalf("outline sel = %d, want 1", m.preview.sel)
 	}
 	m = key(m, keyPress(tea.KeyEnter))
-	if m.graphqlCursor != m.graphqlOutline[1].LineIdx {
-		t.Fatalf("cursor = %d, want anchor %d", m.graphqlCursor, m.graphqlOutline[1].LineIdx)
+	if m.preview.cursor != m.preview.outline[1].LineIdx {
+		t.Fatalf("cursor = %d, want anchor %d", m.preview.cursor, m.preview.outline[1].LineIdx)
 	}
 }
 
 func TestGraphQLSearchCycleAndLand(t *testing.T) {
 	m := graphQLFixture(t)
 	m = key(m, typeRune('/'))
-	if !m.graphqlSearching {
+	if !m.preview.searching {
 		t.Fatal("/ must open the search bar")
 	}
 	m = runes(m, "User")
-	matches := m.graphqlMatches()
+	matches := m.previewMatches()
 	if len(matches) < 2 {
 		t.Fatalf("matches = %d, want ≥2", len(matches))
 	}
-	if m.graphqlCursor != matches[m.graphqlFocused].LineIndex {
+	if m.preview.cursor != matches[m.preview.focused].LineIndex {
 		t.Fatal("typing must land the cursor on the focused match")
 	}
 
-	first := m.graphqlFocused
+	first := m.preview.focused
 	m = key(m, keyPress(tea.KeyDown))
-	if m.graphqlFocused == first {
+	if m.preview.focused == first {
 		t.Fatal("down must advance the focused match")
 	}
 
-	landed := m.graphqlCursor
+	landed := m.preview.cursor
 	m = key(m, keyPress(tea.KeyEnter))
-	if m.graphqlSearching || m.graphqlSearch != "" {
+	if m.preview.searching || m.preview.search != "" {
 		t.Fatal("enter must close the search bar")
 	}
-	if m.graphqlCursor != landed {
+	if m.preview.cursor != landed {
 		t.Fatal("enter must keep the cursor on the landed match")
 	}
 
@@ -238,7 +238,7 @@ func TestGraphQLSearchCycleAndLand(t *testing.T) {
 	m = key(m, typeRune('/'))
 	m = runes(m, "x")
 	m = key(m, keyPress(tea.KeyEsc))
-	if m.graphqlSearching || m.mode != modeGraphQL {
+	if m.preview.searching || m.mode != modeGraphQL {
 		t.Fatal("first esc closes only the search bar")
 	}
 	m = key(m, keyPress(tea.KeyEsc))
@@ -250,8 +250,8 @@ func TestGraphQLSearchCycleAndLand(t *testing.T) {
 func TestGraphQLExitSameFileSource(t *testing.T) {
 	m := graphQLFixture(t)
 	row := graphQLRow(t, m, "user(id: ID!): User")
-	m.graphqlCursor = row
-	src := m.graphqlLines[row].Src
+	m.preview.cursor = row
+	src := m.preview.lines[row].Src
 	if src.File != "schema.graphql" {
 		t.Fatalf("user src = %+v", src)
 	}
@@ -265,7 +265,7 @@ func TestGraphQLExitSameFileSource(t *testing.T) {
 	if !strings.Contains(m.edit.lines[m.edit.cy], "user(id: ID!)") {
 		t.Fatalf("landed on %q", m.edit.lines[m.edit.cy])
 	}
-	if len(m.graphqlLines) != 0 {
+	if len(m.preview.lines) != 0 {
 		t.Fatal("exit must clear the preview state")
 	}
 }
@@ -273,8 +273,8 @@ func TestGraphQLExitSameFileSource(t *testing.T) {
 func TestGraphQLExitCrossFileSource(t *testing.T) {
 	m := graphQLFixture(t)
 	row := graphQLRow(t, m, "nickname")
-	m.graphqlCursor = row
-	src := m.graphqlLines[row].Src
+	m.preview.cursor = row
+	src := m.preview.lines[row].Src
 	if src.File != "extra.graphql" {
 		t.Fatalf("nickname src = %+v", src)
 	}
@@ -295,10 +295,10 @@ func TestGraphQLExitCrossFileSource(t *testing.T) {
 
 func TestGraphQLWheelScroll(t *testing.T) {
 	m := graphQLFixture(t)
-	m.graphqlCursor, m.graphqlScrollY = 0, 0
+	m.preview.cursor, m.preview.scrollY = 0, 0
 	m = m.wheelScroll(1)
-	if m.graphqlCursor != wheelScrollLines {
-		t.Fatalf("wheel cursor = %d, want %d", m.graphqlCursor, wheelScrollLines)
+	if m.preview.cursor != wheelScrollLines {
+		t.Fatalf("wheel cursor = %d, want %d", m.preview.cursor, wheelScrollLines)
 	}
 }
 
@@ -318,12 +318,12 @@ func TestGraphQLGraphqlrcGather(t *testing.T) {
 	m = next.(Model)
 	next, _ = m.Update(cmd())
 	m = next.(Model)
-	if len(m.graphqlLines) == 0 {
+	if len(m.preview.lines) == 0 {
 		t.Fatalf("render did not land: err=%q", m.errText)
 	}
 	graphQLRow(t, m, "via .graphqlrc.yml")
 	graphQLRow(t, m, "b: Int") // merged via the glob
-	for _, l := range m.graphqlPlain {
+	for _, l := range m.preview.plain {
 		if strings.Contains(l, "Decoy") {
 			t.Fatalf("decoy outside the glob must not merge: %q", l)
 		}

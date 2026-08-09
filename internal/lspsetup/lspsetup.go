@@ -5,6 +5,7 @@
 package lspsetup
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/nickooan/ntee-editor/internal/config"
 	"github.com/nickooan/ntee-editor/internal/lsp"
@@ -21,6 +23,14 @@ import (
 
 // Recipes returns the built-in per-language install recipes. Each value's LSP
 // block is the resulting server invocation; Install lists how to obtain it.
+//
+// Versions are pinned: whatever gets installed is auto-executed by the editor
+// on the next matching file open, so "latest" would mean running unreviewed
+// code the moment upstream publishes it. brew formulae are the exception —
+// `brew install` has no version syntax. To bump a pin: check the package's
+// releases (npm view <pkg> version / gem info -r ruby-lsp / gopls release
+// tags), update the string here and in ensureClassicTS, and run
+// --prepare-lsp to verify the install + handshake end to end.
 func Recipes() map[string]config.LanguageConfig {
 	brew := func(formula, requires, command string) []config.InstallStrategy {
 		return []config.InstallStrategy{{
@@ -39,7 +49,7 @@ func Recipes() map[string]config.LanguageConfig {
 			LSP:        &config.LSPServerConfig{Command: "gopls"},
 			Install: []config.InstallStrategy{{
 				Kind: "go", Requires: "go",
-				Package: "golang.org/x/tools/gopls@latest", Command: "gopls",
+				Package: "golang.org/x/tools/gopls@v0.23.0", Command: "gopls",
 			}},
 		},
 		"typescript": {
@@ -50,7 +60,7 @@ func Recipes() map[string]config.LanguageConfig {
 			// (e.g. the 7.x native preview). Instead a compatible classic TS is
 			// installed into a private editor toolchain (ensureClassicTS) and the
 			// server is pointed at it via tsserver.path.
-			Install: npm([]string{"typescript-language-server"}, "typescript-language-server", "--stdio"),
+			Install: npm([]string{"typescript-language-server@5.3.0"}, "typescript-language-server", "--stdio"),
 		},
 		"java": {
 			Extensions: []string{".java"},
@@ -66,13 +76,13 @@ func Recipes() map[string]config.LanguageConfig {
 			Extensions: []string{".rb"},
 			LSP:        &config.LSPServerConfig{Command: "ruby-lsp"},
 			Install: []config.InstallStrategy{{
-				Kind: "gem", Requires: "ruby", Package: "ruby-lsp", Command: "ruby-lsp",
+				Kind: "gem", Requires: "ruby", Package: "ruby-lsp@0.26.10", Command: "ruby-lsp",
 			}},
 		},
 		"python": {
 			Extensions: []string{".py"},
 			LSP:        &config.LSPServerConfig{Command: "pyright-langserver", Args: []string{"--stdio"}},
-			Install:    npm([]string{"pyright"}, "pyright-langserver", "--stdio"),
+			Install:    npm([]string{"pyright@1.1.411"}, "pyright-langserver", "--stdio"),
 		},
 		"vue": {
 			Extensions: []string{".vue"},
@@ -84,7 +94,7 @@ func Recipes() map[string]config.LanguageConfig {
 				Args:    []string{"--stdio"},
 				Bridge:  &config.BridgeConfig{To: "typescript", Command: "typescript.tsserverRequest"},
 			},
-			Install: npm([]string{"@vue/language-server"}, "vue-language-server", "--stdio"),
+			Install: npm([]string{"@vue/language-server@3.3.9"}, "vue-language-server", "--stdio"),
 		},
 	}
 }
@@ -105,6 +115,11 @@ type Preparer struct {
 	out    io.Writer
 }
 
+// installTimeout bounds one installer invocation (brew/npm/gem/go install).
+// Generous — a cold brew formula with dependencies can take minutes — but a
+// wedged package manager no longer hangs --prepare-lsp forever.
+const installTimeout = 10 * time.Minute
+
 // NewPreparer builds a Preparer wired to the real platform, streaming installer
 // output to out.
 func NewPreparer(out io.Writer) *Preparer {
@@ -114,9 +129,16 @@ func NewPreparer(out io.Writer) *Preparer {
 		LookPath: exec.LookPath,
 		Verify:   lsp.ResolveBinary,
 		Run: func(name string, args ...string) error {
-			cmd := exec.Command(name, args...)
+			ctx, cancel := context.WithTimeout(context.Background(), installTimeout)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, name, args...)
 			cmd.Stdout, cmd.Stderr = out, out
-			return cmd.Run()
+			cmd.WaitDelay = 5 * time.Second // reclaim pipes even if a grandchild inherits them
+			err := cmd.Run()
+			if err != nil && ctx.Err() != nil {
+				return fmt.Errorf("%s timed out after %s", name, installTimeout)
+			}
+			return err
 		},
 		TSDK:   defaultResolveTSDK,
 		Plugin: defaultResolvePlugin,
@@ -152,7 +174,9 @@ func defaultResolveTSDK() (string, error) {
 			return lib, nil
 		}
 	}
-	if out, err := exec.Command("npm", "root", "-g").Output(); err == nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if out, err := exec.CommandContext(ctx, "npm", "root", "-g").Output(); err == nil {
 		if lib := filepath.Join(strings.TrimSpace(string(out)), "typescript", "lib"); hasClassicTS(lib) {
 			return lib, nil
 		}
@@ -171,8 +195,8 @@ func (p *Preparer) ensureClassicTS() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	fmt.Fprintf(p.out, "\n=== typescript: installing private classic TS (npm install --prefix %s typescript@5) ===\n", tc)
-	if err := p.Run("npm", "install", "--prefix", tc, "typescript@5"); err != nil {
+	fmt.Fprintf(p.out, "\n=== typescript: installing private classic TS (npm install --prefix %s typescript@5.9.3) ===\n", tc)
+	if err := p.Run("npm", "install", "--prefix", tc, "typescript@5.9.3"); err != nil {
 		return "", fmt.Errorf("private typescript install failed: %w", err)
 	}
 	return p.TSDK()
@@ -494,6 +518,10 @@ func installCmd(s config.InstallStrategy) (name string, args []string) {
 	case "npm":
 		return "npm", append([]string{"install", "-g"}, s.Packages...)
 	case "gem":
+		// gem has no name@version syntax — split a "pkg@1.2.3" pin into -v.
+		if name, ver, ok := strings.Cut(s.Package, "@"); ok {
+			return "gem", []string{"install", name, "-v", ver}
+		}
 		return "gem", []string{"install", s.Package}
 	}
 	return "", nil

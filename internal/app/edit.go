@@ -6,6 +6,7 @@ import (
 	"unicode"
 
 	"github.com/nickooan/ntee-editor/internal/input"
+	"github.com/nickooan/ntee-editor/internal/store"
 )
 
 // Minimal multi-line editor state used by edit mode. Covers insert / delete /
@@ -39,6 +40,15 @@ type editor struct {
 	// cursor-line highlight keeps drawing.
 	selLineMode   bool
 	selLineAnchor int
+
+	// contentHashed's rev-keyed memo: burst boundaries need the joined buffer
+	// plus its hash (dedupe, snapshot write, LSP sync), and without this each
+	// call re-joins the whole file. Value fields — the cache travels with the
+	// Model copy that filled it.
+	contentCacheRev int
+	contentCacheOK  bool
+	contentCache    string
+	contentHash     string
 }
 
 // selRange is a half-open [start,end) span of rune columns on the cursor line.
@@ -49,6 +59,17 @@ func newEditor(content string) editor {
 }
 
 func (e editor) content() string { return strings.Join(e.lines, "\n") }
+
+// contentHashed returns the buffer's content and its store.ContentHash,
+// joining and hashing at most once per rev (mutators bump rev).
+func (e *editor) contentHashed() (content, hash string) {
+	if !e.contentCacheOK || e.contentCacheRev != e.rev {
+		e.contentCache = strings.Join(e.lines, "\n")
+		e.contentHash = store.ContentHash(e.contentCache)
+		e.contentCacheRev, e.contentCacheOK = e.rev, true
+	}
+	return e.contentCache, e.contentHash
+}
 
 func (e *editor) line() []rune { return []rune(e.lines[e.cy]) }
 

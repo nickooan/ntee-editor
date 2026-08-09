@@ -13,9 +13,11 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -139,14 +141,23 @@ func Default() Config {
 	}
 }
 
-// Load builds the effective config for a project root. Missing files are fine;
-// a malformed file is skipped (the editor should still start).
+// Load builds the effective config for a project root, discarding warnings.
 func Load(projectRoot string) Config {
+	cfg, _ := LoadWithWarnings(projectRoot)
+	return cfg
+}
+
+// LoadWithWarnings builds the effective config for a project root. Missing
+// files are fine; a malformed file is skipped so the editor still starts, but
+// the skip is reported — a typo'd config silently behaving like defaults is
+// worse than a notice.
+func LoadWithWarnings(projectRoot string) (Config, []string) {
 	cfg := Default()
+	var warnings []string
 	if path, err := ConfigPath(); err == nil {
-		merge(&cfg, path, true) // user config: trusted, may name executables
+		warnings = append(warnings, merge(&cfg, path, true)...) // user config: trusted, may name executables
 	}
-	merge(&cfg, filepath.Join(projectRoot, ".ntee-editor.yaml"), false)
+	warnings = append(warnings, merge(&cfg, filepath.Join(projectRoot, ".ntee-editor.yaml"), false)...)
 	if cfg.Editor.TabWidth < 1 {
 		cfg.Editor.TabWidth = 4
 	}
@@ -156,7 +167,7 @@ func Load(projectRoot string) Config {
 	if cfg.Tree.MaxIndexFiles < 1 {
 		cfg.Tree.MaxIndexFiles = 50000
 	}
-	return cfg
+	return cfg, warnings
 }
 
 // ConfigPath returns the user config file path: $XDG_CONFIG_HOME (else
@@ -186,7 +197,13 @@ func readUserConfig() (file Config, existing []byte, path string, err error) {
 	}
 	existing, readErr := os.ReadFile(path)
 	if readErr == nil {
-		_ = yaml.Unmarshal(existing, &file) // best-effort; malformed → treated as empty
+		if err := yaml.Unmarshal(existing, &file); err != nil {
+			// Refuse to edit on top of a malformed config: proceeding would
+			// overwrite the user's recoverable file with a defaults-seeded one.
+			return Config{}, nil, "", fmt.Errorf(
+				"user config %s is malformed (%s) — fix it or move it aside first; a prior backup may exist at %s.bak",
+				path, firstLine(err.Error()), path)
+		}
 	} else {
 		existing = nil
 		d := Default()
@@ -214,7 +231,11 @@ func writeUserConfig(path string, file *Config, existing []byte) error {
 		return err
 	}
 	if existing != nil {
-		_ = os.WriteFile(path+".bak", existing, 0o644) // best-effort backup
+		if err := os.WriteFile(path+".bak", existing, 0o644); err != nil {
+			// No backup → no rewrite: the rewrite loses the file's comments and
+			// the backup is the only way back.
+			return fmt.Errorf("config backup failed, not overwriting: %w", err)
+		}
 	}
 	return os.WriteFile(path, out, 0o644)
 }
@@ -285,16 +306,23 @@ func SetThemeSyntax(name string) (string, error) {
 	return path, nil
 }
 
-func merge(cfg *Config, path string, trustExec bool) {
+func merge(cfg *Config, path string, trustExec bool) (warnings []string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return
+		if !os.IsNotExist(err) {
+			warnings = append(warnings, "config "+path+" unreadable: "+firstLine(err.Error()))
+		}
+		return warnings
 	}
 	// Languages need union semantics for extensions, which plain unmarshal
 	// (replace) can't do — so decode the file's languages separately, then merge.
 	prior := cfg.Languages
 	cfg.Languages = nil
-	_ = yaml.Unmarshal(data, cfg) // scalar fields absent from the file keep prior values
+	if err := yaml.Unmarshal(data, cfg); err != nil {
+		// Fields parsed before the error may already be applied; report rather
+		// than silently running a half-configured editor.
+		warnings = append(warnings, "config "+path+" is malformed (partially applied): "+firstLine(err.Error()))
+	}
 	if !trustExec {
 		for name, l := range cfg.Languages {
 			// Untrusted (project-local) files may not name executables: lsp
@@ -304,6 +332,15 @@ func merge(cfg *Config, path string, trustExec bool) {
 		}
 	}
 	cfg.Languages = mergeLanguages(prior, cfg.Languages)
+	return warnings
+}
+
+// firstLine clips a (possibly multi-line yaml) error to its first line.
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
 }
 
 // mergeLanguages overlays the file's languages onto the accumulated ones: a

@@ -22,18 +22,19 @@ func (m Model) stashDraftIfDirty() Model {
 	}
 	m = m.flushBurst() // the timeline head must equal the live buffer
 
-	// Collect the undo steps up to the cursor, skipping index 0: that baseline
-	// is the on-disk content, re-seeded by beginEditSession on restore.
+	// Collect the last draftMaxSteps undo steps up to the cursor, skipping
+	// index 0: that baseline is the on-disk content, re-seeded by
+	// beginEditSession on restore. Reading only the kept window matters —
+	// each SnapshotGet returns full file content, and this runs on every tab
+	// switch/open/quit.
 	var steps []store.DraftStep
 	if m.undoCursor >= 1 && m.undoCursor < len(m.undoSeqs) {
-		for _, seq := range m.undoSeqs[1 : m.undoCursor+1] {
+		lo := max(1, m.undoCursor+1-draftMaxSteps)
+		for _, seq := range m.undoSeqs[lo : m.undoCursor+1] {
 			if snap, ok := m.db.SnapshotGet(seq); ok {
 				steps = append(steps, store.DraftStep{Kind: snap.Kind, Content: snap.Content})
 			}
 		}
-	}
-	if len(steps) > draftMaxSteps {
-		steps = steps[len(steps)-draftMaxSteps:]
 	}
 	content := m.edit.content()
 	if len(steps) == 0 || steps[len(steps)-1].Content != content {
@@ -68,6 +69,9 @@ func (m Model) restoreDraft(d store.Draft) Model {
 		seq := nextSeqAfter(m.nextSeq)
 		m.nextSeq = seq
 		_ = m.db.SnapshotPut(m.openRel, seq, step.Kind, step.Content)
+		if m.snapMeta != nil {
+			m.snapMeta[seq] = snapMetaEntry{hash: store.ContentHash(step.Content), kind: step.Kind}
+		}
 		m.undoSeqs = append(m.undoSeqs, seq)
 		head = step.Content
 	}

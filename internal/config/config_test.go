@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -341,5 +342,53 @@ func TestSetThemeSyntax(t *testing.T) {
 	}
 	if _, err := os.Stat(path + ".bak"); err != nil {
 		t.Fatal("expected a .bak backup")
+	}
+}
+
+func TestLoadWithWarningsReportsMalformedFile(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, ".ntee-editor.yaml"), []byte("editor:\n  tab_width: [not-an-int\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, warnings := LoadWithWarnings(root)
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "malformed") {
+		t.Fatalf("warnings = %v", warnings)
+	}
+	// The editor still starts with sane values.
+	if cfg.Editor.TabWidth < 1 {
+		t.Fatalf("defaults not applied: %+v", cfg.Editor)
+	}
+	// A clean load has no warnings.
+	if _, w := LoadWithWarnings(t.TempDir()); len(w) != 0 {
+		t.Fatalf("clean load warned: %v", w)
+	}
+}
+
+func TestConfigEditsRefuseMalformedUserConfig(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	cfgDir := filepath.Join(dir, "ntee-editor")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	malformed := []byte("languages: [broken\n")
+	path := filepath.Join(cfgDir, "config.yaml")
+	if err := os.WriteFile(path, malformed, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := SetThemeSyntax("nord"); err == nil || !strings.Contains(err.Error(), "malformed") {
+		t.Fatalf("SetThemeSyntax on a malformed config: err = %v", err)
+	}
+	if _, err := SetLanguagesEnabled([]string{"all"}, false); err == nil {
+		t.Fatal("SetLanguagesEnabled must refuse a malformed config")
+	}
+	if _, err := MergeUserLanguages(map[string]LanguageConfig{"x": {}}); err == nil {
+		t.Fatal("MergeUserLanguages must refuse a malformed config")
+	}
+	// The recoverable file was not overwritten.
+	if data, _ := os.ReadFile(path); string(data) != string(malformed) {
+		t.Fatal("malformed config was overwritten")
 	}
 }

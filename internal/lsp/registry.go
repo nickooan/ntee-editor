@@ -25,11 +25,23 @@ type Manager struct {
 	sink   func(any)
 	queued []any
 
+	// rootCache memoizes FindProjectRoot per file directory (13 marker stats
+	// per level, otherwise repeated on every doc-sync call). Lock-free; no
+	// eviction — bounded by the set of directories visited in a session. A
+	// marker file appearing mid-session yields a slightly-wide workspace
+	// folder, which is benign (same class as the folders dedupe).
+	rootCache sync.Map // dir → repoRoot
+
 	mu       sync.Mutex
 	clients  map[string]*serverClient
 	disabled map[string]string // language → reason it is off ("" / absent = usable)
 	restarts map[string]int    // rapid dead-server replacements per language (capped)
 	override map[string]bool   // language → runtime enable overriding config (inspection mode)
+	// notices collects messages produced under mu; emitting while holding mu
+	// can deadlock — the sink is program.Send (unbuffered), and the UI
+	// goroutine it hands to may itself be waiting on mu (View → Statuses).
+	// getOrStart/Enable drain this after unlocking.
+	notices []any
 }
 
 // maxServerRestarts bounds how many times a language's crashed server is
@@ -59,6 +71,15 @@ func NewManager(cfg config.Config, root string) *Manager {
 			disabled[lang] = "disabled in config"
 		}
 	}
+	// A bridge cycle (self-bridge, A↔B, or a chain reaching one) would make
+	// the runtime mirror/companion relays recurse without bound — disable any
+	// language whose bridge chain doesn't terminate, with a reason
+	// UnavailableReason can surface.
+	for lang := range cfg.Languages {
+		if reason := bridgeCycleReason(cfg.Languages, lang); reason != "" && disabled[lang] == "" {
+			disabled[lang] = reason
+		}
+	}
 	return &Manager{
 		cfg:      cfg,
 		root:     root,
@@ -67,6 +88,28 @@ func NewManager(cfg config.Config, root string) *Manager {
 		disabled: disabled,
 		restarts: map[string]int{},
 		override: map[string]bool{},
+	}
+}
+
+// bridgeCycleReason follows lang's bridge.To chain and reports a disable
+// reason when the chain revisits a language (a cycle the runtime relays would
+// recurse through forever) — "" when the chain terminates.
+func bridgeCycleReason(langs map[string]config.LanguageConfig, lang string) string {
+	seen := map[string]bool{lang: true}
+	chain := []string{lang}
+	cur := lang
+	for {
+		lc, ok := langs[cur]
+		if !ok || lc.LSP == nil || lc.LSP.Bridge == nil {
+			return ""
+		}
+		next := lc.LSP.Bridge.To
+		chain = append(chain, next)
+		if seen[next] {
+			return "lsp bridge cycle (" + strings.Join(chain, " → ") + ") — disabled"
+		}
+		seen[next] = true
+		cur = next
 	}
 }
 
@@ -107,14 +150,37 @@ func (m *Manager) ClientFor(path string) (Client, bool) {
 	// go.mod/…), not the whole opened tree — so a monorepo frontend loads its
 	// ~300 files, not the repo's ~15k. One server per language: the first file
 	// visited roots it; later projects are added as workspace folders.
-	repoRoot := filetree.FindProjectRoot(m.root, path)
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	c, ok := m.getOrStartLocked(lang, repoRoot)
+	c, ok := m.getOrStart(lang, m.projectRootFor(path))
 	if !ok {
 		return nil, false
 	}
 	return c, true
+}
+
+// projectRootFor resolves (and memoizes per directory) the file's nearest
+// project root. Resolved before m.mu is taken — the walk stats the disk.
+func (m *Manager) projectRootFor(path string) string {
+	dir := filepath.Dir(path)
+	if v, ok := m.rootCache.Load(dir); ok {
+		return v.(string)
+	}
+	root := filetree.FindProjectRoot(m.root, path)
+	m.rootCache.Store(dir, root)
+	return root
+}
+
+// getOrStart is getOrStartLocked plus the lock and the deferred notice drain
+// — every notice produced under m.mu is emitted only after it is released.
+func (m *Manager) getOrStart(lang, repoRoot string) (*serverClient, bool) {
+	m.mu.Lock()
+	c, ok := m.getOrStartLocked(lang, repoRoot)
+	notices := m.notices
+	m.notices = nil
+	m.mu.Unlock()
+	for _, n := range notices {
+		m.emit(n)
+	}
+	return c, ok
 }
 
 // UnavailableReason explains why ClientFor fails for path: an unmapped
@@ -139,10 +205,7 @@ func (m *Manager) UnavailableReason(path string) string {
 // it) with the file's repo as a workspace folder. Used by the hybrid bridge to
 // reach the companion (e.g. typescript) server.
 func (m *Manager) clientForLang(lang, file string) (*serverClient, bool) {
-	repoRoot := filetree.FindProjectRoot(m.root, file)
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.getOrStartLocked(lang, repoRoot)
+	return m.getOrStart(lang, m.projectRootFor(file))
 }
 
 // getOrStartLocked returns the (single) server for lang, starting it lazily and
@@ -168,10 +231,10 @@ func (m *Manager) getOrStartLocked(lang, repoRoot string) (*serverClient, bool) 
 		m.restarts[lang]++
 		if m.restarts[lang] >= maxServerRestarts {
 			m.disabled[lang] = lang + " lsp crashed repeatedly — disabled for this session (restart ntee to retry)"
-			m.emit(NoticeMsg{Text: m.disabled[lang]})
+			m.notices = append(m.notices, NoticeMsg{Text: m.disabled[lang]})
 			return nil, false
 		}
-		m.emit(NoticeMsg{Text: "restarting " + lang + " lsp"})
+		m.notices = append(m.notices, NoticeMsg{Text: "restarting " + lang + " lsp"})
 	}
 	lc, ok := m.cfg.Languages[lang]
 	enabled := ok && (lc.IsEnabled() || m.override[lang])
@@ -181,19 +244,29 @@ func (m *Manager) getOrStartLocked(lang, repoRoot string) (*serverClient, bool) 
 	}
 	if _, err := resolveBinary(lc.LSP.Command); err != nil {
 		m.disabled[lang] = lc.LSP.Command + " not found — try: ntee --prepare-lsp"
-		m.emit(NoticeMsg{Text: lc.LSP.Command + " not found — LSP disabled for " + lang})
+		m.notices = append(m.notices, NoticeMsg{Text: lc.LSP.Command + " not found — LSP disabled for " + lang})
 		return nil, false
 	}
 	c := newServerClient(lang, *lc.LSP, repoRoot, m.emit)
-	if lc.LSP.Bridge != nil {
+	// Runtime belt for the NewManager cycle check: never wire a self-bridge,
+	// and never hand a client itself as its companion — either would recurse
+	// (mirror → DidChange → mirror …) without bound.
+	bridged := lc.LSP.Bridge != nil && lc.LSP.Bridge.To != lang
+	if bridged {
 		to := lc.LSP.Bridge.To
 		c.tsBridge = m.makeBridge(*lc.LSP.Bridge)
 		c.mirror = m.makeMirror(*lc.LSP.Bridge)
-		c.companionFor = func(file string) (*serverClient, bool) { return m.clientForLang(to, file) }
+		c.companionFor = func(file string) (*serverClient, bool) {
+			ts, ok := m.clientForLang(to, file)
+			if !ok || ts == c {
+				return nil, false
+			}
+			return ts, true
+		}
 	}
 	m.clients[lang] = c
 	go c.start()
-	if lc.LSP.Bridge != nil {
+	if bridged {
 		// Warm the companion (e.g. typescript) now so it is loading its project
 		// in parallel — otherwise the first bridged request starts it cold and
 		// times out. Best-effort; safe under m.mu (getOrStartLocked doesn't lock).
@@ -306,12 +379,19 @@ func (m *Manager) Statuses() []LangStatus {
 // no command) come back in reason; async crashes arrive as NoticeMsg.
 func (m *Manager) Enable(lang string) (bool, string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	delete(m.disabled, lang)
 	m.restarts[lang] = 0
 	m.override[lang] = true
-	if _, ok := m.getOrStartLocked(lang, m.root); !ok {
-		return false, m.disabled[lang]
+	_, ok := m.getOrStartLocked(lang, m.root)
+	reason := m.disabled[lang]
+	notices := m.notices
+	m.notices = nil
+	m.mu.Unlock()
+	for _, n := range notices {
+		m.emit(n)
+	}
+	if !ok {
+		return false, reason
 	}
 	return true, ""
 }

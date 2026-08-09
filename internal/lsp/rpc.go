@@ -67,7 +67,18 @@ type Conn struct {
 	// arrival order (publishDiagnostics must not be reordered).
 	notifications chan *Message
 	done          chan struct{}
+
+	// reqSem caps concurrent server→client request handlers: acquisition
+	// happens on the read loop, so a flood of inbound requests applies
+	// backpressure to the pipe instead of spawning unbounded goroutines.
+	reqSem chan struct{}
 }
+
+// maxInflightRequests bounds concurrent server→client request handlers.
+// Handlers are cheap (workspace/configuration nulls and the like); 16 is
+// generous headroom while keeping a hostile or broken server from spawning
+// goroutines faster than they retire.
+const maxInflightRequests = 16
 
 // NewConn starts a connection and its read loop. handler may be nil if this
 // peer only makes outbound calls.
@@ -79,6 +90,7 @@ func NewConn(rw io.ReadWriteCloser, handler Handler) *Conn {
 		pending:       make(map[string]chan *Message),
 		notifications: make(chan *Message, 256),
 		done:          make(chan struct{}),
+		reqSem:        make(chan struct{}, maxInflightRequests),
 	}
 	go c.readLoop()
 	go c.notificationLoop()
@@ -163,7 +175,16 @@ func (c *Conn) dispatch(msg *Message) {
 		return
 	}
 	if msg.ID != nil {
-		go c.handleRequest(msg)
+		// Bounded: block the read loop for a slot rather than spawn without
+		// limit; bail out if the connection is closing.
+		select {
+		case c.reqSem <- struct{}{}:
+			go func() {
+				defer func() { <-c.reqSem }()
+				c.handleRequest(msg)
+			}()
+		case <-c.done:
+		}
 	} else {
 		// Queue for the ordered worker; drop if the connection is closing.
 		select {

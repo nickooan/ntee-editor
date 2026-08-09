@@ -1,0 +1,120 @@
+package app
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/nickooan/ntee-editor/internal/input"
+	"github.com/nickooan/ntee-editor/internal/view"
+)
+
+// renderPreview draws the preview's main pane: a window over the rendered
+// document rows, the cursor row tinted like edit mode's cursor line, and
+// search matches overlaid via renderSearchLine (match backgrounds win over
+// the row's own colors, like the search view).
+func (m Model) renderPreview(width, height int) string {
+	if m.preview.loading {
+		return baseStyle.Render(m.previewDesc().loadingText)
+	}
+	total := len(m.preview.lines)
+	if total == 0 {
+		return ""
+	}
+	start := fileViewportTop(m.preview.cursor, m.preview.scrollY, height, total)
+
+	var byLine map[int][]view.LineMatch
+	focused := -1
+	if m.preview.searching && m.preview.search != "" {
+		byLine = view.BuildMatchesByLine(m.previewMatches())
+		focused = m.preview.focused
+	}
+
+	rows := make([]string, 0, height)
+	for i := start; i < start+height; i++ {
+		if i >= total {
+			rows = append(rows, "")
+			continue
+		}
+		line := m.preview.lines[i]
+		switch {
+		case len(byLine[i]) > 0:
+			rows = append(rows, renderSearchLine(m.preview.plain[i], line.Segs, byLine[i], nil, focused, 0, width))
+		case i == m.preview.cursor:
+			rows = append(rows, renderSegmentsBg(line.Segs, 0, width, hexLineHl, cursorLineStyle))
+		default:
+			rows = append(rows, renderSegments(line.Segs, 0, width))
+		}
+	}
+	return strings.Join(rows, "\n")
+}
+
+// renderPreviewSidebar draws the outline pane replacing the file tree: group
+// headers and badge+tail rows (method+path / kind+name), selection tracking
+// the document cursor.
+func (m Model) renderPreviewSidebar(width, height int) string {
+	k := m.previewDesc()
+	o := m.preview.outline
+	if len(o) == 0 || height < 1 {
+		return dirStyle.Render(padTo(truncateRunes(" outline", width), width))
+	}
+	start := input.Clamp(m.preview.sel-height/2, 0, max(0, len(o)-height))
+	rows := make([]string, 0, height)
+	for i := start; i < min(start+height, len(o)); i++ {
+		e := o[i]
+		switch {
+		case i == m.preview.sel:
+			label := " " + e.Label
+			if e.Depth > 0 {
+				label = "  " + padTo(e.Badge, k.badgeW) + e.Tail
+			}
+			rows = append(rows, selectedEntryStyle.Render(padTo(truncateRunes(label, width), width)))
+		case e.Depth == 0:
+			rows = append(rows, dirStyle.Render(padTo(truncateRunes(" "+e.Label, width), width)))
+		default:
+			badge := segStyleFor(view.HighlightSegment{Color: e.Color, Bold: true}).
+				Render("  " + padTo(e.Badge, k.badgeW))
+			tailW := max(1, width-(k.badgeW+2))
+			tail := fileStyle.Render(padTo(truncateRunes(e.Tail, tailW), tailW))
+			rows = append(rows, badge+tail)
+		}
+	}
+	return strings.Join(rows, "\n")
+}
+
+// renderPreviewStatus is the status row for the preview: search bar while
+// searching, otherwise file + document title + position + key hints.
+func (m Model) renderPreviewStatus() string {
+	k := m.previewDesc()
+	if m.preview.searching {
+		matches := m.previewMatches()
+		summary := fmt.Sprintf("%d matches", len(matches))
+		if len(matches) > 0 {
+			summary = fmt.Sprintf("%d/%d", min(m.preview.focused+1, len(matches)), len(matches))
+		}
+		line := promptStyle.Render("@"+k.name+" /") + statusTextStyle.Render(m.preview.search+"/   "+summary)
+		return withNotice(m, line) + statusTextStyle.Render("   ") +
+			hintStyle.Render("↑/↓ next/prev · Enter go · Esc close")
+	}
+
+	name := ""
+	if m.openFile != nil {
+		name = m.openFile.FileName
+	}
+	line := promptStyle.Render("@"+k.name) + statusTextStyle.Render(" "+name)
+	if m.preview.title != "" {
+		line += statusTextStyle.Render("   ") + noticeStyle.Render(m.preview.title)
+	}
+	if m.preview.loading {
+		line += statusTextStyle.Render("   ") + editingStyle.Render("rendering…")
+	} else {
+		line += statusTextStyle.Render(fmt.Sprintf("   Ln %d/%d", m.preview.cursor+1, len(m.preview.lines)))
+	}
+	if m.notice != "" {
+		line += statusTextStyle.Render("   ") + noticeStyle.Render(m.notice)
+	}
+	if m.errText != "" {
+		line += statusTextStyle.Render("   ") + errStyle.Render(m.errText)
+	}
+	return line + statusTextStyle.Render("   ") +
+		hintStyle.Render("↑/↓ move · Shift+↑/↓ outline · Enter jump · / search · Esc exit")
+}

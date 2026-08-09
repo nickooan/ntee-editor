@@ -1,6 +1,9 @@
 package fuzzy
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestFilterEmptyQueryKeepsOrder(t *testing.T) {
 	cands := Prepare([]string{"b.go", "a.go", "c.go"})
@@ -84,5 +87,75 @@ func TestPrepareDirBaseStart(t *testing.T) {
 	}
 	if p[2].baseStart != 0 {
 		t.Fatalf("top-level dir basename: %d", p[2].baseStart)
+	}
+}
+
+// A directory-prefix query is a browse, not a search: children of the typed
+// directory list first and alphabetically, ahead of scattered subsequence
+// matches from elsewhere (all children score identically, so without this the
+// order degraded to path length).
+func TestFilterDirPrefixListsAlphabetically(t *testing.T) {
+	corpus := []string{
+		"internal/apphelper/z.go", // scattered match: contains internal/app/ as a subsequence only
+		"internal/app/zz.go",
+		"internal/app/a_very_long_name.go",
+		"internal/app/m.go",
+		"internal/app/sub/x.go",
+		"deep/internal/app/other.go", // not under the literal prefix
+	}
+	matches := Filter("internal/app/", Prepare(corpus))
+	var got []string
+	for _, m := range matches {
+		got = append(got, corpus[m.Index])
+	}
+	want := []string{
+		"internal/app/a_very_long_name.go",
+		"internal/app/m.go",
+		"internal/app/sub/x.go",
+		"internal/app/zz.go",
+	}
+	if len(got) < len(want) {
+		t.Fatalf("matches = %v", got)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Fatalf("row %d = %q, want %q (full: %v)", i, got[i], w, got)
+		}
+	}
+	for _, rest := range got[len(want):] {
+		if strings.HasPrefix(rest, "internal/app/") {
+			t.Fatalf("class member %q sorted after non-class matches: %v", rest, got)
+		}
+	}
+}
+
+func TestFilterDirPrefixWithTailKeepsClassFirst(t *testing.T) {
+	corpus := []string{
+		"internal/apphelper/renderer.go", // non-class scattered match
+		"internal/app/render.go",
+		"internal/app/render_overlay.go",
+	}
+	matches := Filter("internal/app/ren", Prepare(corpus))
+	if len(matches) < 2 {
+		t.Fatalf("matches = %d", len(matches))
+	}
+	// Class members first; within the class, score order (render.go, the
+	// shorter/tighter match, ahead of render_overlay.go).
+	if corpus[matches[0].Index] != "internal/app/render.go" {
+		t.Fatalf("first = %q", corpus[matches[0].Index])
+	}
+	if corpus[matches[1].Index] != "internal/app/render_overlay.go" {
+		t.Fatalf("second = %q", corpus[matches[1].Index])
+	}
+}
+
+func TestFilterDirPrefixCaseInsensitive(t *testing.T) {
+	corpus := []string{"other/x.go", "Internal/App/b.go", "Internal/App/a.go"}
+	matches := Filter("internal/app/", Prepare(corpus))
+	if len(matches) != 2 {
+		t.Fatalf("matches = %d", len(matches))
+	}
+	if corpus[matches[0].Index] != "Internal/App/a.go" || corpus[matches[1].Index] != "Internal/App/b.go" {
+		t.Fatalf("order = %q, %q", corpus[matches[0].Index], corpus[matches[1].Index])
 	}
 }

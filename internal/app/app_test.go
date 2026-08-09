@@ -566,3 +566,50 @@ func TestShiftedLettersTypeCapitals(t *testing.T) {
 		t.Fatalf("ctrl+d must not type: %q", m2.edit.lines[0])
 	}
 }
+
+// Shift+arrows must walk the finder list exactly like plain arrows (v2 key
+// decoding preserves the modifier; v1 terminals collapsed it away).
+func TestFuzzyOverlayShiftArrowsMoveSelection(t *testing.T) {
+	m, _ := newTestModel(t, nil)
+	m = key(m, ctrlKey('p'))
+	if !m.fuzzyOpen || len(m.fuzzyMatches) < 2 {
+		t.Fatalf("finder should open with the full corpus: open=%v matches=%d", m.fuzzyOpen, len(m.fuzzyMatches))
+	}
+	m = key(m, shiftKey(tea.KeyDown))
+	if m.fuzzyIndex != 1 {
+		t.Fatalf("shift+down should move the selection, index=%d", m.fuzzyIndex)
+	}
+	m = key(m, shiftKey(tea.KeyUp))
+	if m.fuzzyIndex != 0 {
+		t.Fatalf("shift+up should move the selection back, index=%d", m.fuzzyIndex)
+	}
+	if !m.fuzzyOpen {
+		t.Fatal("shift+arrows must not close the finder")
+	}
+}
+
+// Drilling into (or typing) a directory in the finder lists its files
+// alphabetically — every child scores identically, so without the
+// browse-ordering rule the list fell back to path-length order.
+func TestFuzzyOverlayDirQueryListsAlphabetically(t *testing.T) {
+	m, root := newTestModel(t, nil)
+	must(t, os.WriteFile(filepath.Join(root, "lib", "zz.ts"), []byte("z"), 0o644))
+	must(t, os.WriteFile(filepath.Join(root, "lib", "a_long_name.ts"), []byte("a"), 0o644))
+	m = rebuildCorpusNow(m) // pick up the new files
+
+	m = key(m, ctrlKey('p'))
+	m = runes(m, "lib/")
+	var got []string
+	for _, match := range m.fuzzyMatches {
+		got = append(got, m.fuzzyCorpus[match.Index].Text)
+	}
+	want := []string{"lib/a_long_name.ts", "lib/util.ts", "lib/zz.ts"}
+	if len(got) < len(want) {
+		t.Fatalf("matches = %v", got)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Fatalf("row %d = %q, want %q (full: %v)", i, got[i], w, got)
+		}
+	}
+}

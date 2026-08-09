@@ -251,3 +251,44 @@ func TestQueryRmConfirmCancelAndSwallow(t *testing.T) {
 		t.Fatalf("y should delete the directory, stat err=%v", err)
 	}
 }
+
+// The sidebar must keep targeting the typed path while an inline command
+// suffix is pending — "lib/util.ts :rm" highlights the file, not "lib/".
+func TestInlineFsSuffixKeepsSidebarTarget(t *testing.T) {
+	m, _ := newTestModel(t, nil)
+	m = runes(m, "lib/util.ts")
+	entries := m.treeEntries()
+	before := m.highlightedEntryIndex(entries)
+	if before < 0 || entries[before].CommandValue != "lib/util.ts" {
+		t.Fatalf("typed path should highlight the file: idx=%d", before)
+	}
+
+	m = runes(m, " :rm")
+	m.invalidateTreeEntries() // fresh walk for the new sidebar key
+	entries = m.treeEntries()
+	after := m.highlightedEntryIndex(entries)
+	if after < 0 || entries[after].CommandValue != "lib/util.ts" {
+		got := "<none>"
+		if after >= 0 {
+			got = entries[after].CommandValue
+		}
+		t.Fatalf("pending :rm must keep the file highlighted, got %q", got)
+	}
+
+	// A non-verb suffix is not a command — the raw text flows through and the
+	// ancestor fallback still applies (unchanged behavior).
+	if base, ok := inlineFsPathPrefix("lib/util.ts :nope"); ok {
+		t.Fatalf("non-verb suffix must not strip, got %q", base)
+	}
+	// mkdir keeps the base's trailing slash (expansion semantics unchanged).
+	if base, ok := inlineFsPathPrefix("lib/ :mkdir sub"); !ok || base != "lib/" {
+		t.Fatalf("mkdir prefix = %q, %v", base, ok)
+	}
+	if base, ok := inlineFsPathPrefix("lib/util.ts :rm"); !ok || base != "lib/util.ts" {
+		t.Fatalf("rm prefix = %q, %v", base, ok)
+	}
+	// Leading-colon form has no path prefix.
+	if _, ok := inlineFsPathPrefix(":touch x"); ok {
+		t.Fatal("leading-colon form must not report a prefix")
+	}
+}

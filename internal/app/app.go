@@ -982,7 +982,14 @@ func (m Model) sidebarCommand() string {
 	if p := m.fuzzySelectedPath(); p != "" {
 		return p
 	}
-	return filetree.ResolveSidebarCommand(m.command, m.selectedCommand)
+	typed := m.command
+	// A pending inline command ("lib/util.ts :rm") still targets its path:
+	// strip the suffix so the sidebar keeps highlighting the target instead
+	// of falling back to an ancestor directory.
+	if base, ok := inlineFsPathPrefix(strings.TrimSpace(typed)); ok {
+		typed = base
+	}
+	return filetree.ResolveSidebarCommand(typed, m.selectedCommand)
 }
 
 // highlightedSidebarCommand is the path that drives the sidebar HIGHLIGHT:

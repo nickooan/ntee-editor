@@ -105,6 +105,29 @@ func (m Model) handleQueryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, corpusCmd
 }
 
+// isInlineFsVerb is the bar's filesystem-command verb set — the single
+// definition parseInlineFs and inlineFsPathPrefix share.
+func isInlineFsVerb(verb string) bool {
+	return verb == "mkdir" || verb == "touch" || verb == "rm"
+}
+
+// inlineFsPathPrefix returns the path part of a suffix-form inline command
+// ("<base> :verb …"), so the sidebar can keep treating the typed path as its
+// target while the command is still being typed — without it, the unmatched
+// " :rm" tail makes the highlight fall back to an ancestor directory. ok is
+// false for anything that is not the suffix form of a known verb.
+func inlineFsPathPrefix(trimmed string) (base string, ok bool) {
+	i := strings.Index(trimmed, " :")
+	if i == -1 {
+		return "", false
+	}
+	verb, _, _ := strings.Cut(trimmed[i+2:], " ")
+	if !isInlineFsVerb(verb) {
+		return "", false
+	}
+	return strings.TrimSpace(trimmed[:i]), true
+}
+
 // parseInlineFs recognizes the bar's filesystem commands — "<path> :mkdir
 // <rel>", "<path> :touch <rel>", and "<path> :rm" (the prefix itself is the
 // target; an empty prefix means the root for mkdir/touch) — and returns the
@@ -125,6 +148,9 @@ func parseInlineFs(trimmed string) (verb, rel string, ok bool) {
 	}
 	verb, arg, _ := strings.Cut(rest, " ")
 	arg = strings.TrimSpace(arg)
+	if !isInlineFsVerb(verb) {
+		return "", "", false
+	}
 	switch verb {
 	case "mkdir", "touch":
 		if arg == "" {
@@ -136,8 +162,6 @@ func parseInlineFs(trimmed string) (verb, rel string, ok bool) {
 		if arg != "" || base == "" {
 			return "", "", false
 		}
-	default:
-		return "", "", false
 	}
 	// An absolute argument must be rejected here — the slash-normalization
 	// below would otherwise strip the leading "/" and mask it.

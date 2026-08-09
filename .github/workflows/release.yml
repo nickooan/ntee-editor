@@ -5,31 +5,37 @@
 # Runs the test suite, then GoReleaser builds the darwin universal binary and
 # publishes the GitHub Release (see .goreleaser.yaml). Runs entirely on a
 # Linux runner — the build is pure Go, so no macOS minutes are spent.
+#
+# Actions are pinned to commit SHAs (with the version in a comment): a floating
+# major tag can be repointed by a compromised action repo, and this workflow
+# handles TAP_GITHUB_TOKEN — a cross-repo PAT. To bump, resolve the new tag:
+#   gh api repos/<owner>/<repo>/git/ref/tags/<tag>   (deref annotated tags)
 name: release
 
 on:
   push:
     tags: ["v*"]
 
-permissions:
-  contents: write
+permissions: {}
 
 jobs:
   goreleaser:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub Release
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0 # full history: GoReleaser derives the changelog from it
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
 
       - name: Test
-        run: go test ./...
+        run: go test -race ./...
 
-      - uses: goreleaser/goreleaser-action@v6
+      - uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6.4.0
         with:
           distribution: goreleaser
           version: "~> v2"

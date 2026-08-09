@@ -17,8 +17,10 @@ import (
 )
 
 // serverClient is one running language server. Startup (spawn + initialize
-// handshake) happens on a goroutine; doc-sync notifications issued before the
-// server is ready are queued and replayed in order once it is.
+// handshake) happens on a goroutine. Doc-sync notifications go through a
+// bounded op queue drained by a single writer goroutine, so a server that
+// stops consuming stdin can never block the caller (the UI goroutine) — ops
+// enqueued before initialize completes simply wait in the same queue.
 type serverClient struct {
 	lang string // config key, used as languageId fallback
 	conf config.LSPServerConfig
@@ -30,25 +32,65 @@ type serverClient struct {
 	// it to tell a long-lived server's crash from a startup crash-loop.
 	startedAt time.Time
 
-	mu       sync.Mutex
-	conn     *Conn
-	cmd      *exec.Cmd
-	ready    bool
-	dead     bool
-	stopping bool          // shutting down on purpose — suppress the crash notice
-	exited   chan struct{} // closed when the exit watcher has reaped the process
-	stderr   *tailBuffer   // last few KB of the server's stderr, for crash reports
-	pending  []func()
-	versions map[string]int
-	folders  map[string]bool // repo roots registered as workspace folders
-	tsBridge tsBridgeFunc    // non-nil for a hybrid server (e.g. Vue): relays tsserver/request
-	mirror   docMirrorFunc   // non-nil for a hybrid server: mirrors doc-sync to the companion
+	// wake nudges the writer goroutine (cap 1 — a pending nudge is enough).
+	// Allocated at construction; never closed (the writer exits on dead).
+	wake chan struct{}
+
+	// bridgeSem caps concurrent tsserver/request relays (each can block up to
+	// lspQueryTimeout on the companion). Saturation replies null immediately
+	// instead of queueing — the Vue server treats null as "no result".
+	bridgeSem chan struct{}
+
+	mu        sync.Mutex
+	conn      *Conn
+	cmd       *exec.Cmd
+	ready     bool
+	dead      bool
+	stopping  bool          // shutting down on purpose — suppress the crash notice
+	exited    chan struct{} // closed when the exit watcher has reaped the process
+	stderr    *tailBuffer   // last few KB of the server's stderr, for crash reports
+	queue     []queuedOp
+	queueFull bool // one-shot latch for the overflow notice
+	writerOn  bool // writerLoop started (once, in becomeReady)
+	versions  map[string]int
+	folders   map[string]bool // repo roots registered as workspace folders
+	tsBridge  tsBridgeFunc    // non-nil for a hybrid server (e.g. Vue): relays tsserver/request
+	mirror    docMirrorFunc   // non-nil for a hybrid server: mirrors doc-sync to the companion
 	// companionFor returns the companion server (tsserver) for a hybrid file.
 	// In Volar hybrid mode the Vue server answers only template features;
 	// <script> definitions/hover/refs come from tsserver, so queries are asked
 	// of both and merged. nil for non-hybrid servers.
 	companionFor func(file string) (*serverClient, bool)
 }
+
+// queuedOp is one doc-sync notification awaiting the writer goroutine. path
+// is the coalescing key for opChange; do performs the actual (blocking) pipe
+// write and any send-time bookkeeping (versions), given the live connection.
+type queuedOp struct {
+	kind opKind
+	path string
+	do   func(conn *Conn)
+}
+
+type opKind int
+
+const (
+	opOpen opKind = iota
+	opChange
+	opSave
+	opClose
+	opFolder
+)
+
+// maxQueuedOps bounds the writer queue. With per-path didChange coalescing
+// the queue only grows past a handful of entries when the server has stopped
+// consuming stdin entirely; at the cap, change/save ops are dropped (with one
+// notice) while open/close/folder — protocol-state critical and bounded by
+// user actions — always append.
+const maxQueuedOps = 1024
+
+// maxInflightBridge bounds concurrent tsserver/request relay goroutines.
+const maxInflightBridge = 8
 
 // tsBridgeFunc relays a hybrid server's tsserver/request command to its
 // companion server and returns the (unwrapped) result. Injected by the Manager
@@ -100,6 +142,8 @@ func newServerClient(lang string, conf config.LSPServerConfig, root string, sink
 		conf:      conf,
 		root:      root,
 		sink:      sink,
+		wake:      make(chan struct{}, 1),
+		bridgeSem: make(chan struct{}, maxInflightBridge),
 		versions:  map[string]int{},
 		folders:   map[string]bool{root: true}, // the initial workspace folder
 		startedAt: time.Now(),
@@ -132,6 +176,12 @@ func resolveBinary(command string) (string, error) {
 			return command, nil
 		}
 		return "", errors.New("not found: " + command)
+	}
+	// A non-absolute command containing a separator would make exec.LookPath
+	// resolve it relative to the process cwd — the launch directory, which the
+	// opened project controls. Only absolute paths or bare names are allowed.
+	if strings.ContainsRune(command, '/') || strings.ContainsRune(command, os.PathSeparator) {
+		return "", errors.New("relative server path not allowed: " + command)
 	}
 	if path, err := exec.LookPath(command); err == nil {
 		return path, nil
@@ -183,8 +233,9 @@ func (c *serverClient) start() {
 	fail := func(text string) {
 		c.mu.Lock()
 		c.dead = true
-		c.pending = nil
+		c.queue = nil
 		c.mu.Unlock()
+		c.poke() // let a running writer observe dead and exit
 		if c.sink != nil {
 			c.sink(NoticeMsg{Text: text})
 		}
@@ -221,8 +272,16 @@ func (c *serverClient) start() {
 	}
 
 	// The process is live: one goroutine owns cmd.Wait() and reports an
-	// unexpected exit (a crash) with the tail of stderr.
+	// unexpected exit (a crash) with the tail of stderr. If a stop() landed
+	// while the process was spawning it saw cmd == nil and killed nothing —
+	// reap the child here instead of registering it (no watcher exists yet).
 	c.mu.Lock()
+	if c.stopping || c.dead {
+		c.mu.Unlock()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return
+	}
 	c.cmd = cmd
 	c.exited = make(chan struct{})
 	c.mu.Unlock()
@@ -251,14 +310,12 @@ func (c *serverClient) start() {
 	}
 	_ = conn.Notify("initialized", struct{}{})
 
-	c.mu.Lock()
-	c.conn = conn
-	c.ready = true
-	ops := c.pending
-	c.pending = nil
-	c.mu.Unlock()
-	for _, op := range ops {
-		op()
+	if !c.becomeReady(conn) {
+		// A stop landed during the handshake: don't go live on a client the
+		// registry has already dropped.
+		conn.Close()
+		_ = cmd.Process.Kill()
+		return
 	}
 	if c.sink != nil {
 		c.sink(NoticeMsg{Text: c.lang + " lsp ready"})
@@ -275,9 +332,10 @@ func (c *serverClient) watchExit(cmd *exec.Cmd) {
 	stopping := c.stopping
 	c.dead = true
 	c.ready = false
-	c.pending = nil
+	c.queue = nil
 	conn := c.conn
 	c.mu.Unlock()
+	c.poke() // let the writer observe dead and exit
 
 	if conn != nil {
 		_ = conn.Close() // fail pending requests instead of hanging
@@ -344,27 +402,97 @@ func (c *serverClient) uptime() time.Duration {
 	return time.Since(c.startedAt)
 }
 
-// run executes a doc-sync op now, or queues it until initialize completes.
-func (c *serverClient) run(op func()) {
+// enqueue appends a doc-sync op for the writer goroutine. An opChange for a
+// path already queued replaces it in place (each didChange carries the full
+// content, so the newest supersedes losslessly and queue order is preserved).
+func (c *serverClient) enqueue(op queuedOp) {
 	c.mu.Lock()
 	if c.dead {
 		c.mu.Unlock()
 		return
 	}
-	if !c.ready {
-		c.pending = append(c.pending, op)
+	if op.kind == opChange {
+		for i := len(c.queue) - 1; i >= 0; i-- {
+			if c.queue[i].kind == opChange && c.queue[i].path == op.path {
+				c.queue[i] = op
+				c.mu.Unlock()
+				c.poke()
+				return
+			}
+		}
+	}
+	if len(c.queue) >= maxQueuedOps && (op.kind == opChange || op.kind == opSave) {
+		notify := !c.queueFull
+		c.queueFull = true
 		c.mu.Unlock()
+		if notify && c.sink != nil {
+			c.sink(NoticeMsg{Text: c.lang + " lsp is not consuming input — dropping edits"})
+		}
 		return
 	}
+	c.queue = append(c.queue, op)
 	c.mu.Unlock()
-	op()
+	c.poke()
+}
+
+// poke nudges the writer without ever blocking (cap-1 channel).
+func (c *serverClient) poke() {
+	select {
+	case c.wake <- struct{}{}:
+	default:
+	}
+}
+
+// writerLoop is the only place doc-sync ops touch the child's stdin. It
+// drains the queue whenever poked and the client is ready; the blocking pipe
+// write happens with no locks held, so a wedged server parks this goroutine —
+// never the UI. Exits when the client dies (death paths poke wake).
+func (c *serverClient) writerLoop() {
+	for range c.wake {
+		for {
+			c.mu.Lock()
+			if c.dead {
+				c.mu.Unlock()
+				return
+			}
+			if !c.ready || len(c.queue) == 0 {
+				c.mu.Unlock()
+				break
+			}
+			op := c.queue[0]
+			c.queue = c.queue[1:]
+			conn := c.conn
+			c.mu.Unlock()
+			op.do(conn)
+		}
+	}
+}
+
+// becomeReady installs the live connection and starts the writer that drains
+// the op queue (which doubles as the pre-ready replay buffer). Returns false
+// when a stop landed during the handshake — the caller must tear the
+// connection and process down instead of going live.
+func (c *serverClient) becomeReady(conn *Conn) bool {
+	c.mu.Lock()
+	if c.stopping || c.dead {
+		c.mu.Unlock()
+		return false
+	}
+	c.conn = conn
+	c.ready = true
+	if !c.writerOn {
+		c.writerOn = true
+		go c.writerLoop()
+	}
+	c.mu.Unlock()
+	c.poke()
+	return true
 }
 
 func (c *serverClient) DidOpen(path, content string) {
-	c.run(func() {
+	c.enqueue(queuedOp{kind: opOpen, path: path, do: func(conn *Conn) {
 		c.mu.Lock()
 		c.versions[path] = 1
-		conn := c.conn
 		c.mu.Unlock()
 		_ = conn.Notify("textDocument/didOpen", didOpenParams{TextDocument: textDocumentItem{
 			URI:        PathToURI(path),
@@ -372,7 +500,7 @@ func (c *serverClient) DidOpen(path, content string) {
 			Version:    1,
 			Text:       content,
 		}})
-	})
+	}})
 	if c.mirror != nil {
 		c.mirror("open", path, content)
 	}
@@ -390,28 +518,21 @@ func (c *serverClient) EnsureFolder(repo string) {
 	}
 	c.folders[repo] = true
 	c.mu.Unlock()
-	c.run(func() {
-		c.mu.Lock()
-		conn := c.conn
-		c.mu.Unlock()
-		if conn == nil {
-			return
-		}
+	c.enqueue(queuedOp{kind: opFolder, path: repo, do: func(conn *Conn) {
 		_ = conn.Notify("workspace/didChangeWorkspaceFolders", didChangeWorkspaceFoldersParams{
 			Event: workspaceFoldersChangeEvent{
 				Added: []workspaceFolder{{URI: PathToURI(repo), Name: filepath.Base(repo)}},
 			},
 		})
-	})
+	}})
 }
 
 func (c *serverClient) DidChange(path, content string, _ int) {
-	c.run(func() {
+	c.enqueue(queuedOp{kind: opChange, path: path, do: func(conn *Conn) {
 		c.mu.Lock()
 		_, opened := c.versions[path]
 		c.versions[path]++
 		version := c.versions[path]
-		conn := c.conn
 		c.mu.Unlock()
 		if !opened {
 			// The doc was never opened on THIS client — e.g. the server was
@@ -430,32 +551,28 @@ func (c *serverClient) DidChange(path, content string, _ int) {
 			TextDocument:   versionedTextDocumentIdentifier{URI: PathToURI(path), Version: version},
 			ContentChanges: []contentChange{{Text: content}}, // full sync
 		})
-	})
+	}})
 	if c.mirror != nil {
 		c.mirror("change", path, content)
 	}
 }
 
 func (c *serverClient) DidSave(path string) {
-	c.run(func() {
-		c.mu.Lock()
-		conn := c.conn
-		c.mu.Unlock()
+	c.enqueue(queuedOp{kind: opSave, path: path, do: func(conn *Conn) {
 		_ = conn.Notify("textDocument/didSave", didSaveParams{TextDocument: textDocumentIdentifier{URI: PathToURI(path)}})
-	})
+	}})
 	if c.mirror != nil {
 		c.mirror("save", path, "")
 	}
 }
 
 func (c *serverClient) DidClose(path string) {
-	c.run(func() {
+	c.enqueue(queuedOp{kind: opClose, path: path, do: func(conn *Conn) {
 		c.mu.Lock()
 		delete(c.versions, path)
-		conn := c.conn
 		c.mu.Unlock()
 		_ = conn.Notify("textDocument/didClose", didCloseParams{TextDocument: textDocumentIdentifier{URI: PathToURI(path)}})
-	})
+	}})
 	if c.mirror != nil {
 		c.mirror("close", path, "")
 	}
@@ -611,8 +728,15 @@ func (c *serverClient) handleTsserverRequest(params json.RawMessage) {
 	go func() {
 		var result any // nil → JSON null
 		if bridge != nil {
-			if r, err := bridge(command, args); err == nil {
-				result = r
+			select {
+			case c.bridgeSem <- struct{}{}:
+				if r, err := bridge(command, args); err == nil {
+					result = r
+				}
+				<-c.bridgeSem
+			default:
+				// All relay slots are busy blocking on the companion: reply
+				// null now rather than pile up more 12s waits.
 			}
 		}
 		c.mu.Lock()
@@ -682,7 +806,9 @@ func (c *serverClient) stop() {
 	conn, cmd, exited := c.conn, c.cmd, c.exited
 	c.dead = true
 	c.ready = false
+	c.queue = nil
 	c.mu.Unlock()
+	c.poke() // let the writer observe dead and exit
 
 	if conn != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)

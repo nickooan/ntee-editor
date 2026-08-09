@@ -27,7 +27,6 @@ func jumpFixture(t *testing.T) Model {
 	return m
 }
 
-
 func TestJumpToPathUnderCursorAndBack(t *testing.T) {
 	m := jumpFixture(t)
 	// Cursor on "lib/util.ts" in the comment line (line 2).
@@ -365,7 +364,7 @@ func TestJumpEmptyDefinitionOnIdentifierPivotsToReferences(t *testing.T) {
 // dead-end.
 func TestJumpEmptyDefinitionEmptyReferencesReportsReferencesMiss(t *testing.T) {
 	m, client := lspJumpModel(t, "package main\n\nvar bookingReference = 1\n")
-	client.refLocs = nil // no references either
+	client.refLocs = nil        // no references either
 	m.edit.cy, m.edit.cx = 2, 4 // on `bookingReference`
 
 	m = ctrlJ(t, m)
@@ -530,5 +529,27 @@ func TestJumpDeadEnds(t *testing.T) {
 	m = ctrlJ(t, m)
 	if m.errText != "no definition found near cursor" {
 		t.Fatalf("exhausted retries: %q", m.errText)
+	}
+}
+
+func TestPickerCompilesTokenRegexOnOpen(t *testing.T) {
+	m, client := newLSPTestModel(t)
+	m = m.openFileAt("main.go")
+	root := m.root
+	client.locs = []lsp.Location{
+		{URI: lsp.PathToURI(filepath.Join(root, "lib", "util.ts")), Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 0}}},
+		{URI: lsp.PathToURI(filepath.Join(root, "main.go")), Range: lsp.Range{Start: lsp.Position{Line: 2, Character: 0}}},
+	}
+	next, _ := m.handleDefinition(definitionMsg{token: "x+y", locs: client.locs}) // regex metachars must be quoted
+	m = next.(Model)
+	if !m.defPickOpen {
+		t.Fatalf("picker should open: err=%q", m.errText)
+	}
+	if m.defPickRe == nil || !m.defPickRe.MatchString("a x+y b") || m.defPickRe.MatchString("xay") {
+		t.Fatalf("defPickRe should match the literal token: %v", m.defPickRe)
+	}
+	// Rendering with the precompiled regex must not panic and must produce output.
+	if out := m.renderDefPickOverlay(80, 24); out == "" {
+		t.Fatal("empty picker render")
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -16,10 +17,8 @@ import (
 	"github.com/nickooan/ntee-editor/internal/config"
 	"github.com/nickooan/ntee-editor/internal/filetree"
 	"github.com/nickooan/ntee-editor/internal/fuzzy"
-	"github.com/nickooan/ntee-editor/internal/graphql"
 	"github.com/nickooan/ntee-editor/internal/input"
 	"github.com/nickooan/ntee-editor/internal/lsp"
-	"github.com/nickooan/ntee-editor/internal/openapi"
 	"github.com/nickooan/ntee-editor/internal/store"
 	"github.com/nickooan/ntee-editor/internal/syntax"
 	"github.com/nickooan/ntee-editor/internal/view"
@@ -61,8 +60,7 @@ const (
 func (m Model) inBarMode() bool {
 	return m.mode == modeCommand || m.mode == modeSearch || m.mode == modeExec ||
 		m.mode == modeSearchExec || m.mode == modeInspect ||
-		(m.mode == modeOpenAPI && m.openapiSearching) ||
-		(m.mode == modeGraphQL && m.graphqlSearching)
+		((m.mode == modeOpenAPI || m.mode == modeGraphQL) && m.preview.searching)
 }
 
 type Model struct {
@@ -87,6 +85,12 @@ type Model struct {
 	gitRepo          bool
 	gitDirty         map[string]bool
 	gitStatusRunning bool
+	gitStatusFailed  bool // latch: notice fires once per healthy→failed transition
+
+	// Idle/focus tracking for the status poll: no input for gitIdleThreshold
+	// (or a blurred terminal) pauses the 3s git status loop.
+	lastInputAt time.Time
+	termFocused bool
 
 	width, height int
 	ready         bool
@@ -95,6 +99,11 @@ type Model struct {
 	notice         string // transient status note, cleared on the next keypress
 	errText        string // transient error, cleared on the next keypress
 	messageOverlay string // dismissible centered message (e.g. binary file)
+
+	// :rm confirmation modal — armed by the query bar's rm command, resolved
+	// by enter/y (delete) or esc/n (cancel). "" = closed.
+	confirmRm    string
+	confirmRmDir bool
 
 	// Query input bar (home mode). Three-way state split, ported from
 	// r1quest: `command` is the editable typed text; `selectedCommand` is the
@@ -164,43 +173,13 @@ type Model struct {
 	blamePendingScroll int
 	blameHasPending    bool
 
-	// OpenAPI preview mode ("openapi" in the @exec bar): a read-only rendered
-	// view of the open spec file, built once per entry by renderOpenAPICmd
-	// (guarded by openapiGen). openapiCursor is the highlighted document row —
-	// the Esc source-jump target; every rendered row carries a {file, line}
-	// anchor back into the YAML, including rows from cross-file $refs.
-	openapiLines     []openapi.Line
-	openapiOutline   []openapi.OutlineEntry
-	openapiPlain     []string // per-row plain text (search + match overlay)
-	openapiCorpus    string   // plain rows joined with \n (the search corpus)
-	openapiScrollY   int
-	openapiCursor    int
-	openapiSel       int // outline selection index
-	openapiSearching bool
-	openapiSearch    string
-	openapiFocused   int // focused match index
-	openapiLoading   bool
-	openapiGen       int
-	openapiTitle     string // "Petstore API  v1.0.0" for the status bar
-
-	// GraphQL preview mode ("graphql" in the @exec bar): the OpenAPI mode's
-	// structure applied to SDL — the schema file set is gathered (same dir or
-	// graphqlrc globs), merged, and rendered once per entry by
-	// renderGraphQLCmd (guarded by graphqlGen). Every rendered row carries a
-	// {file, line} anchor, including rows merged from sibling schema files.
-	graphqlLines     []graphql.Line
-	graphqlOutline   []graphql.OutlineEntry
-	graphqlPlain     []string // per-row plain text (search + match overlay)
-	graphqlCorpus    string   // plain rows joined with \n (the search corpus)
-	graphqlScrollY   int
-	graphqlCursor    int
-	graphqlSel       int // outline selection index
-	graphqlSearching bool
-	graphqlSearch    string
-	graphqlFocused   int // focused match index
-	graphqlLoading   bool
-	graphqlGen       int
-	graphqlTitle     string // "12 types · 3 files" for the status bar
+	// Document preview modes ("openapi"/"graphql" in the @exec bar): one
+	// read-only rendered document shared by both modes (they are mutually
+	// exclusive; the active previewKind descriptor derives from m.mode).
+	// preview.cursor is the highlighted document row — the Esc source-jump
+	// target; every rendered row carries a {file, line} anchor back into its
+	// source, including rows from cross-file $refs / sibling schema files.
+	preview previewState
 
 	// Conflict-solving mode ("git scf" in the @exec bar): browses and mutates
 	// the LIVE edit buffer, so cursor and scroll are the edit session's own
@@ -210,9 +189,13 @@ type Model struct {
 	conflictChoice    int // popup option: 0 ours, 1 theirs, 2 both
 	conflictChoiceIdx int // block index the choice belongs to; -1 = none
 
-	// Undo timeline: snapshot seqs only; content lives in the store.
+	// Undo timeline: snapshot seqs only; content lives in the store. snapMeta
+	// remembers each written snapshot's content hash + kind (a reference type,
+	// shared by Model copies like draftSet) so the burst-boundary dedupe never
+	// re-reads the store; reset per edit session.
 	undoSeqs   []int64
 	undoCursor int
+	snapMeta   map[int64]snapMetaEntry
 	nextSeq    int64
 	snapDirty  bool // edits since the last snapshot
 
@@ -224,6 +207,12 @@ type Model struct {
 	searchInput    string
 	searchFocused  int
 	searchHl       [][]view.HighlightSegment
+	// Shared by all Model copies (pointer): per-(content,query) match memos
+	// for search mode and the openapi/graphql preview searches.
+	searchMC      *matchCache
+	previewMC     *matchCache
+	frames        *frameCache
+	grepPreviewRC *regexCache
 
 	// Search-exec command bar (Ctrl+E from search mode): "c <text>" replaces the
 	// focused match's span, "mlc <text>" replaces every match. Always returns to
@@ -277,8 +266,14 @@ type Model struct {
 	// walking it per keystroke is what made large repos lag. Kept fresh against
 	// external changes by a background rebuild (see ensureCorpus/rebuildCorpusCmd).
 	// corpusBuiltAt zero means "never built" (cold cache).
-	corpus           []string
-	dirCorpus        []string // "/"-suffixed rel dirs from the same walk (dirMtimes keys)
+	corpus    []string
+	dirCorpus []string // "/"-suffixed rel dirs from the same walk (dirMtimes keys)
+	// queryPrepared is PrepareCorpus(corpus, dirCorpus), refreshed at the same
+	// two points those slices are assigned, so the query bar's fuzzy stage
+	// doesn't re-prepare up to 50k candidates per keystroke (the Ctrl+P finder
+	// caches the same way in fuzzyCorpus). Unlike fuzzyCorpus it stays
+	// resident: the query bar is the home mode.
+	queryPrepared    []fuzzy.Prepared
 	corpusBuiltAt    time.Time
 	corpusRebuilding bool
 	corpusTruncated  bool               // the walk hit Tree.MaxIndexFiles — index is partial
@@ -301,9 +296,13 @@ type Model struct {
 
 	// Definition/reference picker (Ctrl+J with multiple hits). The preview
 	// caches the selected candidate's file (re-read on file change only).
-	defPickOpen      bool
-	defPickTitle     string
-	defPickToken     string
+	defPickOpen  bool
+	defPickTitle string
+	defPickToken string
+	// defPickRe highlights the token in the preview; compiled once when the
+	// picker opens (QuoteMeta'd, so compilation cannot fail) instead of once
+	// per rendered frame. nil = no highlight.
+	defPickRe        *regexp.Regexp
 	defPickItems     []defCandidate
 	defPickIndex     int
 	defPickPrevRel   string
@@ -373,6 +372,12 @@ func New(cfg config.Config, db store.Backend, root, notice string, reg lsp.Regis
 		gitRepo:       filetree.IsGitRepo(root),
 		draftSet:      map[string]bool{},
 		cursorMem:     map[string]store.TabCursor{},
+		searchMC:      &matchCache{},
+		previewMC:     &matchCache{},
+		frames:        &frameCache{},
+		grepPreviewRC: &regexCache{},
+		lastInputAt:   time.Now(),
+		termFocused:   true,
 	}
 	lastFile := ""
 	if sess, ok := db.LoadSession(); ok {
@@ -405,6 +410,7 @@ func New(cfg config.Config, db store.Backend, root, notice string, reg lsp.Regis
 	if idx, ok := db.LoadCorpus(); ok && idx.Version == store.CorpusVersion {
 		m.corpus = idx.Files
 		m.dirCorpus = filetree.DirsFromMtimes(idx.DirMtimes)
+		m.queryPrepared = filetree.PrepareCorpus(m.corpus, m.dirCorpus)
 		m.corpusTruncated = idx.Truncated
 		m.corpusBuiltAt = time.Now()
 		m.pendingValidate = &idx
@@ -480,6 +486,24 @@ func (m Model) refreshGitStatusCmd() tea.Cmd {
 	}
 }
 
+// maybeGitRefresh is the one gate for spawning a git status refresh: no-op
+// outside a repo or while one is already in flight (previously Ctrl+S,
+// :refresh, and Ctrl+U bypassed the in-flight guard and could stack spawns
+// against the poller).
+func (m Model) maybeGitRefresh() (Model, tea.Cmd) {
+	if !m.gitRepo || m.gitStatusRunning {
+		return m, nil
+	}
+	m.gitStatusRunning = true
+	return m, m.refreshGitStatusCmd()
+}
+
+// gitIdleThreshold pauses the status poll when the editor has seen no input
+// for this long (or the terminal is unfocused) — an idle editor should not
+// run `git status` every 3 seconds forever. The tick keeps re-arming, so the
+// first input after an idle stretch resumes polling within one interval.
+const gitIdleThreshold = 60 * time.Second
+
 // signatureValid stat-sweeps a persisted index's directory-mtime map against
 // the current tree. It returns false on the first missing or changed directory
 // — any external add/remove/rename bumps the containing directory's mtime — so a
@@ -521,6 +545,8 @@ const corpusTTL = 2 * time.Second
 // signature, and truncation flag) from the background rebuild goroutine.
 type corpusMsg struct {
 	files     []string
+	dirs      []string         // DirsFromMtimes(dirMtimes), computed off the UI goroutine
+	prepared  []fuzzy.Prepared // PrepareCorpus(files, dirs), likewise
 	gi        *filetree.Gitignore
 	dirMtimes map[string]int64
 	truncated bool
@@ -559,8 +585,11 @@ func (m Model) rebuildCorpusCmd() tea.Cmd {
 	return func() tea.Msg {
 		gi := filetree.LoadGitignore(root)
 		files, dirMtimes, truncated := filetree.BuildAllEntries(root, ignore, gi, maxFiles)
+		dirs := filetree.DirsFromMtimes(dirMtimes)
 		return corpusMsg{
 			files:     files,
+			dirs:      dirs,
+			prepared:  filetree.PrepareCorpus(files, dirs),
 			gi:        gi,
 			dirMtimes: dirMtimes,
 			truncated: truncated,
@@ -575,6 +604,9 @@ func truncatedNotice(cap int) string {
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.frames != nil {
+		m.frames.seq++ // new message: per-message memos (treeEntries) go stale
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		wasReady := m.ready
@@ -625,7 +657,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// then persist it so the next launch is a warm start. Persisting here (on
 		// the main goroutine) keeps all DB writes off the rebuild goroutine.
 		m.corpus = msg.files
-		m.dirCorpus = filetree.DirsFromMtimes(msg.dirMtimes)
+		m.dirCorpus = msg.dirs
+		m.queryPrepared = msg.prepared
 		m.gitignore = msg.gi
 		m.corpusBuiltAt = msg.builtAt
 		m.corpusRebuilding = false
@@ -653,18 +686,37 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, splashTick()
 
 	case gitStatusTickMsg:
-		// Poll heartbeat: refresh unless one is already in flight, and always
-		// re-arm the next tick so the loop survives a skipped round.
-		if m.gitStatusRunning {
+		// Poll heartbeat: refresh unless one is already in flight or the
+		// editor is idle/unfocused; always re-arm the next tick so the loop
+		// survives every skipped round.
+		if !m.termFocused || time.Since(m.lastInputAt) > gitIdleThreshold {
 			return m, gitStatusTick()
 		}
-		m.gitStatusRunning = true
-		return m, tea.Batch(m.refreshGitStatusCmd(), gitStatusTick())
+		m, cmd := m.maybeGitRefresh()
+		return m, tea.Batch(cmd, gitStatusTick())
+
+	case tea.FocusMsg:
+		// Regaining focus counts as activity, and external processes may have
+		// changed the tree while we were away — refresh now.
+		m.termFocused = true
+		m.lastInputAt = time.Now()
+		return m.maybeGitRefresh()
+
+	case tea.BlurMsg:
+		m.termFocused = false
+		return m, nil
 
 	case gitStatusMsg:
 		m.gitStatusRunning = false
 		if msg.ok {
 			m.gitDirty = msg.dirty
+			m.gitStatusFailed = false
+		} else if !m.gitStatusFailed {
+			// Surface a git-status failure once per healthy→failed transition
+			// (not per 3s tick); the previous dirty set is kept rather than
+			// blanked, so the sidebar shows stale markers instead of none.
+			m.gitStatusFailed = true
+			m.notice = "git status failed — sidebar change markers may be stale"
 		}
 		return m, nil
 
@@ -674,11 +726,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case blameReadyMsg:
 		return m.handleBlameReady(msg)
 
-	case openapiReadyMsg:
-		return m.handleOpenAPIReady(msg)
-
-	case graphqlReadyMsg:
-		return m.handleGraphQLReady(msg)
+	case previewReadyMsg:
+		return m.handlePreviewReady(msg)
 
 	case grepBatchMsg:
 		return m.handleGrepBatch(msg)
@@ -699,6 +748,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleCompletion(msg)
 
 	case tea.MouseMsg:
+		m.lastInputAt = time.Now()
 		if m.splash {
 			return m, nil
 		}
@@ -711,6 +761,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handlePaste(msg.Content)
 
 	case tea.KeyPressMsg:
+		m.lastInputAt = time.Now()
 		k := msg.String()
 		if k == "ctrl+c" || k == "ctrl+q" {
 			return m.quit()
@@ -727,6 +778,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.messageOverlay != "" {
 			if k == "enter" || k == "esc" {
 				m.messageOverlay = ""
+			}
+			return m, nil
+		}
+
+		if m.confirmRm != "" {
+			// The :rm confirmation modal: enter/y deletes, esc/n cancels,
+			// everything else is swallowed (the messageOverlay contract).
+			rel := m.confirmRm
+			switch k {
+			case "enter", "y":
+				m.confirmRm, m.confirmRmDir = "", false
+				return m.queryRemove(rel)
+			case "esc", "n":
+				m.confirmRm, m.confirmRmDir = "", false
+				m.notice = "rm cancelled"
 			}
 			return m, nil
 		}
@@ -776,10 +842,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleBlameKey(msg)
 		case modeConflict:
 			return m.handleConflictKey(msg)
-		case modeOpenAPI:
-			return m.handleOpenAPIKey(msg)
-		case modeGraphQL:
-			return m.handleGraphQLKey(msg)
+		case modeOpenAPI, modeGraphQL:
+			return m.handlePreviewKey(msg)
 		}
 	}
 	return m, nil
@@ -790,7 +854,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // Only the grep query and the edit buffer are multi-line — the single-line
 // bars take the paste with newlines collapsed to spaces.
 func (m Model) handlePaste(text string) (tea.Model, tea.Cmd) {
-	if m.messageOverlay != "" || m.defPickOpen {
+	if m.messageOverlay != "" || m.defPickOpen || m.confirmRm != "" {
 		return m, nil
 	}
 	if m.fuzzyOpen {
@@ -823,15 +887,10 @@ func (m Model) handlePaste(text string) (tea.Model, tea.Cmd) {
 		m.searchExecInput, m.searchExecCursor = input.InsertAtCursor(m.searchExecInput, m.searchExecCursor, pasteLine(text))
 	case modeInspect:
 		m.inspectInput, m.inspectCursor = input.InsertAtCursor(m.inspectInput, m.inspectCursor, pasteLine(text))
-	case modeOpenAPI:
-		if m.openapiSearching {
-			m.openapiSearch += pasteLine(text)
-			m = m.focusOpenAPIMatch()
-		}
-	case modeGraphQL:
-		if m.graphqlSearching {
-			m.graphqlSearch += pasteLine(text)
-			m = m.focusGraphQLMatch()
+	case modeOpenAPI, modeGraphQL:
+		if m.preview.searching {
+			m.preview.search += pasteLine(text)
+			m = m.focusPreviewMatch()
 		}
 	}
 	return m, nil
@@ -872,16 +931,50 @@ func (m Model) saveSession() {
 	})
 }
 
+// frameCache memoizes per-message derived state. Update bumps seq once per
+// inbound message, so entries computed for one Update+View cycle (the key
+// handler, the sidebar renderer, and the query popup each call treeEntries)
+// are shared within the cycle and recomputed on the next message — freshness
+// is identical to the uncached walk. Shared by all Model copies (pointer);
+// Update and View run on the program goroutine, so no locking is needed.
+type frameCache struct {
+	seq     int
+	treeOk  bool
+	treeSeq int
+	treeKey string
+	entries []filetree.FileTreeEntry
+}
+
+// invalidateTreeEntries drops the per-message tree memo. Handlers that mutate
+// the filesystem mid-message (:touch/:mkdir/:rm) call this so the same
+// cycle's View walks fresh.
+func (m Model) invalidateTreeEntries() {
+	if m.frames != nil {
+		m.frames.treeOk = false
+	}
+}
+
 // treeEntries builds the sidebar: expansion is a pure function of the path
-// driving the sidebar (typed input, else the confirmed selection).
+// driving the sidebar (typed input, else the confirmed selection). The walk
+// (a stat per expanded directory plus gitignore matching per child) is
+// memoized per message via frameCache.
 func (m Model) treeEntries() []filetree.FileTreeEntry {
-	return filetree.BuildFileTreeEntries(
+	key := m.sidebarCommand()
+	f := m.frames
+	if f != nil && f.treeOk && f.treeSeq == f.seq && f.treeKey == key {
+		return f.entries
+	}
+	entries := filetree.BuildFileTreeEntries(
 		m.root,
-		filetree.BuildExpandedDirectoryPaths(m.sidebarCommand()),
+		filetree.BuildExpandedDirectoryPaths(key),
 		m.cfg.Tree.Ignore,
 		m.gitignore,
 		m.gitDirty,
 	)
+	if f != nil {
+		f.treeOk, f.treeSeq, f.treeKey, f.entries = true, f.seq, key, entries
+	}
+	return entries
 }
 
 // sidebarCommand is the path that drives directory EXPANSION.
@@ -941,8 +1034,7 @@ func (m Model) openFileAt(rel string) Model {
 	m.jumpStack = nil          // a deliberate open starts a fresh navigation trail
 	m = m.clearDiffState()     // and ends any diff review of the file being left
 	m = m.clearConflictState() // likewise any conflict-solving session
-	m = m.clearOpenAPIState()  // and any OpenAPI preview
-	m = m.clearGraphQLState()  // and any GraphQL preview
+	m = m.clearPreviewState()  // and any OpenAPI/GraphQL preview
 	_ = m.db.TouchOpened(store.OpenedFile{Path: rel, LastOpenedAt: time.Now().UnixMilli()})
 	if client, ok := m.lsp.ClientFor(f.Path); ok {
 		client.DidOpen(f.Path, f.Content)

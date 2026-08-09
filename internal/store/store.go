@@ -33,7 +33,18 @@ type Snapshot struct {
 	Seq     int64  `json:"seq"`
 	Kind    string `json:"kind"` // "edit" | "save"
 	Content string `json:"content"`
-	At      int64  `json:"at"`
+	// Hash is ContentHash(Content), computed by SnapshotPut. Lets readers
+	// compare contents without holding both around. Absent ("") on records
+	// written before the field existed — fall back to hashing Content.
+	Hash string `json:"hash,omitempty"`
+	At   int64  `json:"at"`
+}
+
+// ContentHash is the canonical content fingerprint shared by the store and
+// the editor's dedupe (they must agree for hash-only comparisons to work).
+func ContentHash(content string) string {
+	sum := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(sum[:])
 }
 
 // Session is the state restored on relaunch. Command is the confirmed query
@@ -263,7 +274,7 @@ func (s *Store) DeleteOpenedUnder(rel string) error {
 }
 
 func (s *Store) SnapshotPut(path string, seq int64, kind, content string) error {
-	snap := Snapshot{Path: path, Seq: seq, Kind: kind, Content: content, At: seq}
+	snap := Snapshot{Path: path, Seq: seq, Kind: kind, Content: content, Hash: ContentHash(content), At: seq}
 	data, err := json.Marshal(snap)
 	if err != nil {
 		return err

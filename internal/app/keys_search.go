@@ -7,7 +7,6 @@ import (
 
 	"github.com/nickooan/ntee-editor/internal/input"
 	"github.com/nickooan/ntee-editor/internal/syntax"
-	"github.com/nickooan/ntee-editor/internal/view"
 )
 
 // enterSearch opens the in-file search over a frozen copy of content,
@@ -47,7 +46,7 @@ func (m Model) handleSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "down", "ctrl+f":
 		m = m.nextMatch(1)
 	case "ctrl+e":
-		if m.searchInput != "" && len(view.FindSearchMatches(m.searchContent, m.searchInput)) > 0 {
+		if m.searchInput != "" && len(m.searchMatches()) > 0 {
 			return m.enterSearchExec(), nil
 		}
 		m.errText = "no matches to act on"
@@ -76,7 +75,7 @@ func (m Model) focusNearestMatch() Model {
 	if m.searchPrevMode != modeEdit {
 		return m
 	}
-	for i, mt := range view.FindSearchMatches(m.searchContent, m.searchInput) {
+	for i, mt := range m.searchMatches() {
 		if mt.LineIndex >= m.edit.cy {
 			m.searchFocused = i
 			break
@@ -87,7 +86,7 @@ func (m Model) focusNearestMatch() Model {
 
 // nextMatch cycles the focused match (wrapping) in either direction.
 func (m Model) nextMatch(direction int) Model {
-	matches := view.FindSearchMatches(m.searchContent, m.searchInput)
+	matches := m.searchMatches()
 	if len(matches) == 0 {
 		return m
 	}
@@ -100,7 +99,7 @@ func (m Model) nextMatch(direction int) Model {
 // it (byte offset → rune column — the single offset bridge); in view mode the
 // match line is centered.
 func (m Model) acceptSearch() Model {
-	matches := view.FindSearchMatches(m.searchContent, m.searchInput)
+	matches := m.searchMatches()
 	m.mode = m.searchPrevMode
 	if len(matches) == 0 || m.searchFocused >= len(matches) {
 		return m

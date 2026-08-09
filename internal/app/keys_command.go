@@ -107,10 +107,8 @@ func (m Model) executeCommand(cmd string) (tea.Model, tea.Cmd) {
 		// same-second external changes are picked up.
 		filetree.ClearDirCache()
 		m.corpusRebuilding = true
-		if m.gitRepo {
-			return m, tea.Batch(m.rebuildCorpusCmd(), m.refreshGitStatusCmd())
-		}
-		return m, m.rebuildCorpusCmd()
+		m, gitCmd := m.maybeGitRefresh()
+		return m, tea.Batch(m.rebuildCorpusCmd(), gitCmd)
 
 	default:
 		m.errText = "unknown command :" + name
@@ -180,7 +178,8 @@ func (m Model) openUncommitted() (Model, tea.Cmd) {
 	}
 	if len(ordered) == 0 {
 		m.notice = "no uncommitted files"
-		return m, tea.Batch(cmd, m.refreshGitStatusCmd())
+		m, gitCmd := m.maybeGitRefresh()
+		return m, tea.Batch(cmd, gitCmd)
 	}
 
 	m.fuzzyOpen = true
@@ -189,7 +188,8 @@ func (m Model) openUncommitted() (Model, tea.Cmd) {
 	m.fuzzyPrompt = "uncommitted "
 	m.fuzzyCorpus = fuzzy.Prepare(ordered)
 	m.fuzzyMatches = fuzzy.Filter("", m.fuzzyCorpus)
-	return m, tea.Batch(cmd, m.refreshGitStatusCmd())
+	m, gitCmd := m.maybeGitRefresh()
+	return m, tea.Batch(cmd, gitCmd)
 }
 
 // closeFuzzy hides the finder and releases the prepared corpus. That slice can

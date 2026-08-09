@@ -89,12 +89,10 @@ func (m Model) handleEditKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case "ctrl+s":
 		m = m.saveEdit()
-		if m.gitRepo {
-			// A write just landed: refresh git status now instead of waiting
-			// out the poll interval, so the tree yellows immediately.
-			return m, m.refreshGitStatusCmd()
-		}
-		return m, nil
+		// A write just landed: refresh git status now instead of waiting out
+		// the poll interval, so the tree yellows immediately (no-op when a
+		// refresh is already in flight — the poll lands within seconds).
+		return m.maybeGitRefresh()
 
 	case "ctrl+z":
 		// History rewrites can remove the pinned call outright.
@@ -273,7 +271,7 @@ func (m Model) moveEditCursor(dx, dy int) Model {
 // the open-file record. Shared by Ctrl+S and :w.
 func (m Model) saveEdit() Model {
 	content := m.edit.content()
-	if err := filetree.WriteViewFile(m.openFile.Path, content); err != nil {
+	if err := filetree.WriteViewFile(m.root, m.openRel, content); err != nil {
 		m.errText = "save failed: " + err.Error()
 		return m
 	}

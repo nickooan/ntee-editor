@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/nickooan/ntee-editor/internal/diff"
+	"github.com/nickooan/ntee-editor/internal/gitcmd"
 	"github.com/nickooan/ntee-editor/internal/input"
 )
 
@@ -57,6 +58,12 @@ func (m Model) enterDiff(base string) (tea.Model, tea.Cmd) {
 		m.errText = "not a git repository"
 		return m, nil
 	}
+	// A revision starting with "-" would reach git's argv as an option, not an
+	// operand — refuse it outright (no real revision starts with a dash).
+	if strings.HasPrefix(base, "-") {
+		m.errText = "git diff: bad revision: " + base
+		return m, nil
+	}
 	m = m.clearDiffState()
 	m.edit.clearSelection() // a stale selection would hijack Ctrl+J's token
 	m.diffBase = base
@@ -93,7 +100,7 @@ func (m Model) computeDiffCmd() tea.Cmd {
 		if rev == "" {
 			rev = "HEAD"
 		}
-		if _, err := gitOut(root, "rev-parse", "--verify", rev+"^{commit}"); err != nil {
+		if _, err := gitcmd.Out(root, "rev-parse", "--verify", "--end-of-options", rev+"^{commit}"); err != nil {
 			if base != "" {
 				msg.err = "git diff: bad revision: " + base
 				if line := firstStderrLine(err); line != "" {
@@ -107,7 +114,7 @@ func (m Model) computeDiffCmd() tea.Cmd {
 		}
 		var old []string
 		if !msg.newFile {
-			out, err := gitOut(root, "show", rev+":"+rel)
+			out, err := gitcmd.Out(root, "show", rev+":"+rel)
 			switch {
 			case err != nil:
 				msg.newFile = true // path absent in that revision: new file
@@ -242,12 +249,6 @@ func (m Model) diffRowText(i int) string {
 // as a real diff, identical content diffs empty).
 func splitBufferLines(content string) []string {
 	return strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
-}
-
-// gitOut runs one short-lived git child against root and returns stdout;
-// stderr rides the *exec.ExitError for error reporting.
-func gitOut(root string, args ...string) ([]byte, error) {
-	return exec.Command("git", append([]string{"-C", root}, args...)...).Output()
 }
 
 // firstStderrLine extracts the first stderr line of a failed exec, "" when

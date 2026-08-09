@@ -76,20 +76,29 @@ func main() {
 		os.Exit(1)
 	}
 
-	cfg := config.Load(absRoot)
+	// The editor proper runs in a helper so its defers (store close, language
+	// server shutdown) execute even on the error path — os.Exit skips defers,
+	// so it must be the very last thing main does.
+	os.Exit(runEditor(absRoot))
+}
+
+// runEditor owns every resource with a shutdown obligation and returns the
+// process exit code.
+func runEditor(absRoot string) int {
+	cfg, warnings := config.LoadWithWarnings(absRoot)
 
 	// Per-project ntee-db store; fall back to in-memory (undo only, nothing
 	// persists) when the store's single-writer lock is held by another
 	// instance of this project.
 	var db store.Backend
-	notice := ""
 	if s, err := store.Open(absRoot, cfg.Editor.MaxSnapshots); err != nil {
 		db = store.NewMemory()
-		notice = "persistence disabled (store unavailable)"
+		warnings = append(warnings, "persistence disabled: "+firstLine(err.Error()))
 	} else {
 		db = s
 	}
 	defer db.Close()
+	notice := strings.Join(warnings, " · ")
 
 	// Language servers (gopls, typescript-language-server) start lazily per
 	// language; diagnostics flow into the program via the sink.
@@ -107,8 +116,17 @@ func main() {
 	}
 	if _, err := program.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		return 1
 	}
+	return 0
+}
+
+// firstLine clips an error message to its first line for the status bar.
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
 }
 
 // knownLanguages is the union of the built-in defaults, the --prepare-lsp

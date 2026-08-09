@@ -59,7 +59,7 @@ func (m *Memory) DeleteOpenedUnder(rel string) error {
 }
 
 func (m *Memory) SnapshotPut(path string, seq int64, kind, content string) error {
-	m.snapshots[seq] = Snapshot{Path: path, Seq: seq, Kind: kind, Content: content, At: seq}
+	m.snapshots[seq] = Snapshot{Path: path, Seq: seq, Kind: kind, Content: content, Hash: ContentHash(content), At: seq}
 	return nil
 }
 

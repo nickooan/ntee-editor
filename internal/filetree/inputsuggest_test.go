@@ -9,7 +9,7 @@ func TestBuildInputSuggestionsOrderAndDedup(t *testing.T) {
 	}
 	all := []string{"app.go", "internal/app/deep.go"}
 
-	got := BuildInputSuggestions(visible, all, nil, "app", MaxInputSuggestions)
+	got := BuildInputSuggestions(visible, all, nil, nil, "app", MaxInputSuggestions)
 	if len(got) < 3 {
 		t.Fatalf("want ≥3 suggestions, got %+v", got)
 	}
@@ -31,7 +31,7 @@ func TestBuildInputSuggestionsOrderAndDedup(t *testing.T) {
 
 func TestBuildInputSuggestionsFuzzyFindsCollapsed(t *testing.T) {
 	// Nothing visible matches, but the corpus (collapsed dirs) does.
-	got := BuildInputSuggestions(nil, []string{"internal/store/store.go"}, nil, "stg", 8)
+	got := BuildInputSuggestions(nil, []string{"internal/store/store.go"}, nil, nil, "stg", 8)
 	if len(got) != 1 || got[0].Entry.RelativePath != "internal/store/store.go" {
 		t.Fatalf("fuzzy corpus hit missing: %+v", got)
 	}
@@ -41,10 +41,10 @@ func TestBuildInputSuggestionsFuzzyFindsCollapsed(t *testing.T) {
 }
 
 func TestBuildInputSuggestionsSkipsColonAndEmpty(t *testing.T) {
-	if got := BuildInputSuggestions(nil, []string{"a.go"}, nil, ":w", 8); got != nil {
+	if got := BuildInputSuggestions(nil, []string{"a.go"}, nil, nil, ":w", 8); got != nil {
 		t.Fatalf("colon command should not suggest: %+v", got)
 	}
-	if got := BuildInputSuggestions(nil, []string{"a.go"}, nil, "  ", 8); got != nil {
+	if got := BuildInputSuggestions(nil, []string{"a.go"}, nil, nil, "  ", 8); got != nil {
 		t.Fatalf("blank should not suggest: %+v", got)
 	}
 }
@@ -54,7 +54,7 @@ func TestBuildInputSuggestionsCap(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		all = append(all, "dir/file"+string(rune('a'+i))+".go")
 	}
-	if got := BuildInputSuggestions(nil, all, nil, "file", 8); len(got) != 8 {
+	if got := BuildInputSuggestions(nil, all, nil, nil, "file", 8); len(got) != 8 {
 		t.Fatalf("cap failed: %d", len(got))
 	}
 }
@@ -84,7 +84,7 @@ func TestBuildInputSuggestionsDirsFuzzyAndDedup(t *testing.T) {
 	files := []string{"app/main.go"}
 	dirs := []string{"app/", "app/sub/"}
 
-	got := BuildInputSuggestions(visible, files, dirs, "app/", 8)
+	got := BuildInputSuggestions(visible, files, dirs, nil, "app/", 8)
 
 	appCount := 0
 	foundSub := false
@@ -107,5 +107,24 @@ func TestBuildInputSuggestionsDirsFuzzyAndDedup(t *testing.T) {
 	}
 	if !foundSub {
 		t.Fatalf("collapsed subdir missing from suggestions: %+v", got)
+	}
+}
+
+func TestBuildInputSuggestionsPreparedParity(t *testing.T) {
+	files := []string{"internal/store/store.go", "cmd/main.go", "README.md"}
+	dirs := []string{"cmd/", "internal/", "internal/store/"}
+	prepared := PrepareCorpus(files, dirs)
+
+	for _, q := range []string{"stg", "cmd", "internal/", "main", "zzz"} {
+		want := BuildInputSuggestions(nil, files, dirs, nil, q, 8)
+		got := BuildInputSuggestions(nil, files, dirs, prepared, q, 8)
+		if len(got) != len(want) {
+			t.Fatalf("%q: prepared gave %d suggestions, nil gave %d", q, len(got), len(want))
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("%q: suggestion %d differs: %+v vs %+v", q, i, got[i], want[i])
+			}
+		}
 	}
 }

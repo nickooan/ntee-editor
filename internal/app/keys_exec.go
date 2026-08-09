@@ -96,7 +96,7 @@ func (m Model) runExecCommand(cmd string) (tea.Model, tea.Cmd) {
 			m.errText = "openapi takes no argument"
 			return m, nil
 		}
-		return m.enterOpenAPI()
+		return m.enterPreview(&openapiKind)
 	case "graphql", "gql":
 		// Success switches straight to modeGraphQL (Esc from the preview lands
 		// in edit mode at the reviewed content's source, deliberately bypassing
@@ -105,7 +105,7 @@ func (m Model) runExecCommand(cmd string) (tea.Model, tea.Cmd) {
 			m.errText = "graphql takes no argument"
 			return m, nil
 		}
-		return m.enterGraphQL()
+		return m.enterPreview(&graphqlKind)
 	case "cpfp":
 		m = m.execCopyPath(m.openRel)
 	case "cpafp":

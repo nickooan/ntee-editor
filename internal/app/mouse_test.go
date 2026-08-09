@@ -309,7 +309,7 @@ func TestHorizontalWheelDoesNothing(t *testing.T) {
 }
 
 func TestWheelScrollsFileInQueryMode(t *testing.T) {
-	m := tallFixture(t, 30) // opens in edit mode
+	m := tallFixture(t, 30)          // opens in edit mode
 	m = key(m, keyPress(tea.KeyEsc)) // back to query mode, file still shown
 	if m.mode != modeQuery {
 		t.Fatalf("expected query mode, got %v", m.mode)

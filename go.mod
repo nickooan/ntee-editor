@@ -1,6 +1,6 @@
 module github.com/nickooan/ntee-editor
 
-go 1.25.6
+go 1.25.8
 
 require (
 	charm.land/bubbletea/v2 v2.0.8

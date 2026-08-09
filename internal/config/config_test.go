@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -37,15 +38,32 @@ func TestUnionStrings(t *testing.T) {
 	}
 }
 
+func writeUserConfigFile(t *testing.T, xdgDir, content string) {
+	t.Helper()
+	cfgDir := filepath.Join(xdgDir, "ntee-editor")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.yaml"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestLoadUnionsExtensionsAndOverlaysLSP(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // isolate from the real ~/.config
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg) // isolate from the real ~/.config
+	// The lsp overlay must come from the USER config (only it may name
+	// executables); the project file contributes the extensions union.
+	writeUserConfigFile(t, xdg, ""+
+		"languages:\n"+
+		"  typescript:\n"+
+		"    lsp:\n"+
+		"      command: \"/custom/tsls\"\n")
 	root := t.TempDir()
 	yaml := "" +
 		"languages:\n" +
 		"  typescript:\n" +
-		"    extensions: [\".vue\"]\n" +
-		"    lsp:\n" +
-		"      command: \"/custom/tsls\"\n"
+		"    extensions: [\".vue\"]\n"
 	if err := os.WriteFile(filepath.Join(root, ".ntee-editor.yaml"), []byte(yaml), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +77,7 @@ func TestLoadUnionsExtensionsAndOverlaysLSP(t *testing.T) {
 			t.Errorf("typescript extensions missing %q: %v", want, ts.Extensions)
 		}
 	}
-	// Command overridden by the file; args kept from the default (overlay).
+	// Command overridden by the user file; args kept from the default (overlay).
 	if ts.LSP.Command != "/custom/tsls" {
 		t.Errorf("command = %q, want /custom/tsls", ts.LSP.Command)
 	}
@@ -69,6 +87,50 @@ func TestLoadUnionsExtensionsAndOverlaysLSP(t *testing.T) {
 	// An untouched default language survives.
 	if cfg.Languages["go"].LSP.Command != "gopls" {
 		t.Errorf("go language should be untouched: %+v", cfg.Languages["go"])
+	}
+}
+
+func TestLoadStripsExecutablesFromProjectConfig(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	root := t.TempDir()
+	yaml := "" +
+		"languages:\n" +
+		"  typescript:\n" +
+		"    enable: false\n" +
+		"    extensions: [\".vue\"]\n" +
+		"    lsp:\n" +
+		"      command: \"./evil\"\n" +
+		"      args: [\"--pwn\"]\n" +
+		"      init: {tsserver: {path: \"/tmp/evil.js\"}}\n" +
+		"    install:\n" +
+		"      - { kind: npm, packages: [\"evil\"] }\n" +
+		"  python:\n" +
+		"    extensions: [\".py\"]\n" +
+		"    lsp:\n" +
+		"      command: \"evil-langserver\"\n"
+	if err := os.WriteFile(filepath.Join(root, ".ntee-editor.yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := Load(root)
+	ts := cfg.Languages["typescript"]
+	// Behavior keys survive: enable and the extensions union.
+	if ts.IsEnabled() {
+		t.Error("project config should still be able to disable a language")
+	}
+	if !contains(ts.Extensions, ".vue") || !contains(ts.Extensions, ".ts") {
+		t.Errorf("extensions union lost: %v", ts.Extensions)
+	}
+	// Execution vectors do not: the default lsp block is untouched, install dropped.
+	if ts.LSP.Command != "typescript-language-server" || len(ts.LSP.Init) != 0 {
+		t.Errorf("project config overrode the lsp block: %+v", ts.LSP)
+	}
+	if len(ts.Install) != 0 {
+		t.Errorf("project config injected install strategies: %+v", ts.Install)
+	}
+	// A project-added language exists for routing but gets no server.
+	if py := cfg.Languages["python"]; py.LSP != nil || py.Install != nil {
+		t.Errorf("project-added language must not carry lsp/install: %+v", py)
 	}
 }
 
@@ -87,15 +149,20 @@ func TestEnableToggle(t *testing.T) {
 }
 
 func TestLoadMergesEnableAndInstall(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	// install comes from the USER config (project files may not name executables);
+	// enable comes from the project file (behavior, still allowed).
+	writeUserConfigFile(t, xdg, ""+
+		"languages:\n"+
+		"  go:\n"+
+		"    install:\n"+
+		"      - { kind: brew, formula: gopls }\n")
 	root := t.TempDir()
 	yaml := "" +
 		"languages:\n" +
 		"  typescript:\n" +
-		"    enable: false\n" +
-		"  go:\n" +
-		"    install:\n" +
-		"      - { kind: brew, formula: gopls }\n"
+		"    enable: false\n"
 	if err := os.WriteFile(filepath.Join(root, ".ntee-editor.yaml"), []byte(yaml), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -148,20 +215,20 @@ func TestMergeUserLanguages(t *testing.T) {
 }
 
 func TestLoadAddsNewLanguage(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	root := t.TempDir()
-	yaml := "" +
-		"languages:\n" +
-		"  python:\n" +
-		"    extensions: [\".py\"]\n" +
-		"    lsp:\n" +
-		"      command: \"pyright-langserver\"\n"
-	if err := os.WriteFile(filepath.Join(root, ".ntee-editor.yaml"), []byte(yaml), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cfg := Load(root)
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	writeUserConfigFile(t, xdg, ""+
+		"languages:\n"+
+		"  python:\n"+
+		"    extensions: [\".py\"]\n"+
+		"    lsp:\n"+
+		"      command: \"pyright-langserver\"\n")
+	cfg := Load(t.TempDir())
 	if py, ok := cfg.Languages["python"]; !ok || !contains(py.Extensions, ".py") {
 		t.Errorf("python language should be added: %+v", cfg.Languages["python"])
+	}
+	if cfg.Languages["python"].LSP.Command != "pyright-langserver" {
+		t.Errorf("user config should be able to name a new language's server: %+v", cfg.Languages["python"].LSP)
 	}
 	if _, ok := cfg.Languages["typescript"]; !ok {
 		t.Error("default languages should remain when a new one is added")
@@ -275,5 +342,53 @@ func TestSetThemeSyntax(t *testing.T) {
 	}
 	if _, err := os.Stat(path + ".bak"); err != nil {
 		t.Fatal("expected a .bak backup")
+	}
+}
+
+func TestLoadWithWarningsReportsMalformedFile(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, ".ntee-editor.yaml"), []byte("editor:\n  tab_width: [not-an-int\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, warnings := LoadWithWarnings(root)
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "malformed") {
+		t.Fatalf("warnings = %v", warnings)
+	}
+	// The editor still starts with sane values.
+	if cfg.Editor.TabWidth < 1 {
+		t.Fatalf("defaults not applied: %+v", cfg.Editor)
+	}
+	// A clean load has no warnings.
+	if _, w := LoadWithWarnings(t.TempDir()); len(w) != 0 {
+		t.Fatalf("clean load warned: %v", w)
+	}
+}
+
+func TestConfigEditsRefuseMalformedUserConfig(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	cfgDir := filepath.Join(dir, "ntee-editor")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	malformed := []byte("languages: [broken\n")
+	path := filepath.Join(cfgDir, "config.yaml")
+	if err := os.WriteFile(path, malformed, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := SetThemeSyntax("nord"); err == nil || !strings.Contains(err.Error(), "malformed") {
+		t.Fatalf("SetThemeSyntax on a malformed config: err = %v", err)
+	}
+	if _, err := SetLanguagesEnabled([]string{"all"}, false); err == nil {
+		t.Fatal("SetLanguagesEnabled must refuse a malformed config")
+	}
+	if _, err := MergeUserLanguages(map[string]LanguageConfig{"x": {}}); err == nil {
+		t.Fatal("MergeUserLanguages must refuse a malformed config")
+	}
+	// The recoverable file was not overwritten.
+	if data, _ := os.ReadFile(path); string(data) != string(malformed) {
+		t.Fatal("malformed config was overwritten")
 	}
 }

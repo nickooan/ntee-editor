@@ -66,13 +66,13 @@ func openAPIFixture(t *testing.T) Model {
 	if m.mode != modeOpenAPI {
 		t.Fatalf("openapi should enter modeOpenAPI, got %v (err=%q)", m.mode, m.errText)
 	}
-	if !m.openapiLoading || cmd == nil {
+	if !m.preview.loading || cmd == nil {
 		t.Fatal("entry must kick off the async render")
 	}
 	next, _ = m.Update(cmd())
 	m = next.(Model)
-	if m.openapiLoading || len(m.openapiLines) == 0 {
-		t.Fatalf("render did not land: loading=%v lines=%d err=%q", m.openapiLoading, len(m.openapiLines), m.errText)
+	if m.preview.loading || len(m.preview.lines) == 0 {
+		t.Fatalf("render did not land: loading=%v lines=%d err=%q", m.preview.loading, len(m.preview.lines), m.errText)
 	}
 	return m
 }
@@ -80,12 +80,12 @@ func openAPIFixture(t *testing.T) Model {
 // openAPIRow finds the first rendered row containing sub.
 func openAPIRow(t *testing.T, m Model, sub string) int {
 	t.Helper()
-	for i, l := range m.openapiPlain {
+	for i, l := range m.preview.plain {
 		if strings.Contains(l, sub) {
 			return i
 		}
 	}
-	t.Fatalf("no rendered row contains %q:\n%s", sub, strings.Join(m.openapiPlain, "\n"))
+	t.Fatalf("no rendered row contains %q:\n%s", sub, strings.Join(m.preview.plain, "\n"))
 	return -1
 }
 
@@ -178,11 +178,11 @@ func TestOpenAPIRenderAndOutline(t *testing.T) {
 	openAPIRow(t, m, "POST  /pets")
 	openAPIRow(t, m, "Pet {")
 	openAPIRow(t, m, "email: string") // cross-file Owner rendered inline
-	if len(m.openapiOutline) != 2 {
-		t.Fatalf("outline = %+v", m.openapiOutline)
+	if len(m.preview.outline) != 2 {
+		t.Fatalf("outline = %+v", m.preview.outline)
 	}
-	if m.openapiOutline[0].Label != "GET /pets" || m.openapiOutline[1].Label != "POST /pets" {
-		t.Fatalf("outline labels = %+v", m.openapiOutline)
+	if m.preview.outline[0].Label != "GET /pets" || m.preview.outline[1].Label != "POST /pets" {
+		t.Fatalf("outline labels = %+v", m.preview.outline)
 	}
 }
 
@@ -205,61 +205,61 @@ func TestOpenAPIReadOnly(t *testing.T) {
 
 func TestOpenAPICursorAndOutlineJump(t *testing.T) {
 	m := openAPIFixture(t)
-	m.openapiCursor, m.openapiScrollY = 0, 0
+	m.preview.cursor, m.preview.scrollY = 0, 0
 	m = key(m, keyPress(tea.KeyDown))
 	m = key(m, keyPress(tea.KeyDown))
-	if m.openapiCursor != 2 {
-		t.Fatalf("cursor = %d, want 2", m.openapiCursor)
+	if m.preview.cursor != 2 {
+		t.Fatalf("cursor = %d, want 2", m.preview.cursor)
 	}
 
 	// Select the POST entry in the outline and jump to it.
 	m = key(m, shiftKey(tea.KeyDown))
-	if m.openapiSel != 1 {
-		t.Fatalf("outline sel = %d, want 1", m.openapiSel)
+	if m.preview.sel != 1 {
+		t.Fatalf("outline sel = %d, want 1", m.preview.sel)
 	}
 	m = key(m, keyPress(tea.KeyEnter))
-	if m.openapiCursor != m.openapiOutline[1].LineIdx {
-		t.Fatalf("cursor = %d, want anchor %d", m.openapiCursor, m.openapiOutline[1].LineIdx)
+	if m.preview.cursor != m.preview.outline[1].LineIdx {
+		t.Fatalf("cursor = %d, want anchor %d", m.preview.cursor, m.preview.outline[1].LineIdx)
 	}
-	if !strings.Contains(m.openapiPlain[m.openapiCursor], "POST  /pets") {
-		t.Fatalf("anchor row = %q", m.openapiPlain[m.openapiCursor])
+	if !strings.Contains(m.preview.plain[m.preview.cursor], "POST  /pets") {
+		t.Fatalf("anchor row = %q", m.preview.plain[m.preview.cursor])
 	}
 }
 
 func TestOpenAPISearchCycleAndLand(t *testing.T) {
 	m := openAPIFixture(t)
 	m = key(m, typeRune('/'))
-	if !m.openapiSearching {
+	if !m.preview.searching {
 		t.Fatal("/ must open the search bar")
 	}
 	m = runes(m, "pets")
-	matches := m.openapiMatches()
+	matches := m.previewMatches()
 	if len(matches) < 2 {
 		t.Fatalf("matches = %d, want ≥2", len(matches))
 	}
-	if m.openapiCursor != matches[m.openapiFocused].LineIndex {
+	if m.preview.cursor != matches[m.preview.focused].LineIndex {
 		t.Fatal("typing must land the cursor on the focused match")
 	}
 
-	first := m.openapiFocused
+	first := m.preview.focused
 	m = key(m, keyPress(tea.KeyDown))
-	if m.openapiFocused == first {
+	if m.preview.focused == first {
 		t.Fatal("down must advance the focused match")
 	}
 	// Wrap all the way back around.
 	for i := 0; i < len(matches)-1; i++ {
 		m = key(m, keyPress(tea.KeyDown))
 	}
-	if m.openapiFocused != first {
-		t.Fatalf("focus should wrap to %d, got %d", first, m.openapiFocused)
+	if m.preview.focused != first {
+		t.Fatalf("focus should wrap to %d, got %d", first, m.preview.focused)
 	}
 
-	landed := m.openapiCursor
+	landed := m.preview.cursor
 	m = key(m, keyPress(tea.KeyEnter))
-	if m.openapiSearching || m.openapiSearch != "" {
+	if m.preview.searching || m.preview.search != "" {
 		t.Fatal("enter must close the search bar")
 	}
-	if m.openapiCursor != landed {
+	if m.preview.cursor != landed {
 		t.Fatal("enter must keep the cursor on the landed match")
 	}
 	if m.mode != modeOpenAPI {
@@ -270,7 +270,7 @@ func TestOpenAPISearchCycleAndLand(t *testing.T) {
 	m = key(m, typeRune('/'))
 	m = runes(m, "x")
 	m = key(m, keyPress(tea.KeyEsc))
-	if m.openapiSearching || m.mode != modeOpenAPI {
+	if m.preview.searching || m.mode != modeOpenAPI {
 		t.Fatal("first esc closes only the search bar")
 	}
 	m = key(m, keyPress(tea.KeyEsc))
@@ -282,8 +282,8 @@ func TestOpenAPISearchCycleAndLand(t *testing.T) {
 func TestOpenAPIExitSameFileSource(t *testing.T) {
 	m := openAPIFixture(t)
 	row := openAPIRow(t, m, "POST  /pets")
-	m.openapiCursor = row
-	src := m.openapiLines[row].Src
+	m.preview.cursor = row
+	src := m.preview.lines[row].Src
 	if src.File != "spec.yaml" {
 		t.Fatalf("POST src = %+v", src)
 	}
@@ -297,7 +297,7 @@ func TestOpenAPIExitSameFileSource(t *testing.T) {
 	if !strings.Contains(m.edit.lines[m.edit.cy], "post:") {
 		t.Fatalf("landed on %q", m.edit.lines[m.edit.cy])
 	}
-	if len(m.openapiLines) != 0 {
+	if len(m.preview.lines) != 0 {
 		t.Fatal("exit must clear the preview state")
 	}
 }
@@ -305,8 +305,8 @@ func TestOpenAPIExitSameFileSource(t *testing.T) {
 func TestOpenAPIExitCrossFileSource(t *testing.T) {
 	m := openAPIFixture(t)
 	row := openAPIRow(t, m, "email: string")
-	m.openapiCursor = row
-	src := m.openapiLines[row].Src
+	m.preview.cursor = row
+	src := m.preview.lines[row].Src
 	if src.File != "common.yaml" {
 		t.Fatalf("email src = %+v", src)
 	}
@@ -327,9 +327,9 @@ func TestOpenAPIExitCrossFileSource(t *testing.T) {
 
 func TestOpenAPIWheelScroll(t *testing.T) {
 	m := openAPIFixture(t)
-	m.openapiCursor, m.openapiScrollY = 0, 0
+	m.preview.cursor, m.preview.scrollY = 0, 0
 	m = m.wheelScroll(1)
-	if m.openapiCursor != wheelScrollLines {
-		t.Fatalf("wheel cursor = %d, want %d", m.openapiCursor, wheelScrollLines)
+	if m.preview.cursor != wheelScrollLines {
+		t.Fatalf("wheel cursor = %d, want %d", m.preview.cursor, wheelScrollLines)
 	}
 }

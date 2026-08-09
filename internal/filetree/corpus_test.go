@@ -91,11 +91,11 @@ func TestFindRepoRoot(t *testing.T) {
 // .git — otherwise the language server loads the whole repo.
 func TestFindProjectRoot(t *testing.T) {
 	root := t.TempDir()
-	mkfile(t, root, ".git/config")                                 // monorepo root
-	mkfile(t, root, "frontends/app/package.json")                  // sub-project
-	mkfile(t, root, "frontends/app/tsconfig.json")                 // sub-project
-	mkfile(t, root, "frontends/app/src/pages/x/component.vue")     // deep file
-	mkfile(t, root, "loose/notes.txt")                             // no marker above it
+	mkfile(t, root, ".git/config")                             // monorepo root
+	mkfile(t, root, "frontends/app/package.json")              // sub-project
+	mkfile(t, root, "frontends/app/tsconfig.json")             // sub-project
+	mkfile(t, root, "frontends/app/src/pages/x/component.vue") // deep file
+	mkfile(t, root, "loose/notes.txt")                         // no marker above it
 
 	sub := filepath.Join(root, "frontends", "app")
 	if got := FindProjectRoot(root, filepath.Join(root, "frontends/app/src/pages/x/component.vue")); got != sub {

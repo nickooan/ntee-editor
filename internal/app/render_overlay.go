@@ -59,6 +59,22 @@ func (m Model) renderMessageOverlay(width, height int) string {
 		lipgloss.WithWhitespaceStyle(whitespaceStyle))
 }
 
+// renderConfirmRmOverlay centers the :rm confirmation box in the main pane —
+// the wording distinguishes a recursive directory delete from a single file.
+func (m Model) renderConfirmRmOverlay(width, height int) string {
+	title := "remove file " + m.confirmRm + "?"
+	if m.confirmRmDir {
+		title = "remove directory " + m.confirmRm + " and its contents?"
+	}
+	hint := "[enter] remove · [esc] cancel"
+	boxWidth := input.Clamp(max(len([]rune(title)), len([]rune(hint)))+4, 20, max(20, width-2))
+	box := modalStyle.Width(boxWidth + 2).Render(
+		modalTitleStyle.Render(title) + "\n\n" + overlayHintStyle.Render(hint),
+	)
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box,
+		lipgloss.WithWhitespaceStyle(whitespaceStyle))
+}
+
 // renderFuzzyOverlay draws the fuzzy file finder (Ctrl+P goto / Ctrl+U
 // uncommitted — fuzzyPrompt labels the source): query input on top, matches
 // beneath with the matched runes bold.
@@ -114,13 +130,9 @@ func (m Model) renderDefPickOverlay(width, height int) string {
 	// top pane but compact.
 	const previewH = 5
 	if len(m.defPickPrevLines) > 0 {
-		var re *regexp.Regexp
-		if m.defPickToken != "" {
-			re, _ = regexp.Compile(`\b` + regexp.QuoteMeta(m.defPickToken) + `\b`)
-		}
 		sel := m.defPickItems[input.Clamp(m.defPickIndex, 0, max(0, len(m.defPickItems)-1))]
 		b.WriteString("\n")
-		for _, row := range renderPreviewRows(m.defPickPrevLines, m.defPickPrevHl, re, sel.line, previewH, rowWidth) {
+		for _, row := range renderPreviewRows(m.defPickPrevLines, m.defPickPrevHl, m.defPickRe, sel.line, previewH, rowWidth) {
 			b.WriteString(row + "\n")
 		}
 		b.WriteString(overlayHintStyle.Render(strings.Repeat("─", rowWidth)))
@@ -282,7 +294,7 @@ func (m Model) renderGrepOverlay(width, height int) string {
 	if i := strings.IndexByte(previewQuery, '\n'); i >= 0 {
 		previewQuery = previewQuery[:i]
 	}
-	re := view.CreateMultilineSearchRegex(previewQuery)
+	re := m.grepPreviewRC.multiline(previewQuery)
 	_, hit, ok := m.grepSelectedFile()
 	if ok && m.grepPrevLines != nil {
 		rows = append(rows, renderPreviewRows(m.grepPrevLines, m.grepHl, re, hit.line, previewH, innerW)...)

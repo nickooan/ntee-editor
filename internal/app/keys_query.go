@@ -15,9 +15,10 @@ import (
 // queryInputSuggestions completes the typed bar text: exact/prefix over the
 // visible tree, fuzzy over the full corpus.
 func (m Model) queryInputSuggestions(entries []filetree.FileTreeEntry) []filetree.InputSuggestion {
-	// Reads the cached corpus (populated by ensureCorpus in the key handler);
-	// never walks the tree here, so this is cheap on every keystroke and render.
-	return filetree.BuildInputSuggestions(entries, m.corpus, m.dirCorpus, m.command, filetree.MaxInputSuggestions)
+	// Reads the cached corpus and its precomputed fuzzy data (populated by
+	// ensureCorpus in the key handler); never walks or re-prepares here, so
+	// this is cheap on every keystroke and render.
+	return filetree.BuildInputSuggestions(entries, m.corpus, m.dirCorpus, m.queryPrepared, m.command, filetree.MaxInputSuggestions)
 }
 
 // handleQueryKey is the home-mode handler: the bottom input bar drives the
@@ -166,6 +167,7 @@ func (m Model) queryCreate(verb, rel string) (tea.Model, tea.Cmd) {
 			m.errText = "mkdir failed: " + err.Error()
 			return m, nil
 		}
+		m.invalidateTreeEntries()
 		m.notice = "created " + rel + "/"
 		m.keyboardSelectedCommand = ""
 		m.inputSuggestIndex = 0
@@ -180,6 +182,7 @@ func (m Model) queryCreate(verb, rel string) (tea.Model, tea.Cmd) {
 		m.errText = "touch failed: " + err.Error()
 		return m, nil
 	}
+	m.invalidateTreeEntries()
 	if created {
 		m.notice = "created " + rel
 	} else {
@@ -189,6 +192,20 @@ func (m Model) queryCreate(verb, rel string) (tea.Model, tea.Cmd) {
 	m.inputSuggestIndex = 0
 	m.command, m.qCursor = "", 0
 	return m.openFileAt(rel), nil
+}
+
+// armRemoveConfirm stats the :rm target and opens the confirmation modal —
+// deletion is irreversible (no trash, and dropRemovedPath also forgets tabs,
+// drafts, and cursor memory), so a single Enter never deletes directly.
+func (m Model) armRemoveConfirm(rel string) (tea.Model, tea.Cmd) {
+	info, err := os.Stat(filepath.Join(m.root, filepath.FromSlash(rel)))
+	if err != nil {
+		m.errText = "rm: no such path: " + rel
+		return m, nil
+	}
+	m.confirmRm = rel
+	m.confirmRmDir = info.IsDir()
+	return m, nil
 }
 
 // queryRemove deletes the typed path (file, or directory with its whole
@@ -203,6 +220,7 @@ func (m Model) queryRemove(rel string) (tea.Model, tea.Cmd) {
 		m.errText = "rm failed: " + err.Error()
 		return m, nil
 	}
+	m.invalidateTreeEntries()
 	m = m.dropRemovedPath(rel)
 	parent, _ := filetree.ResolveParentDirectoryCommand(rel)
 	m.selectedCommand = parent
@@ -326,7 +344,7 @@ func (m Model) submitQuery(entries []filetree.FileTreeEntry, suggestions []filet
 	// executeCommand.
 	if verb, rel, ok := parseInlineFs(trimmed); ok {
 		if verb == "rm" {
-			return m.queryRemove(rel)
+			return m.armRemoveConfirm(rel)
 		}
 		return m.queryCreate(verb, rel)
 	}

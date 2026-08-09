@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os/exec"
 	"strings"
 	"sync"
@@ -103,14 +104,8 @@ func startTestClient(t *testing.T, sink func(any)) (*serverClient, *fakeServer) 
 		t.Fatal(err)
 	}
 	_ = conn.Notify("initialized", struct{}{})
-	c.mu.Lock()
-	c.conn = conn
-	c.ready = true
-	ops := c.pending
-	c.pending = nil
-	c.mu.Unlock()
-	for _, op := range ops {
-		op()
+	if !c.becomeReady(conn) {
+		t.Fatal("becomeReady refused on a fresh client")
 	}
 	t.Cleanup(func() { _ = conn.Close(); _ = server.conn.Close() })
 	return c, server
@@ -121,6 +116,13 @@ func TestClientDocSyncAndDefinition(t *testing.T) {
 
 	c.DidOpen("/proj/a.go", "package a")
 	c.DidChange("/proj/a.go", "package a // x", 1)
+	// Wait for the first change to be written before sending the second —
+	// back-to-back changes for one path may legitimately coalesce.
+	waitFor(t, func() bool {
+		server.mu.Lock()
+		defer server.mu.Unlock()
+		return len(server.changed) == 1
+	})
 	c.DidChange("/proj/a.go", "package a // y", 2)
 	c.DidClose("/proj/a.go")
 
@@ -259,19 +261,39 @@ func TestDiagnosticsReachSink(t *testing.T) {
 }
 
 func TestQueuedOpsReplayAfterReady(t *testing.T) {
-	// Ops issued before the handshake completes are queued in order.
+	// Ops issued before the handshake completes wait in the queue.
 	c := newServerClient("go", config.LSPServerConfig{}, "/proj", nil)
 	c.DidOpen("/proj/a.go", "x")
 	c.DidChange("/proj/a.go", "y", 1)
-	if len(c.pending) != 2 {
-		t.Fatalf("pending = %d", len(c.pending))
+	if len(c.queue) != 2 || c.queue[0].kind != opOpen || c.queue[1].kind != opChange {
+		t.Fatalf("queue = %+v", c.queue)
+	}
+	// A newer change for the same path coalesces in place.
+	c.DidChange("/proj/a.go", "z", 2)
+	if len(c.queue) != 2 {
+		t.Fatalf("coalescing failed, queue = %d", len(c.queue))
 	}
 	// Dead clients drop ops silently.
 	c.dead = true
 	c.DidSave("/proj/a.go")
-	if len(c.pending) != 2 {
+	if len(c.queue) != 2 {
 		t.Fatal("dead client must not queue")
 	}
+	c.dead = false
+
+	// Wire a fake server and go ready: queued ops replay in order.
+	clientEnd, serverEnd := pipePair()
+	server := newFakeServer(serverEnd)
+	conn := NewConn(clientEnd, c.handle)
+	t.Cleanup(func() { _ = conn.Close(); _ = server.conn.Close() })
+	if !c.becomeReady(conn) {
+		t.Fatal("becomeReady refused")
+	}
+	waitFor(t, func() bool {
+		server.mu.Lock()
+		defer server.mu.Unlock()
+		return len(server.opened) == 1 && len(server.changed) == 1
+	})
 }
 
 func waitFor(t *testing.T, cond func() bool) {
@@ -505,5 +527,107 @@ func TestLanguageIDFor(t *testing.T) {
 		if got := languageIDFor(path, fallback); got != want {
 			t.Errorf("languageIDFor(%q) = %q, want %q", path, got, want)
 		}
+	}
+}
+
+func TestResolveBinaryRejectsRelativePaths(t *testing.T) {
+	// A slash-containing non-absolute command would resolve relative to the
+	// process cwd (the launch directory), which an opened repo controls.
+	for _, cmd := range []string{"./gopls", "ci/gopls", "../gopls"} {
+		if _, err := resolveBinary(cmd); err == nil {
+			t.Errorf("resolveBinary(%q) should be rejected", cmd)
+		}
+	}
+	// Bare names on PATH and absolute paths still resolve.
+	shPath, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh on PATH")
+	}
+	if got, err := resolveBinary("sh"); err != nil || got == "" {
+		t.Errorf("resolveBinary(sh) = %q, %v", got, err)
+	}
+	if got, err := resolveBinary(shPath); err != nil || got != shPath {
+		t.Errorf("resolveBinary(%q) = %q, %v", shPath, got, err)
+	}
+}
+
+// The core regression for the writer queue: a server that stops consuming
+// stdin (io.Pipe is synchronous, so simply not reading the server end wedges
+// the very first frame) must never block the caller of a doc-sync method.
+func TestDocSyncDoesNotBlockOnFullPipe(t *testing.T) {
+	clientEnd, serverEnd := pipePair()
+	c := newServerClient("go", config.LSPServerConfig{}, "/proj", nil)
+	conn := NewConn(clientEnd, c.handle)
+	t.Cleanup(func() { _ = conn.Close() })
+	if !c.becomeReady(conn) {
+		t.Fatal("becomeReady refused")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		c.DidOpen("/proj/a.go", "v0")
+		for i := 0; i < 100; i++ {
+			c.DidChange("/proj/a.go", fmt.Sprintf("v%d", i+1), i)
+		}
+		c.DidChange("/proj/b.go", "b-final", 0)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("doc-sync blocked on a wedged server pipe")
+	}
+
+	// Attach a reader: the queue drains to a didOpen plus one coalesced
+	// didChange per path (a.go's latest content wins), in FIFO order.
+	server := newFakeServer(serverEnd)
+	t.Cleanup(func() { _ = server.conn.Close() })
+	waitFor(t, func() bool {
+		server.mu.Lock()
+		defer server.mu.Unlock()
+		return len(server.opened) >= 1 && len(server.changed) >= 1
+	})
+	// Give any stragglers a moment, then assert the coalesced totals: one
+	// open (a.go), and one change per path — b.go's arrives as a didOpen
+	// upgrade (never opened), so changed stays at exactly 1.
+	time.Sleep(50 * time.Millisecond)
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if len(server.opened) != 2 { // a.go didOpen + b.go's upgrade
+		t.Fatalf("opened = %v", server.opened)
+	}
+	if len(server.changed) != 1 {
+		t.Fatalf("changed = %v, want exactly one coalesced didChange for a.go", server.changed)
+	}
+}
+
+// A stop that lands while start() is still spawning must leave the client
+// dead: start() may not resurrect it (ready) or leak the child process.
+func TestStopDuringStartDoesNotResurrect(t *testing.T) {
+	catPath, err := exec.LookPath("cat")
+	if err != nil {
+		t.Skip("no cat on PATH")
+	}
+	c := newServerClient("go", config.LSPServerConfig{Command: catPath}, t.TempDir(), nil)
+	c.mu.Lock()
+	c.stopping = true // simulate stop() winning the race before cmd is registered
+	c.dead = true
+	c.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() { c.start(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("start did not return")
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ready {
+		t.Fatal("a stopped client must not become ready")
+	}
+	if c.cmd != nil {
+		t.Fatal("a stopped client must not register its process")
 	}
 }

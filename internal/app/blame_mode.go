@@ -1,15 +1,14 @@
 package app
 
 import (
-	"bytes"
 	"errors"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/nickooan/ntee-editor/internal/gitcmd"
 	"github.com/nickooan/ntee-editor/internal/input"
 )
 
@@ -86,13 +85,13 @@ func (m Model) computeBlameCmd() tea.Cmd {
 	cur := append([]string(nil), m.edit.lines...)
 	return func() tea.Msg {
 		msg := blameReadyMsg{gen: gen, rel: rel}
-		if _, err := gitOut(root, "rev-parse", "--verify", "HEAD^{commit}"); err != nil {
+		if _, err := gitcmd.Out(root, "rev-parse", "--verify", "HEAD^{commit}"); err != nil {
 			// A repo with no commits yet: not an error, everything is new.
 			msg.newFile = true
 		}
 		var rows []blameRow
 		if !msg.newFile {
-			out, err := gitOutIn(root, []byte(strings.Join(cur, "\n")),
+			out, err := gitcmd.OutIn(root, []byte(strings.Join(cur, "\n")),
 				"blame", "--porcelain", "--contents=-", "--", rel)
 			switch {
 			case err != nil && strings.Contains(firstStderrLine(err), "no such path"):
@@ -263,12 +262,4 @@ func (m Model) blameRowText(i int) string {
 		return ""
 	}
 	return m.edit.lines[input.Clamp(i, 0, len(m.edit.lines)-1)]
-}
-
-// gitOutIn is gitOut with the given bytes on the child's stdin (for
-// blame --contents=-, which reads the buffer content from there).
-func gitOutIn(root string, stdin []byte, args ...string) ([]byte, error) {
-	cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
-	cmd.Stdin = bytes.NewReader(stdin)
-	return cmd.Output()
 }

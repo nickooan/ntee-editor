@@ -2,6 +2,7 @@ package app
 
 import (
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 )
@@ -31,18 +32,37 @@ func TestGitStatusMsgSwapsDirtySet(t *testing.T) {
 		t.Fatal("main.go missing from tree")
 	}
 
-	// A failed refresh (ok=false) must keep the last known set.
+	// A failed refresh (ok=false) must keep the last known set and surface a
+	// notice — once, not on every subsequent failing tick.
 	next, _ = m.Update(gitStatusMsg{ok: false})
 	m = next.(Model)
 	if !m.gitDirty["main.go"] {
 		t.Fatal("failed refresh must not clear the dirty set")
 	}
+	if m.notice == "" {
+		t.Fatal("first failure must surface a notice")
+	}
+	m.notice = ""
+	next, _ = m.Update(gitStatusMsg{ok: false})
+	m = next.(Model)
+	if m.notice != "" {
+		t.Fatalf("repeat failure must stay quiet, got %q", m.notice)
+	}
+	// Recovery clears the latch: a later failure notices again.
+	next, _ = m.Update(gitStatusMsg{ok: true, dirty: m.gitDirty})
+	m = next.(Model)
+	next, _ = m.Update(gitStatusMsg{ok: false})
+	m = next.(Model)
+	if m.notice == "" {
+		t.Fatal("failure after recovery must notice again")
+	}
 }
 
 func TestGitStatusTickReschedules(t *testing.T) {
 	m, _ := newTestModel(t, nil)
+	m.gitRepo = true // the tick only ever runs in a repo (Init gates it)
 
-	// Idle tick: fires a refresh and re-arms.
+	// Active tick: fires a refresh and re-arms.
 	next, cmd := m.Update(gitStatusTickMsg{})
 	m = next.(Model)
 	if !m.gitStatusRunning {
@@ -64,6 +84,67 @@ func TestGitStatusTickReschedules(t *testing.T) {
 	m = next.(Model)
 	if m.gitStatusRunning {
 		t.Fatal("gitStatusMsg must clear the running flag")
+	}
+}
+
+func TestGitStatusPollPausesWhenIdleOrBlurred(t *testing.T) {
+	m, _ := newTestModel(t, nil)
+	m.gitRepo = true
+
+	// Idle for longer than the threshold: the tick re-arms without spawning.
+	m.lastInputAt = time.Now().Add(-gitIdleThreshold - time.Second)
+	next, cmd := m.Update(gitStatusTickMsg{})
+	m = next.(Model)
+	if m.gitStatusRunning {
+		t.Fatal("idle tick must not spawn a refresh")
+	}
+	if cmd == nil {
+		t.Fatal("idle tick must still re-arm the loop")
+	}
+
+	// Input wakes the loop up: the next tick refreshes again.
+	next, _ = m.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	m = next.(Model)
+	next, _ = m.Update(gitStatusTickMsg{})
+	m = next.(Model)
+	if !m.gitStatusRunning {
+		t.Fatal("tick after input must refresh")
+	}
+	next, _ = m.Update(gitStatusMsg{ok: true, dirty: map[string]bool{}})
+	m = next.(Model)
+
+	// Blurred terminal: paused regardless of recent input.
+	next, _ = m.Update(tea.BlurMsg{})
+	m = next.(Model)
+	next, _ = m.Update(gitStatusTickMsg{})
+	m = next.(Model)
+	if m.gitStatusRunning {
+		t.Fatal("blurred tick must not spawn a refresh")
+	}
+
+	// Refocus refreshes immediately (external changes may have landed).
+	next, cmd = m.Update(tea.FocusMsg{})
+	m = next.(Model)
+	if !m.gitStatusRunning || cmd == nil {
+		t.Fatal("focus must trigger an immediate refresh")
+	}
+}
+
+func TestManualRefreshRespectsInFlight(t *testing.T) {
+	m, _ := newTestModel(t, nil)
+	m.gitRepo = true
+	m.gitStatusRunning = true
+	if _, cmd := m.maybeGitRefresh(); cmd != nil {
+		t.Fatal("a refresh in flight must suppress a second spawn")
+	}
+	m.gitStatusRunning = false
+	m2, cmd := m.maybeGitRefresh()
+	if cmd == nil || !m2.gitStatusRunning {
+		t.Fatal("an idle refresh must spawn and mark in flight")
+	}
+	m.gitRepo = false
+	if _, cmd := m.maybeGitRefresh(); cmd != nil {
+		t.Fatal("no repo → no spawn")
 	}
 }
 

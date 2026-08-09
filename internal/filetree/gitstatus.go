@@ -1,8 +1,9 @@
 package filetree
 
 import (
-	"os/exec"
 	"strings"
+
+	"github.com/nickooan/ntee-editor/internal/gitcmd"
 )
 
 // GitDirtySet reports the working tree's uncommitted paths as a set for O(1)
@@ -22,7 +23,7 @@ func GitDirtySet(root string) (map[string]bool, bool) {
 	// --untracked-files=all lists every file inside an untracked directory
 	// individually (instead of one collapsed "dir/" record), so consumers like
 	// the Ctrl+U uncommitted-files finder see openable file paths.
-	out, err := exec.Command("git", "-C", root, "status", "--porcelain", "-z", "--untracked-files=all").Output()
+	out, err := gitcmd.Out(root, "status", "--porcelain", "-z", "--untracked-files=all")
 	if err != nil {
 		return nil, false
 	}

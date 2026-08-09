@@ -227,9 +227,9 @@ func (m Model) handleFuzzyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m = m.flushBurst() // keep the abandoned buffer reachable in history
 		}
 		m = m.openFileAt(rel)
-	case "up":
+	case "up", "shift+up":
 		m.fuzzyIndex = max(0, m.fuzzyIndex-1)
-	case "down":
+	case "down", "shift+down":
 		m.fuzzyIndex = min(max(0, len(m.fuzzyMatches)-1), m.fuzzyIndex+1)
 	case "backspace":
 		if runes := []rune(m.fuzzyQuery); len(runes) > 0 {

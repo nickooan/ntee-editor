@@ -76,7 +76,40 @@ func Filter(query string, candidates []Prepared) []Match {
 		}
 		return len(candidates[out[a].Index].Text) < len(candidates[out[b].Index].Text)
 	})
+	orderDirPrefix(query, candidates, out)
 	return out
+}
+
+// orderDirPrefix applies directory-browse ordering when the query names a
+// literal directory prefix ("internal/app/", "internal/app/ren"): candidates
+// under that directory list first — they are what the user is browsing, not
+// scattered subsequence matches from elsewhere — and, when the query is the
+// bare directory (empty tail), alphabetically. Every child of a directory
+// earns an identical fuzzy score, so without this the score tiebreaks degrade
+// the listing to path-length order. With a typed tail the in-class order stays
+// score-ranked (the stable partition preserves it) — relevance still matters
+// for the typed part.
+func orderDirPrefix(query string, candidates []Prepared, matches []Match) {
+	slash := strings.LastIndexByte(query, '/')
+	if slash < 0 || len(matches) < 2 {
+		return
+	}
+	prefix := query[:slash+1]
+	browse := slash == len(query)-1 // no tail typed: pure directory browse
+	inClass := func(m Match) bool {
+		t := candidates[m.Index].Text
+		return len(t) >= len(prefix) && strings.EqualFold(t[:len(prefix)], prefix)
+	}
+	sort.SliceStable(matches, func(a, b int) bool {
+		ca, cb := inClass(matches[a]), inClass(matches[b])
+		if ca != cb {
+			return ca
+		}
+		if ca && browse {
+			return candidates[matches[a].Index].Text < candidates[matches[b].Index].Text
+		}
+		return false // keep the existing (score) order within each class
+	})
 }
 
 // Positions returns the matched rune indices of the best alignment of query in

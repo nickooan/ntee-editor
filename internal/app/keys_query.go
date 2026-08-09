@@ -15,9 +15,10 @@ import (
 // queryInputSuggestions completes the typed bar text: exact/prefix over the
 // visible tree, fuzzy over the full corpus.
 func (m Model) queryInputSuggestions(entries []filetree.FileTreeEntry) []filetree.InputSuggestion {
-	// Reads the cached corpus (populated by ensureCorpus in the key handler);
-	// never walks the tree here, so this is cheap on every keystroke and render.
-	return filetree.BuildInputSuggestions(entries, m.corpus, m.dirCorpus, m.command, filetree.MaxInputSuggestions)
+	// Reads the cached corpus and its precomputed fuzzy data (populated by
+	// ensureCorpus in the key handler); never walks or re-prepares here, so
+	// this is cheap on every keystroke and render.
+	return filetree.BuildInputSuggestions(entries, m.corpus, m.dirCorpus, m.queryPrepared, m.command, filetree.MaxInputSuggestions)
 }
 
 // handleQueryKey is the home-mode handler: the bottom input bar drives the
@@ -166,6 +167,7 @@ func (m Model) queryCreate(verb, rel string) (tea.Model, tea.Cmd) {
 			m.errText = "mkdir failed: " + err.Error()
 			return m, nil
 		}
+		m.invalidateTreeEntries()
 		m.notice = "created " + rel + "/"
 		m.keyboardSelectedCommand = ""
 		m.inputSuggestIndex = 0
@@ -180,6 +182,7 @@ func (m Model) queryCreate(verb, rel string) (tea.Model, tea.Cmd) {
 		m.errText = "touch failed: " + err.Error()
 		return m, nil
 	}
+	m.invalidateTreeEntries()
 	if created {
 		m.notice = "created " + rel
 	} else {
@@ -203,6 +206,7 @@ func (m Model) queryRemove(rel string) (tea.Model, tea.Cmd) {
 		m.errText = "rm failed: " + err.Error()
 		return m, nil
 	}
+	m.invalidateTreeEntries()
 	m = m.dropRemovedPath(rel)
 	parent, _ := filetree.ResolveParentDirectoryCommand(rel)
 	m.selectedCommand = parent

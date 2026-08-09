@@ -105,7 +105,7 @@ func (m Model) handleOpenAPISearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 // openapiMatches is the live match set of the current query over the rendered
 // document's plain text.
 func (m Model) openapiMatches() []view.SearchMatch {
-	return view.FindSearchMatches(m.openapiCorpus, m.openapiSearch)
+	return m.openapiMC.get(m.openapiCorpus, m.openapiSearch)
 }
 
 // focusOpenAPIMatch focuses the first match at/after the document cursor

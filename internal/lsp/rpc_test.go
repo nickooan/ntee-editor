@@ -132,3 +132,64 @@ func TestShutdownFailsInflight(t *testing.T) {
 		t.Fatal("request hung after close")
 	}
 }
+
+func TestNullIDResponseDoesNotPanic(t *testing.T) {
+	// JSON-RPC 2.0 mandates `"id": null` for responses to unparseable
+	// requests; the readLoop must drop the frame, not panic.
+	clientEnd, serverEnd := pipePair()
+	client := NewConn(clientEnd, nil)
+	defer client.Close()
+
+	go func() {
+		reader := bufio.NewReader(serverEnd)
+		// First frame: the null-id error response, unprompted.
+		_ = writeMessage(serverEnd, &Message{JSONRPC: "2.0", Error: &RPCError{Code: -32700, Message: "parse error"}})
+		// Then behave normally for the real request.
+		msg, err := readMessage(reader)
+		if err != nil {
+			return
+		}
+		_ = writeMessage(serverEnd, &Message{JSONRPC: "2.0", ID: msg.ID, Result: json.RawMessage(`"ok"`)})
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	raw, err := client.Request(ctx, "anything", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != `"ok"` {
+		t.Fatalf("conn broken after null-id frame: %s", raw)
+	}
+}
+
+func TestOversizedFrameShutsDownConn(t *testing.T) {
+	clientEnd, serverEnd := pipePair()
+	client := NewConn(clientEnd, nil)
+	defer client.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.Request(context.Background(), "hang", nil)
+		done <- err
+	}()
+
+	go func() {
+		reader := bufio.NewReader(serverEnd)
+		if _, err := readMessage(reader); err != nil {
+			return
+		}
+		// Claim a frame far over maxFrameBytes; the client must refuse to
+		// allocate it and shut down, failing the in-flight request.
+		_, _ = io.WriteString(serverEnd, "Content-Length: 9999999999\r\n\r\n")
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("in-flight request should fail when the conn hits an oversized frame")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("request hung after oversized frame")
+	}
+}

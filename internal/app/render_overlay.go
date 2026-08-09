@@ -114,13 +114,9 @@ func (m Model) renderDefPickOverlay(width, height int) string {
 	// top pane but compact.
 	const previewH = 5
 	if len(m.defPickPrevLines) > 0 {
-		var re *regexp.Regexp
-		if m.defPickToken != "" {
-			re, _ = regexp.Compile(`\b` + regexp.QuoteMeta(m.defPickToken) + `\b`)
-		}
 		sel := m.defPickItems[input.Clamp(m.defPickIndex, 0, max(0, len(m.defPickItems)-1))]
 		b.WriteString("\n")
-		for _, row := range renderPreviewRows(m.defPickPrevLines, m.defPickPrevHl, re, sel.line, previewH, rowWidth) {
+		for _, row := range renderPreviewRows(m.defPickPrevLines, m.defPickPrevHl, m.defPickRe, sel.line, previewH, rowWidth) {
 			b.WriteString(row + "\n")
 		}
 		b.WriteString(overlayHintStyle.Render(strings.Repeat("─", rowWidth)))
@@ -282,7 +278,7 @@ func (m Model) renderGrepOverlay(width, height int) string {
 	if i := strings.IndexByte(previewQuery, '\n'); i >= 0 {
 		previewQuery = previewQuery[:i]
 	}
-	re := view.CreateMultilineSearchRegex(previewQuery)
+	re := m.grepPreviewRC.multiline(previewQuery)
 	_, hit, ok := m.grepSelectedFile()
 	if ok && m.grepPrevLines != nil {
 		rows = append(rows, renderPreviewRows(m.grepPrevLines, m.grepHl, re, hit.line, previewH, innerW)...)

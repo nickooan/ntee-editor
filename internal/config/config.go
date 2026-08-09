@@ -4,6 +4,12 @@
 // language's `extensions` are UNIONED with the built-in defaults, so a config
 // extends (never shrinks) the set of file types routed to an LSP server; other
 // language fields (command/args/init) overlay the default when set.
+//
+// Trust rule: only the USER config may name executables. The project-local
+// .ntee-editor.yaml ships with whatever repo the editor is pointed at, so its
+// per-language `lsp` blocks (command/args/init/bridge — all execution vectors)
+// and `install` strategies are stripped before merging; it may still set
+// behavior (enable, extensions, editor, tree, theme).
 package config
 
 import (
@@ -138,9 +144,9 @@ func Default() Config {
 func Load(projectRoot string) Config {
 	cfg := Default()
 	if path, err := ConfigPath(); err == nil {
-		merge(&cfg, path)
+		merge(&cfg, path, true) // user config: trusted, may name executables
 	}
-	merge(&cfg, filepath.Join(projectRoot, ".ntee-editor.yaml"))
+	merge(&cfg, filepath.Join(projectRoot, ".ntee-editor.yaml"), false)
 	if cfg.Editor.TabWidth < 1 {
 		cfg.Editor.TabWidth = 4
 	}
@@ -279,7 +285,7 @@ func SetThemeSyntax(name string) (string, error) {
 	return path, nil
 }
 
-func merge(cfg *Config, path string) {
+func merge(cfg *Config, path string, trustExec bool) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return
@@ -289,6 +295,14 @@ func merge(cfg *Config, path string) {
 	prior := cfg.Languages
 	cfg.Languages = nil
 	_ = yaml.Unmarshal(data, cfg) // scalar fields absent from the file keep prior values
+	if !trustExec {
+		for name, l := range cfg.Languages {
+			// Untrusted (project-local) files may not name executables: lsp
+			// covers command/args/init/bridge, install covers --prepare-lsp.
+			l.LSP, l.Install = nil, nil
+			cfg.Languages[name] = l
+		}
+	}
 	cfg.Languages = mergeLanguages(prior, cfg.Languages)
 }
 

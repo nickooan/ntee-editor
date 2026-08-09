@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -159,6 +160,10 @@ func (m Model) jumpToCandidates(title, token, emptyErr string, cands []defCandid
 		m.defPickOpen = true
 		m.defPickTitle = title
 		m.defPickToken = token
+		m.defPickRe = nil
+		if token != "" {
+			m.defPickRe = regexp.MustCompile(`\b` + regexp.QuoteMeta(token) + `\b`)
+		}
 		m.defPickItems = cands
 		m.defPickIndex = 0
 		m.defPickPrevRel = ""

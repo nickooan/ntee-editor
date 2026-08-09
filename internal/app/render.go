@@ -156,7 +156,7 @@ func (m Model) renderStatusLine() string {
 		}
 		return bar
 	case modeSearch:
-		matches := view.FindSearchMatches(m.searchContent, m.searchInput)
+		matches := m.searchMatches()
 		summary := fmt.Sprintf("%d matches", len(matches))
 		if len(matches) > 0 {
 			summary = fmt.Sprintf("%d/%d", min(m.searchFocused+1, len(matches)), len(matches))
@@ -177,7 +177,7 @@ func (m Model) renderStatusLine() string {
 		if all, _, ok := m.searchExecPreview(); ok {
 			n := 1
 			if all {
-				n = len(view.FindSearchMatches(m.searchContent, m.searchInput))
+				n = len(m.searchMatches())
 			}
 			bar += noticeStyle.Render(fmt.Sprintf("replacing %d", n)) + statusTextStyle.Render("   ")
 		}
@@ -831,7 +831,7 @@ func renderSelectedLine(line string, width int) string {
 }
 
 func (m Model) renderSearch(width, height int) string {
-	matches := view.FindSearchMatches(m.searchContent, m.searchInput)
+	matches := m.searchMatches()
 	byLine := view.BuildMatchesByLine(matches)
 	lines := strings.Split(m.searchContent, "\n")
 

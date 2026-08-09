@@ -189,6 +189,11 @@ func (c *Conn) notificationLoop() {
 // resolveResponse matches by the raw id bytes, so numeric and string ids both
 // work (LSP servers may echo either form).
 func (c *Conn) resolveResponse(msg *Message) {
+	if msg.ID == nil {
+		// Spec-legal `"id": null` response (e.g. a server-side parse-error
+		// report) — nothing to correlate it with.
+		return
+	}
 	key := strings.Trim(string(*msg.ID), `"`)
 	c.mu.Lock()
 	ch := c.pending[key]
@@ -262,6 +267,12 @@ func writeMessage(w io.Writer, msg *Message) error {
 
 const contentLengthPrefix = "content-length:"
 
+// maxFrameBytes caps a frame's Content-Length. Real LSP traffic (gopls
+// completion/diagnostics) tops out at a few MB; 32 MB is generous headroom
+// while keeping a hostile or broken server from forcing an arbitrarily large
+// allocation.
+const maxFrameBytes = 32 << 20
+
 // readMessage reads one frame: the header block terminated by a blank line,
 // then exactly Content-Length bytes of body.
 func readMessage(r *bufio.Reader) (*Message, error) {
@@ -285,6 +296,9 @@ func readMessage(r *bufio.Reader) (*Message, error) {
 	}
 	if contentLength < 0 {
 		return nil, fmt.Errorf("lsp: frame is missing a Content-Length header")
+	}
+	if contentLength > maxFrameBytes {
+		return nil, fmt.Errorf("lsp: frame of %d bytes exceeds the %d cap", contentLength, maxFrameBytes)
 	}
 
 	body := make([]byte, contentLength)

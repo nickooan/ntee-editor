@@ -22,10 +22,10 @@ func rowsFixture(t *testing.T) (cur []string, rows []diffRow, adds, dels int) {
 	for i := 0; i < 10; i++ {
 		cur = append(cur, fmt.Sprintf("l%d", i))
 	}
-	old := append([]string(nil), cur[:3]...)          // l0..l2 (l3 not yet present)
-	old = append(old, cur[4:6]...)                    // l4, l5
-	old = append(old, "gone")                         // removed line
-	old = append(old, cur[6:]...)                     // l6..l9
+	old := append([]string(nil), cur[:3]...) // l0..l2 (l3 not yet present)
+	old = append(old, cur[4:6]...)           // l4, l5
+	old = append(old, "gone")                // removed line
+	old = append(old, cur[6:]...)            // l6..l9
 	rows, adds, dels = buildDiffRows(old, cur)
 	if adds != 1 || dels != 1 {
 		t.Fatalf("fixture diff: adds=%d dels=%d, want 1/1", adds, dels)
@@ -532,5 +532,23 @@ func TestComputeDiffCmdIntegration(t *testing.T) {
 		if row.kind != diffAdd {
 			t.Fatal("untracked file must render all-added")
 		}
+	}
+}
+
+func TestEnterDiffRejectsDashRevision(t *testing.T) {
+	m, root := newTestModel(t, nil)
+	must(t, os.WriteFile(filepath.Join(root, "main.go"), []byte("hello\n"), 0o644))
+	m = m.openFileAt("main.go")
+	m.gitRepo = true
+	next, cmd := m.enterDiff("-Rfoo")
+	m = next.(Model)
+	if cmd != nil {
+		t.Fatal("a dash revision must not spawn git")
+	}
+	if m.mode == modeDiff {
+		t.Fatal("a dash revision must keep the current mode")
+	}
+	if !strings.Contains(m.errText, "bad revision") {
+		t.Fatalf("errText = %q, want a bad-revision message", m.errText)
 	}
 }

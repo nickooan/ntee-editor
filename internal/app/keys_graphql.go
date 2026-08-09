@@ -106,7 +106,7 @@ func (m Model) handleGraphQLSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 // graphqlMatches is the live match set of the current query over the rendered
 // document's plain text.
 func (m Model) graphqlMatches() []view.SearchMatch {
-	return view.FindSearchMatches(m.graphqlCorpus, m.graphqlSearch)
+	return m.graphqlMC.get(m.graphqlCorpus, m.graphqlSearch)
 }
 
 // focusGraphQLMatch focuses the first match at/after the document cursor

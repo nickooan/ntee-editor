@@ -133,6 +133,12 @@ func resolveBinary(command string) (string, error) {
 		}
 		return "", errors.New("not found: " + command)
 	}
+	// A non-absolute command containing a separator would make exec.LookPath
+	// resolve it relative to the process cwd — the launch directory, which the
+	// opened project controls. Only absolute paths or bare names are allowed.
+	if strings.ContainsRune(command, '/') || strings.ContainsRune(command, os.PathSeparator) {
+		return "", errors.New("relative server path not allowed: " + command)
+	}
 	if path, err := exec.LookPath(command); err == nil {
 		return path, nil
 	}

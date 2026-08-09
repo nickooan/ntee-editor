@@ -273,7 +273,7 @@ func (m Model) moveEditCursor(dx, dy int) Model {
 // the open-file record. Shared by Ctrl+S and :w.
 func (m Model) saveEdit() Model {
 	content := m.edit.content()
-	if err := filetree.WriteViewFile(m.openFile.Path, content); err != nil {
+	if err := filetree.WriteViewFile(m.root, m.openRel, content); err != nil {
 		m.errText = "save failed: " + err.Error()
 		return m
 	}

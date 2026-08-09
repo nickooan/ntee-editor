@@ -129,7 +129,7 @@ func (m Model) searchReplace(all bool, repl string) Model {
 		m.errText = "replace needs an edit session"
 		return m
 	}
-	matches := view.FindSearchMatches(m.searchContent, m.searchInput)
+	matches := m.searchMatches()
 	if len(matches) == 0 {
 		m.errText = "no matches"
 		return m
@@ -165,7 +165,7 @@ func (m Model) searchReplace(all bool, repl string) Model {
 	} else {
 		// Surviving matches shifted down one index, so the kept (clamped)
 		// index naturally lands on the formerly-next match.
-		n := len(view.FindSearchMatches(m.searchContent, m.searchInput))
+		n := len(m.searchMatches())
 		m.searchFocused = input.Clamp(m.searchFocused, 0, max(0, n-1))
 	}
 	m.notice = fmt.Sprintf("replaced %d match(es)", len(targets))

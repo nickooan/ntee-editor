@@ -507,3 +507,24 @@ func TestLanguageIDFor(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveBinaryRejectsRelativePaths(t *testing.T) {
+	// A slash-containing non-absolute command would resolve relative to the
+	// process cwd (the launch directory), which an opened repo controls.
+	for _, cmd := range []string{"./gopls", "ci/gopls", "../gopls"} {
+		if _, err := resolveBinary(cmd); err == nil {
+			t.Errorf("resolveBinary(%q) should be rejected", cmd)
+		}
+	}
+	// Bare names on PATH and absolute paths still resolve.
+	shPath, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh on PATH")
+	}
+	if got, err := resolveBinary("sh"); err != nil || got == "" {
+		t.Errorf("resolveBinary(sh) = %q, %v", got, err)
+	}
+	if got, err := resolveBinary(shPath); err != nil || got != shPath {
+		t.Errorf("resolveBinary(%q) = %q, %v", shPath, got, err)
+	}
+}

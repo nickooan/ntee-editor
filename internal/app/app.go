@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -224,6 +225,13 @@ type Model struct {
 	searchInput    string
 	searchFocused  int
 	searchHl       [][]view.HighlightSegment
+	// Shared by all Model copies (pointer): per-(content,query) match memos
+	// for search mode and the openapi/graphql preview searches.
+	searchMC      *matchCache
+	openapiMC     *matchCache
+	graphqlMC     *matchCache
+	frames        *frameCache
+	grepPreviewRC *regexCache
 
 	// Search-exec command bar (Ctrl+E from search mode): "c <text>" replaces the
 	// focused match's span, "mlc <text>" replaces every match. Always returns to
@@ -277,8 +285,14 @@ type Model struct {
 	// walking it per keystroke is what made large repos lag. Kept fresh against
 	// external changes by a background rebuild (see ensureCorpus/rebuildCorpusCmd).
 	// corpusBuiltAt zero means "never built" (cold cache).
-	corpus           []string
-	dirCorpus        []string // "/"-suffixed rel dirs from the same walk (dirMtimes keys)
+	corpus    []string
+	dirCorpus []string // "/"-suffixed rel dirs from the same walk (dirMtimes keys)
+	// queryPrepared is PrepareCorpus(corpus, dirCorpus), refreshed at the same
+	// two points those slices are assigned, so the query bar's fuzzy stage
+	// doesn't re-prepare up to 50k candidates per keystroke (the Ctrl+P finder
+	// caches the same way in fuzzyCorpus). Unlike fuzzyCorpus it stays
+	// resident: the query bar is the home mode.
+	queryPrepared    []fuzzy.Prepared
 	corpusBuiltAt    time.Time
 	corpusRebuilding bool
 	corpusTruncated  bool               // the walk hit Tree.MaxIndexFiles — index is partial
@@ -301,9 +315,13 @@ type Model struct {
 
 	// Definition/reference picker (Ctrl+J with multiple hits). The preview
 	// caches the selected candidate's file (re-read on file change only).
-	defPickOpen      bool
-	defPickTitle     string
-	defPickToken     string
+	defPickOpen  bool
+	defPickTitle string
+	defPickToken string
+	// defPickRe highlights the token in the preview; compiled once when the
+	// picker opens (QuoteMeta'd, so compilation cannot fail) instead of once
+	// per rendered frame. nil = no highlight.
+	defPickRe        *regexp.Regexp
 	defPickItems     []defCandidate
 	defPickIndex     int
 	defPickPrevRel   string
@@ -373,6 +391,11 @@ func New(cfg config.Config, db store.Backend, root, notice string, reg lsp.Regis
 		gitRepo:       filetree.IsGitRepo(root),
 		draftSet:      map[string]bool{},
 		cursorMem:     map[string]store.TabCursor{},
+		searchMC:      &matchCache{},
+		openapiMC:     &matchCache{},
+		graphqlMC:     &matchCache{},
+		frames:        &frameCache{},
+		grepPreviewRC: &regexCache{},
 	}
 	lastFile := ""
 	if sess, ok := db.LoadSession(); ok {
@@ -405,6 +428,7 @@ func New(cfg config.Config, db store.Backend, root, notice string, reg lsp.Regis
 	if idx, ok := db.LoadCorpus(); ok && idx.Version == store.CorpusVersion {
 		m.corpus = idx.Files
 		m.dirCorpus = filetree.DirsFromMtimes(idx.DirMtimes)
+		m.queryPrepared = filetree.PrepareCorpus(m.corpus, m.dirCorpus)
 		m.corpusTruncated = idx.Truncated
 		m.corpusBuiltAt = time.Now()
 		m.pendingValidate = &idx
@@ -521,6 +545,8 @@ const corpusTTL = 2 * time.Second
 // signature, and truncation flag) from the background rebuild goroutine.
 type corpusMsg struct {
 	files     []string
+	dirs      []string         // DirsFromMtimes(dirMtimes), computed off the UI goroutine
+	prepared  []fuzzy.Prepared // PrepareCorpus(files, dirs), likewise
 	gi        *filetree.Gitignore
 	dirMtimes map[string]int64
 	truncated bool
@@ -559,8 +585,11 @@ func (m Model) rebuildCorpusCmd() tea.Cmd {
 	return func() tea.Msg {
 		gi := filetree.LoadGitignore(root)
 		files, dirMtimes, truncated := filetree.BuildAllEntries(root, ignore, gi, maxFiles)
+		dirs := filetree.DirsFromMtimes(dirMtimes)
 		return corpusMsg{
 			files:     files,
+			dirs:      dirs,
+			prepared:  filetree.PrepareCorpus(files, dirs),
 			gi:        gi,
 			dirMtimes: dirMtimes,
 			truncated: truncated,
@@ -575,6 +604,9 @@ func truncatedNotice(cap int) string {
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.frames != nil {
+		m.frames.seq++ // new message: per-message memos (treeEntries) go stale
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		wasReady := m.ready
@@ -625,7 +657,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// then persist it so the next launch is a warm start. Persisting here (on
 		// the main goroutine) keeps all DB writes off the rebuild goroutine.
 		m.corpus = msg.files
-		m.dirCorpus = filetree.DirsFromMtimes(msg.dirMtimes)
+		m.dirCorpus = msg.dirs
+		m.queryPrepared = msg.prepared
 		m.gitignore = msg.gi
 		m.corpusBuiltAt = msg.builtAt
 		m.corpusRebuilding = false
@@ -872,16 +905,50 @@ func (m Model) saveSession() {
 	})
 }
 
+// frameCache memoizes per-message derived state. Update bumps seq once per
+// inbound message, so entries computed for one Update+View cycle (the key
+// handler, the sidebar renderer, and the query popup each call treeEntries)
+// are shared within the cycle and recomputed on the next message — freshness
+// is identical to the uncached walk. Shared by all Model copies (pointer);
+// Update and View run on the program goroutine, so no locking is needed.
+type frameCache struct {
+	seq     int
+	treeOk  bool
+	treeSeq int
+	treeKey string
+	entries []filetree.FileTreeEntry
+}
+
+// invalidateTreeEntries drops the per-message tree memo. Handlers that mutate
+// the filesystem mid-message (:touch/:mkdir/:rm) call this so the same
+// cycle's View walks fresh.
+func (m Model) invalidateTreeEntries() {
+	if m.frames != nil {
+		m.frames.treeOk = false
+	}
+}
+
 // treeEntries builds the sidebar: expansion is a pure function of the path
-// driving the sidebar (typed input, else the confirmed selection).
+// driving the sidebar (typed input, else the confirmed selection). The walk
+// (a stat per expanded directory plus gitignore matching per child) is
+// memoized per message via frameCache.
 func (m Model) treeEntries() []filetree.FileTreeEntry {
-	return filetree.BuildFileTreeEntries(
+	key := m.sidebarCommand()
+	f := m.frames
+	if f != nil && f.treeOk && f.treeSeq == f.seq && f.treeKey == key {
+		return f.entries
+	}
+	entries := filetree.BuildFileTreeEntries(
 		m.root,
-		filetree.BuildExpandedDirectoryPaths(m.sidebarCommand()),
+		filetree.BuildExpandedDirectoryPaths(key),
 		m.cfg.Tree.Ignore,
 		m.gitignore,
 		m.gitDirty,
 	)
+	if f != nil {
+		f.treeOk, f.treeSeq, f.treeKey, f.entries = true, f.seq, key, entries
+	}
+	return entries
 }
 
 // sidebarCommand is the path that drives directory EXPANSION.

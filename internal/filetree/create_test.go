@@ -75,3 +75,59 @@ func TestCreateRejectsEscapes(t *testing.T) {
 		t.Fatal("root itself must survive")
 	}
 }
+
+func TestCreateRefusesSymlinkEscapes(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "victim.txt"), []byte("keep me"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Operating through the escaping link must be refused, existing tail or not.
+	if err := MakeDir(root, "link/sub"); err == nil {
+		t.Error("MakeDir through an escaping symlink should be refused")
+	}
+	if _, err := EnsureFile(root, "link/new.txt"); err == nil {
+		t.Error("EnsureFile through an escaping symlink should be refused")
+	}
+	if err := Remove(root, "link/victim.txt"); err == nil {
+		t.Error("Remove through an escaping symlink should be refused")
+	}
+	// Removing the escaping link itself is refused too (resolution escapes).
+	if err := Remove(root, "link"); err == nil {
+		t.Error("Remove of an escaping symlink should be refused")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "victim.txt")); err != nil {
+		t.Fatal("outside file was touched:", err)
+	}
+}
+
+func TestCreateAllowsInRootSymlinks(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "real"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, "real"), filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := EnsureFile(root, "link/a.txt"); err != nil {
+		t.Fatal("EnsureFile through an in-root symlink should work:", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "real", "a.txt")); err != nil {
+		t.Fatal("file should land in the link's target:", err)
+	}
+	// Removing an in-root link removes the link, not its target.
+	if err := Remove(root, "link"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "link")); !os.IsNotExist(err) {
+		t.Error("link should be gone")
+	}
+	if _, err := os.Stat(filepath.Join(root, "real", "a.txt")); err != nil {
+		t.Error("link target must survive removing the link:", err)
+	}
+}

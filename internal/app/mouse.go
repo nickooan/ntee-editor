@@ -148,11 +148,11 @@ func (m Model) handleEditClick(x, y int) (Model, bool) {
 	bottom := min(top+h-1, total-1)
 	switch {
 	case line == top && top > 0:
-		m.fileScrollY = max(0, line-h+1) // clicked top row → page up, line lands at the bottom
+		m.fileScrollY = max(0, line-h+1)
 	case line == bottom && bottom < total-1:
-		m.fileScrollY = line // clicked bottom row → page down, line lands at the top
+		m.fileScrollY = line
 	default:
-		m.fileScrollY = top // ordinary click: the viewport stays put
+		m.fileScrollY = top
 	}
 	if line != m.edit.cy {
 		m = m.flushBurst() // undo boundary on line change, like moveEditCursor
@@ -222,11 +222,11 @@ func (m Model) handleDiffClick(x, y int) (Model, bool) {
 	bottom := min(top+h-1, total-1)
 	switch {
 	case row == top && top > 0:
-		m.diffScrollY = max(0, row-h+1) // clicked top row → page up, row lands at the bottom
+		m.diffScrollY = max(0, row-h+1)
 	case row == bottom && bottom < total-1:
-		m.diffScrollY = row // clicked bottom row → page down, row lands at the top
+		m.diffScrollY = row
 	default:
-		m.diffScrollY = top // ordinary click: the viewport stays put
+		m.diffScrollY = top
 	}
 	m.diffCursor = row
 	m.diffCx = col
@@ -291,11 +291,11 @@ func (m Model) handleBlameClick(x, y int) (Model, bool) {
 	bottom := min(top+h-1, total-1)
 	switch {
 	case row == top && top > 0:
-		m.blameScrollY = max(0, row-h+1) // clicked top row → page up, row lands at the bottom
+		m.blameScrollY = max(0, row-h+1)
 	case row == bottom && bottom < total-1:
-		m.blameScrollY = row // clicked bottom row → page down, row lands at the top
+		m.blameScrollY = row
 	default:
-		m.blameScrollY = top // ordinary click: the viewport stays put
+		m.blameScrollY = top
 	}
 	m.blameCursor = row
 	m.blameCx = col

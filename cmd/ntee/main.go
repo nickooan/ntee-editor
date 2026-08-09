@@ -87,9 +87,8 @@ func main() {
 func runEditor(absRoot string) int {
 	cfg, warnings := config.LoadWithWarnings(absRoot)
 
-	// Per-project ntee-db store; fall back to in-memory (undo only, nothing
-	// persists) when the store's single-writer lock is held by another
-	// instance of this project.
+	// Fall back to in-memory (undo only, nothing persists) when another
+	// instance of this project holds the store's single-writer lock.
 	var db store.Backend
 	if s, err := store.Open(absRoot, cfg.Editor.MaxSnapshots); err != nil {
 		db = store.NewMemory()
@@ -100,8 +99,6 @@ func runEditor(absRoot string) int {
 	defer db.Close()
 	notice := strings.Join(warnings, " · ")
 
-	// Language servers (gopls, typescript-language-server) start lazily per
-	// language; diagnostics flow into the program via the sink.
 	var reg lsp.Registry = lsp.NewNoopRegistry()
 	var manager *lsp.Manager
 	if cfg.LSP.Enabled {

@@ -6,7 +6,7 @@
 
 That per-keystroke usage drives the package's one hard constraint: allocation discipline. A `Prepared` candidate holds no decoded rune data — just the original string (sharing its bytes with the caller) and one int — so a finder held open over a large workspace costs a few MB instead of tens of MB of `[]rune` copies. Scoring case-folds runes on the fly, the pre-filter allocates nothing, and matched-position slices for bold rendering are only computed for the handful of visible rows.
 
-Scoring rewards what people actually mean: hits on word boundaries (after `/`, `_`, `-`, `.`, space, or a lowercase→uppercase transition), consecutive runs, and matches concentrated in the basename; gaps are penalized and shorter candidates win ties. One deliberate ranking override sits on top: when the query is a literal directory prefix (`internal/app/`), the children of that directory list first, alphabetically — the user is browsing a directory, not asking for scattered subsequence matches.
+Scoring rewards what people actually mean: hits on word boundaries (after `/`, `_`, `-`, `.`, space, or a lowercase→uppercase transition), consecutive runs, and matches concentrated in the basename; gaps are penalized and shorter candidates win ties. One deliberate ranking override sits on top: when the query is a literal directory prefix (`internal/app/`), the children of that directory list first like a file explorer — directories before files, each group alphabetical — because the user is browsing a directory, not asking for scattered subsequence matches.
 
 **Architecture**
 
@@ -24,7 +24,7 @@ Everything lives in one file. The flow is: `Prepare` once when the finder opens,
 
 `Filter` returns the candidates matching the query as a case-folded subsequence, best score first; an empty query matches everything at score 0 in original order. It's the per-keystroke hot path: cheap subsequence reject, then the multi-start scorer, then a stable sort (score, then shorter-path tiebreak), then the directory-browse reorder.
 
-`orderDirPrefix` implements the directory-browse rule. When the query contains a `/`, candidates under that literal prefix partition to the front; with no typed tail (query ends in `/`) they sort alphabetically, and with a tail the in-class order stays score-ranked. Without this, every child of a directory scores identically and the listing degrades to path-length order.
+`orderDirPrefix` implements the directory-browse rule. When the query contains a `/`, candidates under that literal prefix partition to the front; with no typed tail (query ends in `/`) they list like a file explorer — directories (trailing `/`) first, then files, each group alphabetical — and with a tail the in-class order stays score-ranked. Without this, every child of a directory scores identically and the listing degrades to path-length order.
 
 `isSubsequence` is the fast pre-filter: one linear pass checking that the query's runes appear in order, no allocation, no scoring.
 

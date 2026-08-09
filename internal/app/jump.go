@@ -504,7 +504,6 @@ func (m Model) jumpToLocation(rel string, line, utf16Col int) Model {
 	}
 
 	if rel == m.openRel {
-		// Same-file jump: just move the cursor.
 		if m.mode == modeDiff {
 			m = m.clearDiffState()
 			m.mode = modeEdit

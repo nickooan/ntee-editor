@@ -175,8 +175,6 @@ func (c *Conn) dispatch(msg *Message) {
 		return
 	}
 	if msg.ID != nil {
-		// Bounded: block the read loop for a slot rather than spawn without
-		// limit; bail out if the connection is closing.
 		select {
 		case c.reqSem <- struct{}{}:
 			go func() {
@@ -186,7 +184,6 @@ func (c *Conn) dispatch(msg *Message) {
 		case <-c.done:
 		}
 	} else {
-		// Queue for the ordered worker; drop if the connection is closing.
 		select {
 		case c.notifications <- msg:
 		case <-c.done:

@@ -263,7 +263,6 @@ func renderGrepInputRows(query string, cursor int, count string, innerW int) []s
 		} else {
 			row = statusTextStyle.Render(strings.Repeat(" ", promptW)) + body
 		}
-		// Fill the bar background to the full row width.
 		if pad := innerW - lipgloss.Width(row); pad > 0 {
 			row += statusTextStyle.Render(strings.Repeat(" ", pad))
 		}

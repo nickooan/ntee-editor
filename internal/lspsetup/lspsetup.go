@@ -189,7 +189,7 @@ func defaultResolveTSDK() (string, error) {
 // globally, so the user's global `typescript` (e.g. TS7 native) is untouched.
 func (p *Preparer) ensureClassicTS() (string, error) {
 	if dir, err := p.TSDK(); err == nil {
-		return dir, nil // already have a compatible classic TS (private or global)
+		return dir, nil
 	}
 	tc, err := toolchainDir()
 	if err != nil {
@@ -443,8 +443,8 @@ func genConfig(lc config.LanguageConfig, resolvedCommand string) config.Language
 	var bridge *config.BridgeConfig
 	if lc.LSP != nil {
 		args = lc.LSP.Args
-		init = lc.LSP.Init     // carry plugins/tsserver options through
-		bridge = lc.LSP.Bridge // carry the hybrid companion declaration through
+		init = lc.LSP.Init
+		bridge = lc.LSP.Bridge
 	}
 	return config.LanguageConfig{
 		Enabled:    &on,

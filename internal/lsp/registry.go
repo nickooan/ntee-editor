@@ -219,11 +219,10 @@ func (m *Manager) getOrStartLocked(lang, repoRoot string) (*serverClient, bool) 
 			c.EnsureFolder(repoRoot)
 			return c, true
 		}
-		// The server exited (crash): previously the corpse stayed registered and
-		// the language was silently dead — no completions, no diagnostics — for
-		// the rest of the session. Drop it and start a replacement on demand. A
-		// long-lived server's crash resets the budget (news, not a loop); only
-		// rapid successive deaths burn through it and disable the language.
+		// The server exited (crash): drop the corpse and start a replacement on
+		// demand. A long-lived server's crash resets the budget (news, not a
+		// loop); only rapid successive deaths burn through it and disable the
+		// language.
 		delete(m.clients, lang)
 		if c.uptime() >= longLivedUptime {
 			m.restarts[lang] = 0

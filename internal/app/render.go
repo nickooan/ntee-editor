@@ -496,7 +496,6 @@ func (m Model) renderFile(width, height int) string {
 
 	start := input.Clamp(m.fileScrollY, 0, max(0, len(lines)-height))
 	if editing {
-		// Keep the cursor line in view.
 		start = fileViewportTop(m.edit.cy, m.fileScrollY, height, len(lines))
 	}
 

@@ -91,15 +91,17 @@ func TestPrepareDirBaseStart(t *testing.T) {
 }
 
 // A directory-prefix query is a browse, not a search: children of the typed
-// directory list first and alphabetically, ahead of scattered subsequence
-// matches from elsewhere (all children score identically, so without this the
-// order degraded to path length).
+// directory list first — directories before files, each group alphabetical —
+// ahead of scattered subsequence matches from elsewhere (all children score
+// identically, so without this the order degraded to path length).
 func TestFilterDirPrefixListsAlphabetically(t *testing.T) {
 	corpus := []string{
 		"internal/apphelper/z.go", // scattered match: contains internal/app/ as a subsequence only
 		"internal/app/zz.go",
+		"internal/app/zdir/",
 		"internal/app/a_very_long_name.go",
 		"internal/app/m.go",
+		"internal/app/sub/",
 		"internal/app/sub/x.go",
 		"deep/internal/app/other.go", // not under the literal prefix
 	}
@@ -109,7 +111,9 @@ func TestFilterDirPrefixListsAlphabetically(t *testing.T) {
 		got = append(got, corpus[m.Index])
 	}
 	want := []string{
-		"internal/app/a_very_long_name.go",
+		"internal/app/sub/", // directories first, a→z
+		"internal/app/zdir/",
+		"internal/app/a_very_long_name.go", // then files, a→z (nested files count as files)
 		"internal/app/m.go",
 		"internal/app/sub/x.go",
 		"internal/app/zz.go",

@@ -106,7 +106,14 @@ func orderDirPrefix(query string, candidates []Prepared, matches []Match) {
 			return ca
 		}
 		if ca && browse {
-			return candidates[matches[a].Index].Text < candidates[matches[b].Index].Text
+			// File-explorer listing: directories (trailing "/") before files,
+			// each group alphabetical.
+			ta, tb := candidates[matches[a].Index].Text, candidates[matches[b].Index].Text
+			da, db := strings.HasSuffix(ta, "/"), strings.HasSuffix(tb, "/")
+			if da != db {
+				return da
+			}
+			return ta < tb
 		}
 		return false // keep the existing (score) order within each class
 	})

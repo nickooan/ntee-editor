@@ -595,6 +595,8 @@ func TestFuzzyOverlayDirQueryListsAlphabetically(t *testing.T) {
 	m, root := newTestModel(t, nil)
 	must(t, os.WriteFile(filepath.Join(root, "lib", "zz.ts"), []byte("z"), 0o644))
 	must(t, os.WriteFile(filepath.Join(root, "lib", "a_long_name.ts"), []byte("a"), 0o644))
+	must(t, os.MkdirAll(filepath.Join(root, "lib", "nested"), 0o755))
+	must(t, os.WriteFile(filepath.Join(root, "lib", "nested", "n.ts"), []byte("n"), 0o644))
 	m = rebuildCorpusNow(m) // pick up the new files
 
 	m = key(m, ctrlKey('p'))
@@ -603,7 +605,8 @@ func TestFuzzyOverlayDirQueryListsAlphabetically(t *testing.T) {
 	for _, match := range m.fuzzyMatches {
 		got = append(got, m.fuzzyCorpus[match.Index].Text)
 	}
-	want := []string{"lib/a_long_name.ts", "lib/util.ts", "lib/zz.ts"}
+	// Directories first, then files, each a→z (nested files sort as files).
+	want := []string{"lib/nested/", "lib/a_long_name.ts", "lib/nested/n.ts", "lib/util.ts", "lib/zz.ts"}
 	if len(got) < len(want) {
 		t.Fatalf("matches = %v", got)
 	}

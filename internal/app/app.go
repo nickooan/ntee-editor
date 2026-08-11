@@ -548,6 +548,20 @@ func (m Model) validateCorpusCmd(idx store.CorpusIndex) tea.Cmd {
 	}
 }
 
+// dirtySetChanged compares two git dirty sets by key membership (only present
+// keys are stored, so equal sizes plus containment means equal sets).
+func dirtySetChanged(previous, next map[string]bool) bool {
+	if len(previous) != len(next) {
+		return true
+	}
+	for rel := range next {
+		if _, ok := previous[rel]; !ok {
+			return true
+		}
+	}
+	return false
+}
+
 // corpusTTL bounds how stale the cached corpus may be before a use triggers a
 // background rebuild. External file/dir changes surface within this window.
 const corpusTTL = 2 * time.Second
@@ -674,6 +688,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.corpusBuiltAt = msg.builtAt
 		m.corpusRebuilding = false
 		m.corpusTruncated = msg.truncated
+		m = m.refreshFuzzyCandidates() // an open finder tracks the fresh corpus
 		_ = m.db.SaveCorpus(store.CorpusIndex{
 			Version:   store.CorpusVersion,
 			Files:     msg.files,
@@ -708,10 +723,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.FocusMsg:
 		// Regaining focus counts as activity, and external processes may have
-		// changed the tree while we were away — refresh now.
+		// changed the tree while we were away — refresh git status and the
+		// search index now (the only passive index trigger in a non-git root).
 		m.termFocused = true
 		m.lastInputAt = time.Now()
-		return m.maybeGitRefresh()
+		var gitCmd, corpusCmd tea.Cmd
+		m, gitCmd = m.maybeGitRefresh()
+		m, corpusCmd = m.ensureCorpus()
+		return m, tea.Batch(gitCmd, corpusCmd)
 
 	case tea.BlurMsg:
 		m.termFocused = false
@@ -720,8 +739,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case gitStatusMsg:
 		m.gitStatusRunning = false
 		if msg.ok {
+			changed := dirtySetChanged(m.gitDirty, msg.dirty)
 			m.gitDirty = msg.dirty
 			m.gitStatusFailed = false
+			if changed {
+				// The porcelain key-set changing is the "files appeared,
+				// vanished, or changed state" signal: re-derive an open Ctrl+U
+				// list and nudge the search index (TTL-gated, so 3s-poll
+				// bursts coalesce into at most one background walk).
+				m = m.refreshFuzzyCandidates()
+				var corpusCmd tea.Cmd
+				m, corpusCmd = m.ensureCorpus()
+				return m, corpusCmd
+			}
 		} else if !m.gitStatusFailed {
 			// Surface a git-status failure once per healthy→failed transition
 			// (not per 3s tick); the previous dirty set is kept rather than

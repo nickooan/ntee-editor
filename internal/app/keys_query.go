@@ -38,8 +38,17 @@ func (m Model) queryInputSuggestions(entries []filetree.FileTreeEntry) []filetre
 
 // handleQueryKey is the home-mode handler: the bottom input bar drives the
 // sidebar (typing expands, navigation highlights) and Enter enters/opens.
+// ensureCorpus's rebuild cmd is batched at this single return point so no
+// dispatch branch can drop it — a dropped cmd would latch corpusRebuilding
+// and freeze the search index for the rest of the session.
 func (m Model) handleQueryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	m, corpusCmd := m.ensureCorpus()
+	next, cmd := m.dispatchQueryKey(msg)
+	return next, tea.Batch(corpusCmd, cmd)
+}
+
+// dispatchQueryKey routes one query-bar keypress to its branch.
+func (m Model) dispatchQueryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	entries := m.treeEntries()
 	// Computed only by the branches that read the popup (navigation, enter):
 	// the typing branches change m.command, so a filter pass for the pre-key
@@ -123,9 +132,7 @@ func (m Model) handleQueryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.suppressQuerySuggestions = false
 		}
 	}
-	// corpusCmd (background revalidation, or nil) rides out on the typing paths
-	// that fall through here — exactly when fresh results matter.
-	return m, corpusCmd
+	return m, nil
 }
 
 // isInlineFsVerb is the bar's filesystem-command verb set — the single

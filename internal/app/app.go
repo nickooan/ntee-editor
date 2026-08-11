@@ -119,6 +119,10 @@ type Model struct {
 	selectedCommand         string
 	keyboardSelectedCommand string
 	inputSuggestIndex       int
+	// A mouse click that sets the bar text (sidebar directory click) is not
+	// typing: the completion popup stays hidden until a keystroke edits the
+	// text again.
+	suppressQuerySuggestions bool
 
 	// Open file. openRel is the root-relative path — the store key.
 	openFile    *filetree.OpenViewFile

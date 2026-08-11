@@ -37,7 +37,7 @@ func (m Model) render() string {
 
 	header := headerStyle.Width(m.width).Render("ntee-editor " + versionTag() + "  ·  " + m.root)
 	status := m.padStatusRows(m.renderStatusLine())
-	bodyHeight := max(3, m.height-2-strings.Count(status, "\n"))
+	bodyHeight := m.bodyHeight()
 
 	sidebarWidth := m.sidebarWidth()
 	// Panes tile the full width — a spare column would show as a stripe of
@@ -58,8 +58,7 @@ func (m Model) render() string {
 	sidebar := paneStyle.Width(sidebarWidth).Height(bodyHeight).Render(sidebarBody)
 
 	// Overlays own the whole pane; otherwise the tab strip steals the top row.
-	overlayOpen := m.fuzzyOpen || m.messageOverlay != "" || m.defPickOpen || m.grepOpen || m.confirmRm != ""
-	showTabs := len(m.tabs) > 0 && !overlayOpen && m.mode != modeInspect
+	showTabs := m.tabStripVisible()
 	innerH := bodyHeight - 2
 	if showTabs {
 		innerH -= 2 // tab strip + divider row
@@ -407,10 +406,13 @@ func (m Model) renderQuerySuggestions(width int) []string {
 // cell per tab (base filename), the active tab highlighted, unsaved names red.
 // A sliding window keeps the active tab visible when the strip overflows.
 func (m Model) renderTabStrip(width int) string {
-	cells := make([]string, len(m.tabs))
-	widths := make([]int, len(m.tabs))
-	for i, rel := range m.tabs {
-		label := " " + truncateRunes(filepath.Base(rel), max(1, width-2)) + " "
+	start, widths := m.tabStripWindow(width)
+	var b strings.Builder
+	used := 0
+	for i := start; i < len(m.tabs); i++ {
+		if used+widths[i] > width {
+			break
+		}
 		style := tabInactiveStyle
 		switch {
 		case i == m.tabActive && m.tabDirty(i):
@@ -420,11 +422,29 @@ func (m Model) renderTabStrip(width int) string {
 		case m.tabDirty(i):
 			style = tabDirtyInactiveStyle
 		}
-		cells[i] = style.Render(label)
-		widths[i] = lipgloss.Width(label)
+		b.WriteString(style.Render(tabLabel(m.tabs[i], width)))
+		used += widths[i]
 	}
+	if pad := width - used; pad > 0 {
+		b.WriteString(tabFillStyle.Render(strings.Repeat(" ", pad)))
+	}
+	return b.String()
+}
 
-	// Slide the window start right until [start..active] fits.
+// tabLabel is a tab's rendered cell text: the base filename padded by one
+// space each side, truncated to the strip width.
+func tabLabel(rel string, width int) string {
+	return " " + truncateRunes(filepath.Base(rel), max(1, width-2)) + " "
+}
+
+// tabStripWindow computes the strip's per-tab cell widths and the first
+// visible tab index (slid right until [start..active] fits) — the single
+// source of truth shared by renderTabStrip and the click hit-testing.
+func (m Model) tabStripWindow(width int) (int, []int) {
+	widths := make([]int, len(m.tabs))
+	for i, rel := range m.tabs {
+		widths[i] = lipgloss.Width(tabLabel(rel, width))
+	}
 	start := 0
 	for {
 		used := 0
@@ -436,20 +456,7 @@ func (m Model) renderTabStrip(width int) string {
 		}
 		start++
 	}
-
-	var b strings.Builder
-	used := 0
-	for i := start; i < len(cells); i++ {
-		if used+widths[i] > width {
-			break
-		}
-		b.WriteString(cells[i])
-		used += widths[i]
-	}
-	if pad := width - used; pad > 0 {
-		b.WriteString(tabFillStyle.Render(strings.Repeat(" ", pad)))
-	}
-	return b.String()
+	return start, widths
 }
 
 // fileViewportTop is the first line drawn in the file pane: fileScrollY nudged to

@@ -68,7 +68,7 @@ Three design rules shape almost every function here:
 #### keys_query.go
 
 - `handleQueryKey` is the home-mode handler: typing edits the bar (expanding the tree), Shift+arrows walk the popup or sidebar highlight, plain arrows scroll the previewed file, Enter submits, Esc climbs to the parent directory. It calls `ensureCorpus` first so the fuzzy suggestions always have an index to read, and computes suggestions lazily — only the branches that read the popup pay for the corpus filter; typing branches leave it to View, which computes (and memoizes) the fresh one.
-- `queryInputSuggestions` completes the typed bar text (exact/prefix over the visible tree, fuzzy over the full corpus). This is the dominant per-keystroke cost in home mode, so it's memoized per message through `frameCache` keyed by the typed text — the key handler and View share one filter pass instead of each running their own.
+- `queryInputSuggestions` completes the typed bar text (exact/prefix over the visible tree, fuzzy over the full corpus). This is the dominant per-keystroke cost in home mode, so it's memoized per message through `frameCache` keyed by the typed text — the key handler and View share one filter pass instead of each running their own. It also gates on `suppressQuerySuggestions` (before the memo, so nothing suppressed is ever cached): a sidebar directory click sets the bar text without being typing, so the popup stays hidden until the next keystroke edits the text and lifts the flag.
 - `submitQuery` acts on Enter: inline fs commands first, then `:` commands, then the resolved target — a directory is confirmed (which is what drives expansion), a file opens straight into edit mode.
 - `parseInlineFs` recognizes the bar's filesystem commands (`<path> :mkdir <rel>`, `:touch`, `<path> :rm`), rejecting anything absolute or escaping the root; `inlineFsPathPrefix` lets the sidebar keep highlighting the target path while the command suffix is still being typed.
 - `queryCreate` performs mkdir/touch and enters the result (a new file opens for editing). `armRemoveConfirm` opens the `:rm` confirmation modal — deletion is irreversible, so Enter alone never deletes. `queryRemove` deletes and then `dropRemovedPath` forgets every tab, draft, and cursor under the removed path (an open buffer over a deleted file would silently resurrect it on save, so the editor resets instead).
@@ -118,7 +118,7 @@ The undo timeline is a list of snapshot seqs plus a cursor; the content lives in
 
 Every opened file becomes a tab; the list, active index, and per-tab cursors persist on every mutation.
 
-- `activateTab` opens the i-th tab through `openFileAt` (so stash/restore happen for free) and lazily drops tabs whose files have vanished.
+- `activateTab` opens the i-th tab through `openFileAt` (so stash/restore happen for free) and lazily drops tabs whose files have vanished. It serves Shift+Tab cycling, the `tab <name>` command, and tab-strip clicks alike.
 - `closeTabsSide` implements `tab cl`/`cr`: closes the clean tabs on one side, but unsaved tabs refuse to close and stay red.
 - `tabDirty` decides the red rendering: the active tab from the live buffer's dirty flag, inactive ones from having a stashed draft.
 
@@ -355,7 +355,7 @@ Diagnostics themselves land in `Update`'s `lsp.DiagnosticsMsg` branch (app.go), 
 - `renderSearch` draws the search body: scrolls to the focused match (or holds the edit position when there are no matches yet) and, in search-exec mode, splices the live replace preview in. The line split and per-line match buckets come from `matchCache`'s memos rather than being rebuilt per frame.
 - The bottom of the file holds the entire Gruvbox-derived palette and every lipgloss style — the single place colors are defined.
 
-*Plus small helpers: `padStatusRows`, `diagSummary`, `diagAtLine`, `withNotice`, `renderSidebar`, `renderExecSugs`, `renderQueryMain`, `renderQuerySuggestions`, `renderTabStrip`, `fileViewportTop`, `renderContentLine`, `plainWindow`, `plainWindowStyled`, `renderSelectedLine`, `clampByte`, `renderInputLine`, `renderInputLineStyled`, `padTo`, `truncateRunes`, `pad`, `segStyleFor`, `colorFor` — row assembly, windows, input-line drawing, and padding/truncation utilities.*
+*Plus small helpers: `padStatusRows`, `diagSummary`, `diagAtLine`, `withNotice`, `renderSidebar`, `renderExecSugs`, `renderQueryMain`, `renderQuerySuggestions`, `renderTabStrip` (window math delegated to `tabStripWindow`/`tabLabel`, shared with the tab click hit-test), `fileViewportTop`, `renderContentLine`, `plainWindow`, `plainWindowStyled`, `renderSelectedLine`, `clampByte`, `renderInputLine`, `renderInputLineStyled`, `padTo`, `truncateRunes`, `pad`, `segStyleFor`, `colorFor` — row assembly, windows, input-line drawing, and padding/truncation utilities.*
 
 #### render_diff.go
 
@@ -388,12 +388,14 @@ Diagnostics themselves land in `Update`'s `lsp.DiagnosticsMsg` branch (app.go), 
 
 #### mouse.go
 
-- `handleMouse` routes mouse input: left-click (and Ctrl+click = jump-to-definition) places the cursor; the vertical wheel scrolls. Drags, releases, and horizontal wheel are deliberately ignored so a trackpad swipe never moves the cursor. Overlays own their own navigation and swallow everything.
+- `handleMouse` routes mouse input: left-click (and Ctrl+click = jump-to-definition) places the cursor; the vertical wheel scrolls. Drags, releases, and horizontal wheel are deliberately ignored so a trackpad swipe never moves the cursor. Overlays own their own navigation and swallow everything. Tab-strip and sidebar clicks are checked first (they sit above the mode-specific content handlers); misses fall through untouched.
 - `editClickTarget` maps a terminal cell to a buffer position by mirroring View/renderFile's exact layout math — header, borders, tab strip, `sidebarWidth` (the single source of truth shared with View so click math can't drift), gutter, viewport, and the cursor line's horizontal window. `diffClickTarget` and `blameClickTarget` are the same math over their own rows and gutters.
 - `handleEditClick` anchors the viewport explicitly so a click never drags the view: an ordinary click freezes the window, clicking the top visible line pages up, the bottom visible line pages down. `handleDiffClick`/`handleBlameClick` reuse the same anchoring.
+- `sidebarClickTarget` maps a cell to a tree-entry index by mirroring renderSidebar (rows from y=2 with no tab offset — the strip lives in the main pane — and the same highlight-centered viewport). `handleSidebarClick` (query and edit mode only) then mirrors `submitQuery`'s two branches: a file opens straight into edit mode, a directory is confirmed/expanded — but with the completion popup suppressed, because a click isn't typing. A directory click from edit mode stashes the unsaved buffer (like a tab switch, never the Esc discard) before switching to query mode.
+- `tabClickTarget` maps a cell on the strip row to a tab index via `tabStripWindow`, honoring the sliding window and treating the trailing fill as a miss; `handleTabStripClick` switches through `activateTab` (draft stash/restore, so unsaved tabs stay red) and swallows a click on the already-active tab.
 - `wheelScroll` dispatches a wheel notch per mode — moving the cursor where the viewport follows it (edit/diff/blame/preview/conflict), nudging the scroll offset in the query view.
 
-*Plus: `sidebarWidth` — the shared layout constant.*
+*Plus the shared layout constants — `sidebarWidth`, `statusRowCount`/`bodyHeight`/`sidebarInnerHeight` (a pinned test keeps `statusRowCount` agreeing with `renderStatusLine`), `overlayOpen`, and `tabStripVisible` — one source of truth each for render() and the hit-testers.*
 
 ### Persistence & lifecycle
 

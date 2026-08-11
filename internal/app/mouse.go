@@ -5,6 +5,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/nickooan/ntee-editor/internal/filetree"
 	"github.com/nickooan/ntee-editor/internal/input"
 )
 
@@ -13,6 +14,38 @@ import (
 // click math can't drift from the layout.
 func (m Model) sidebarWidth() int {
 	return input.Clamp(m.width/4, 16, max(16, m.width-24))
+}
+
+// statusRowCount is how many rows renderStatusLine produces — only the query
+// bar carries a second (hint) row. bodyHeight derives from it, so a new status
+// row must land here too (a pinned test guards the agreement).
+func (m Model) statusRowCount() int {
+	if m.mode == modeQuery {
+		return 2
+	}
+	return 1
+}
+
+// bodyHeight is the panes' row count including their borders: terminal height
+// minus the header and status rows. Shared by render() and the hit-testing.
+func (m Model) bodyHeight() int {
+	return max(3, m.height-1-m.statusRowCount())
+}
+
+// sidebarInnerHeight is the number of tree rows the sidebar body shows.
+func (m Model) sidebarInnerHeight() int {
+	return m.bodyHeight() - 2
+}
+
+// overlayOpen reports whether a whole-pane overlay owns the screen — overlays
+// run their own navigation, so mouse routing and the tab strip both yield.
+func (m Model) overlayOpen() bool {
+	return m.fuzzyOpen || m.messageOverlay != "" || m.defPickOpen || m.grepOpen || m.confirmRm != ""
+}
+
+// tabStripVisible mirrors render()'s decision to draw the tab strip.
+func (m Model) tabStripVisible() bool {
+	return len(m.tabs) > 0 && !m.overlayOpen() && m.mode != modeInspect
 }
 
 // editClickTarget maps a terminal cell (x, y) to a buffer position in edit
@@ -71,7 +104,7 @@ const wheelScrollLines = 3
 // cursor or types anything.
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	// Overlays own their own navigation.
-	if m.fuzzyOpen || m.messageOverlay != "" || m.defPickOpen || m.grepOpen || m.confirmRm != "" {
+	if m.overlayOpen() {
 		return m, nil
 	}
 	// Only clicks and wheel notches act; motion (drag) and release messages
@@ -88,6 +121,12 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			// modifier.
 			if mo.Button == tea.MouseRight && !ctrl {
 				return m, nil
+			}
+			if next, handled := m.handleTabStripClick(mo.X, mo.Y); handled {
+				return next, nil
+			}
+			if next, handled := m.handleSidebarClick(mo.X, mo.Y); handled {
+				return next, nil
 			}
 			if m.mode == modeDiff {
 				next, hit := m.handleDiffClick(mo.X, mo.Y)
@@ -322,4 +361,114 @@ func (m Model) wheelScroll(dir int) Model {
 		m.fileScrollY = input.Clamp(m.fileScrollY+dir*wheelScrollLines, 0, max(0, len(m.fileLines)-1))
 	}
 	return m
+}
+
+// sidebarClickTarget maps a terminal cell to an index into treeEntries(),
+// mirroring renderSidebar's layout: rows start at y=2 (header + pane top
+// border) with no tab-strip offset — unlike every other hit-tester, since the
+// strip lives in the main pane only — inner columns 1..sidebarWidth-2, and the
+// same highlight-centered viewport window.
+func (m Model) sidebarClickTarget(x, y int) (int, bool) {
+	if x < 1 || x > m.sidebarWidth()-2 {
+		return 0, false
+	}
+	row := y - 2
+	height := m.sidebarInnerHeight()
+	if row < 0 || row >= height {
+		return 0, false
+	}
+	entries := m.treeEntries()
+	vp := filetree.BuildFileTreeViewport(entries, height, 0, m.highlightedEntryIndex(entries))
+	if row >= len(vp.Entries) {
+		return 0, false
+	}
+	return vp.SafeScrollY + row, true
+}
+
+// handleSidebarClick opens a clicked file or expands a clicked directory,
+// mirroring submitQuery's two branches — except that a click is not typing,
+// so the directory case keeps the completion popup hidden. Active in query
+// and edit mode only; the other modes repurpose the pane or review the open
+// buffer, so their clicks fall through untouched.
+func (m Model) handleSidebarClick(x, y int) (Model, bool) {
+	if m.mode != modeQuery && m.mode != modeEdit {
+		return m, false
+	}
+	idx, ok := m.sidebarClickTarget(x, y)
+	if !ok {
+		return m, false
+	}
+	entry := m.treeEntries()[idx]
+	m.commandPreview = ""
+	m.keyboardSelectedCommand = ""
+	m.inputSuggestIndex = 0
+
+	if entry.Type == "directory" {
+		if m.mode == modeEdit {
+			// Leaving edit mode by mouse keeps the unsaved work (unlike Esc,
+			// which deliberately discards): stash exactly like a tab switch.
+			m = m.recordCursor()
+			m = m.flushBurst()
+			m = m.stashDraftIfDirty()
+			m = m.closeCompletion()
+			m = m.sigUnpin()
+			m.jumpStack = nil
+			m.mode = modeQuery
+			m = m.refreshFileHighlights()
+		}
+		m.selectedCommand = entry.CommandValue
+		m.command = entry.CommandValue
+		m.qCursor = len([]rune(m.command))
+		m.suppressQuerySuggestions = true
+		return m, true
+	}
+
+	m.suppressQuerySuggestions = false
+	m.command, m.qCursor = "", 0
+	if m.mode == modeEdit {
+		m = m.closeCompletion()
+	}
+	return m.openFileAt(entry.RelativePath), true
+}
+
+// tabClickTarget maps a cell on the tab-strip row to a tab index, mirroring
+// renderTabStrip via tabStripWindow: strip row y=2, cells left to right from
+// the window start; the trailing fill and never-drawn overflow are misses.
+func (m Model) tabClickTarget(x, y int) (int, bool) {
+	if !m.tabStripVisible() || y != 2 {
+		return 0, false
+	}
+	width := max(3, m.width-m.sidebarWidth()) - 4
+	col := x - (m.sidebarWidth() + 1)
+	if col < 0 || col >= width {
+		return 0, false
+	}
+	start, widths := m.tabStripWindow(width)
+	used := 0
+	for i := start; i < len(m.tabs); i++ {
+		if used+widths[i] > width {
+			break
+		}
+		if col < used+widths[i] {
+			return i, true
+		}
+		used += widths[i]
+	}
+	return 0, false
+}
+
+// handleTabStripClick switches to a clicked tab. activateTab stashes the
+// outgoing buffer's draft and restores the incoming one, so an unsaved tab
+// stays red and its edits survive the switch.
+func (m Model) handleTabStripClick(x, y int) (Model, bool) {
+	i, ok := m.tabClickTarget(x, y)
+	if !ok {
+		return m, false
+	}
+	// Already editing the clicked tab: swallow the click rather than churn
+	// through a stash/restore round trip (and a redundant LSP DidOpen).
+	if i == m.tabActive && m.tabs[i] == m.openRel && m.mode == modeEdit {
+		return m, true
+	}
+	return m.activateTab(i), true
 }

@@ -17,6 +17,12 @@ import (
 // frameCache (like treeEntries) so the key handler and View share one filter
 // pass over the corpus.
 func (m Model) queryInputSuggestions(entries []filetree.FileTreeEntry) []filetree.InputSuggestion {
+	// The single choke point for the popup: while a mouse click owns the bar
+	// text every consumer (render, navigation, Enter) sees "no suggestions",
+	// and nothing is memoized so lifting the flag recomputes cleanly.
+	if m.suppressQuerySuggestions {
+		return nil
+	}
 	f := m.frames
 	if f != nil && f.sugOk && f.sugSeq == f.seq && f.sugKey == m.command {
 		return f.suggestions
@@ -101,17 +107,20 @@ func (m Model) handleQueryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.command, m.qCursor, _ = input.RemoveBeforeCursor(m.command, m.qCursor)
 		m.inputSuggestIndex = 0
 		m.keyboardSelectedCommand = "" // typing re-anchors the highlight to the text
+		m.suppressQuerySuggestions = false
 	case "space":
 		m = m.adoptPreview()
 		m.command, m.qCursor = input.InsertAtCursor(m.command, m.qCursor, " ")
 		m.inputSuggestIndex = 0
 		m.keyboardSelectedCommand = ""
+		m.suppressQuerySuggestions = false
 	default:
 		if t := keyText(msg); t != "" {
 			m = m.adoptPreview()
 			m.command, m.qCursor = input.InsertAtCursor(m.command, m.qCursor, t)
 			m.inputSuggestIndex = 0
 			m.keyboardSelectedCommand = ""
+			m.suppressQuerySuggestions = false
 		}
 	}
 	// corpusCmd (background revalidation, or nil) rides out on the typing paths
@@ -365,6 +374,7 @@ func (m Model) moveQueryToParentDirectory() Model {
 	m.selectedCommand = parent
 	m.command = parent
 	m.qCursor = len([]rune(parent))
+	m.suppressQuerySuggestions = false
 	return m
 }
 

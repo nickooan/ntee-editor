@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/nickooan/ntee-editor/internal/filetree"
 )
 
 // Test geometry (newTestModel: width=100, height=30, main.go fixture opened):
@@ -362,5 +364,266 @@ func TestNonLeftClickIgnored(t *testing.T) {
 		if m.edit.cy != 2 || m.edit.cx != 4 {
 			t.Fatalf("event %+v moved the cursor", ev)
 		}
+	}
+}
+
+// sidebarRowOf finds the screen row of a tree entry, mirroring the viewport
+// math sidebarClickTarget uses, so tests stay valid if the fixture's entry
+// order changes.
+func sidebarRowOf(t *testing.T, m Model, rel string) int {
+	t.Helper()
+	entries := m.treeEntries()
+	vp := filetree.BuildFileTreeViewport(entries, m.sidebarInnerHeight(), 0, m.highlightedEntryIndex(entries))
+	for i := range entries {
+		if entries[i].RelativePath == rel {
+			return 2 + i - vp.SafeScrollY
+		}
+	}
+	t.Fatalf("no sidebar entry %q", rel)
+	return -1
+}
+
+func hasEntry(m Model, rel string) bool {
+	for _, e := range m.treeEntries() {
+		if e.RelativePath == rel {
+			return true
+		}
+	}
+	return false
+}
+
+func TestSidebarClickOpensFile(t *testing.T) {
+	m, _ := newTestModel(t, nil)
+	m = click(m, 2, sidebarRowOf(t, m, "main.go"))
+	if m.mode != modeEdit || m.openRel != "main.go" {
+		t.Fatalf("sidebar file click: mode=%v openRel=%q, want edit main.go", m.mode, m.openRel)
+	}
+	if m.command != "" {
+		t.Fatalf("file click should clear the bar, got %q", m.command)
+	}
+}
+
+func TestSidebarDirClickExpandsWithoutPopup(t *testing.T) {
+	m, _ := newTestModel(t, nil)
+	m = click(m, 2, sidebarRowOf(t, m, "lib"))
+	if m.mode != modeQuery {
+		t.Fatalf("dir click left query mode: %v", m.mode)
+	}
+	if m.command != "lib/" || m.selectedCommand != "lib/" {
+		t.Fatalf("dir click should confirm lib/: command=%q selected=%q", m.command, m.selectedCommand)
+	}
+	if !hasEntry(m, "lib/util.ts") {
+		t.Fatal("dir click should expand lib in the tree")
+	}
+	if sugs := m.queryInputSuggestions(m.treeEntries()); len(sugs) != 0 {
+		t.Fatalf("popup must stay hidden after a click, got %d suggestions", len(sugs))
+	}
+	if rows := m.renderQuerySuggestions(40); rows != nil {
+		t.Fatalf("popup rows rendered after a click: %v", rows)
+	}
+}
+
+func TestSidebarDirReclickKeepsExpansion(t *testing.T) {
+	m, _ := newTestModel(t, nil)
+	m = click(m, 2, sidebarRowOf(t, m, "lib"))
+	m = click(m, 2, sidebarRowOf(t, m, "lib"))
+	if m.command != "lib/" || !hasEntry(m, "lib/util.ts") {
+		t.Fatalf("re-click should keep the expansion: command=%q", m.command)
+	}
+}
+
+func TestSidebarDirClickThenTypingShowsPopup(t *testing.T) {
+	m, _ := newTestModel(t, nil)
+	m = click(m, 2, sidebarRowOf(t, m, "lib"))
+	m = key(m, typeRune('u'))
+	if m.command != "lib/u" {
+		t.Fatalf("typing should continue the clicked path, got %q", m.command)
+	}
+	if m.suppressQuerySuggestions {
+		t.Fatal("typing must lift the popup suppression")
+	}
+	if sugs := m.queryInputSuggestions(m.treeEntries()); len(sugs) == 0 {
+		t.Fatal("typing after a dir click should surface suggestions again")
+	}
+}
+
+func TestSuppressionLiftedByBackspace(t *testing.T) {
+	m, _ := newTestModel(t, nil)
+	m = click(m, 2, sidebarRowOf(t, m, "lib"))
+	m = key(m, keyPress(tea.KeyBackspace))
+	if m.command != "lib" || m.suppressQuerySuggestions {
+		t.Fatalf("backspace should edit the text and lift suppression: %q %v", m.command, m.suppressQuerySuggestions)
+	}
+	if sugs := m.queryInputSuggestions(m.treeEntries()); len(sugs) == 0 {
+		t.Fatal("suggestions should return once suppression lifts")
+	}
+}
+
+func TestSuppressedQueryKeysFallBackToSidebar(t *testing.T) {
+	m, _ := newTestModel(t, nil)
+	m = click(m, 2, sidebarRowOf(t, m, "lib"))
+	// With the popup suppressed, shift+down walks the sidebar highlight …
+	m = key(m, tea.KeyPressMsg{Code: tea.KeyDown, Mod: tea.ModShift})
+	if m.keyboardSelectedCommand == "" || m.inputSuggestIndex != 0 {
+		t.Fatalf("shift+down should move the sidebar highlight, not the popup: %q %d",
+			m.keyboardSelectedCommand, m.inputSuggestIndex)
+	}
+	// … and Enter resolves from the highlight (lib/util.ts, the row after lib).
+	m = key(m, keyPress(tea.KeyEnter))
+	if m.mode != modeEdit || m.openRel != "lib/util.ts" {
+		t.Fatalf("enter should open the highlighted entry: mode=%v openRel=%q", m.mode, m.openRel)
+	}
+}
+
+func TestSidebarClickMissesInert(t *testing.T) {
+	m, _ := newTestModel(t, nil)
+	lastRow := 2 + len(m.treeEntries()) // first empty row below the tree
+	for name, at := range map[string][2]int{
+		"left border":  {0, 2},
+		"right border": {24, 2},
+		"top border":   {2, 1},
+		"empty row":    {2, lastRow},
+	} {
+		m = click(m, at[0], at[1])
+		if m.mode != modeQuery || m.command != "" || m.openRel != "" {
+			t.Fatalf("%s click changed state: mode=%v command=%q openRel=%q", name, m.mode, m.command, m.openRel)
+		}
+	}
+}
+
+func TestSidebarFileClickFromEditModePreservesDraft(t *testing.T) {
+	m, root := newTestModel(t, nil)
+	must(t, os.WriteFile(filepath.Join(root, "other.go"), []byte("package other\n"), 0o644))
+	m = rebuildCorpusNow(m)
+	m = m.openFileAt("main.go")
+	m = key(m, typeRune('x'))
+	if !m.edit.dirty {
+		t.Fatal("fixture should be dirty")
+	}
+	m = click(m, 2, sidebarRowOf(t, m, "other.go"))
+	if m.openRel != "other.go" || m.mode != modeEdit {
+		t.Fatalf("edit-mode file click: mode=%v openRel=%q", m.mode, m.openRel)
+	}
+	if !m.draftSet["main.go"] {
+		t.Fatal("the outgoing dirty buffer must be stashed (tab stays red)")
+	}
+	m = click(m, 2, sidebarRowOf(t, m, "main.go"))
+	if m.openRel != "main.go" || !m.edit.dirty {
+		t.Fatalf("returning should restore the draft: openRel=%q dirty=%v", m.openRel, m.edit.dirty)
+	}
+}
+
+func TestSidebarDirClickFromEditModeStashes(t *testing.T) {
+	m, _ := newTestModel(t, nil)
+	m = m.openFileAt("main.go")
+	m = key(m, typeRune('x'))
+	m = click(m, 2, sidebarRowOf(t, m, "lib"))
+	if m.mode != modeQuery {
+		t.Fatalf("dir click from edit mode should land in query mode, got %v", m.mode)
+	}
+	if m.command != "lib/" || !m.suppressQuerySuggestions {
+		t.Fatalf("dir click should expand with the popup hidden: %q %v", m.command, m.suppressQuerySuggestions)
+	}
+	if !m.draftSet["main.go"] {
+		t.Fatal("unsaved edits must be stashed, not discarded")
+	}
+	if m.notice != "" {
+		t.Fatalf("no discard notice expected, got %q", m.notice)
+	}
+}
+
+// Tab strip geometry (width=100): cells start at x=26; the fixture labels
+// " main.go " and " util.ts " are 9 columns each, so tab 0 spans 26..34 and
+// tab 1 spans 35..43.
+
+func TestTabClickSwitchesAndKeepsDirty(t *testing.T) {
+	m, _ := newTestModel(t, nil)
+	m = m.openFileAt("main.go")
+	m = m.openFileAt("lib/util.ts")
+	m = key(m, typeRune('x'))
+	m = click(m, 27, 2)
+	if m.openRel != "main.go" || m.mode != modeEdit {
+		t.Fatalf("tab click: mode=%v openRel=%q, want edit main.go", m.mode, m.openRel)
+	}
+	if !m.tabDirty(1) {
+		t.Fatal("the switched-away tab must stay red")
+	}
+	m = click(m, 36, 2)
+	if m.openRel != "lib/util.ts" || !m.edit.dirty {
+		t.Fatalf("clicking back should restore the draft: openRel=%q dirty=%v", m.openRel, m.edit.dirty)
+	}
+}
+
+func TestTabClickActiveTabIsNoOp(t *testing.T) {
+	m := mouseFixture(t)
+	m.edit.cy, m.edit.cx = 2, 1
+	m = click(m, 27, 2)
+	if m.openRel != "main.go" || m.edit.cy != 2 || m.edit.cx != 1 {
+		t.Fatalf("active-tab click should not reopen: openRel=%q cursor=(%d,%d)", m.openRel, m.edit.cy, m.edit.cx)
+	}
+}
+
+func TestTabClickFillAreaInert(t *testing.T) {
+	m := mouseFixture(t)
+	m.edit.cy, m.edit.cx = 2, 1
+	m = click(m, 90, 2)
+	if m.openRel != "main.go" || m.edit.cy != 2 || m.edit.cx != 1 {
+		t.Fatalf("fill-area click changed state: openRel=%q cursor=(%d,%d)", m.openRel, m.edit.cy, m.edit.cx)
+	}
+}
+
+func TestTabClickFromQueryModeEnters(t *testing.T) {
+	m := mouseFixture(t)
+	m = key(m, keyPress(tea.KeyEsc)) // back to query mode, the tab remains
+	m = click(m, 27, 2)
+	if m.mode != modeEdit || m.openRel != "main.go" {
+		t.Fatalf("tab click from query mode: mode=%v openRel=%q", m.mode, m.openRel)
+	}
+}
+
+func TestTabStripWindowSlidesToActive(t *testing.T) {
+	m, _ := newTestModel(t, nil)
+	m.tabs = []string{"aaaa.go", "bbbb.go", "cccc.go"} // cells are 9 columns each
+	m.tabActive = 2
+	start, widths := m.tabStripWindow(20)
+	if start != 1 {
+		t.Fatalf("window should slide right until the active tab fits: start=%d", start)
+	}
+	for i, w := range widths {
+		if w != 9 {
+			t.Fatalf("width[%d] = %d, want 9", i, w)
+		}
+	}
+	m.tabActive = 0
+	if start, _ = m.tabStripWindow(20); start != 0 {
+		t.Fatalf("active first tab needs no slide: start=%d", start)
+	}
+	// The hit test honors the window. At width=45 the strip is 25 columns
+	// (sidebarWidth=16, cells from x=17) — two 9-column cells fit, so with the
+	// last tab active the window starts at tab 1 and the first visible cell
+	// resolves to it.
+	m.width, m.tabActive = 45, 2
+	if i, ok := m.tabClickTarget(17, 2); !ok || i != 1 {
+		t.Fatalf("first visible cell should be tab 1: %d %v", i, ok)
+	}
+}
+
+// statusRowCount must agree with what renderStatusLine actually emits — the
+// body/sidebar hit-testing heights are derived from it.
+func TestStatusRowCountMatchesRenderStatusLine(t *testing.T) {
+	m, _ := newTestModel(t, nil)
+	check := func(name string, m Model) {
+		t.Helper()
+		if rows := strings.Count(m.renderStatusLine(), "\n") + 1; rows != m.statusRowCount() {
+			t.Fatalf("%s: renderStatusLine has %d rows, statusRowCount says %d", name, rows, m.statusRowCount())
+		}
+	}
+	check("query", m)
+	edit := m.openFileAt("main.go")
+	check("edit", edit)
+	for name, md := range map[string]mode{"search": modeSearch, "exec": modeExec, "command": modeCommand} {
+		alt := edit
+		alt.mode = md
+		check(name, alt)
 	}
 }

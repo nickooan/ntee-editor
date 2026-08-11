@@ -234,3 +234,37 @@ func TestCtrlUNothingDirty(t *testing.T) {
 		t.Fatalf("notice = %q", m.notice)
 	}
 }
+
+// TestGitStatusChangeTriggersCorpusRebuild: a changed porcelain key-set is the
+// "files appeared/disappeared" signal — it must nudge the search index, gated
+// by the TTL so poll bursts coalesce.
+func TestGitStatusChangeTriggersCorpusRebuild(t *testing.T) {
+	m, _ := newTestModel(t, nil)
+	m.gitRepo = true
+	m.corpusBuiltAt = time.Now().Add(-corpusTTL - time.Second)
+
+	next, cmd := m.Update(gitStatusMsg{dirty: map[string]bool{"x.go": true}, ok: true})
+	m = next.(Model)
+	if cmd == nil || !m.corpusRebuilding {
+		t.Fatalf("changed dirty set with an expired TTL must fire a rebuild (cmd=%v rebuilding=%v)", cmd, m.corpusRebuilding)
+	}
+
+	// The same set again is not a change.
+	m.corpusRebuilding = false
+	m.corpusBuiltAt = time.Now().Add(-corpusTTL - time.Second)
+	if _, cmd := m.Update(gitStatusMsg{dirty: map[string]bool{"x.go": true}, ok: true}); cmd != nil {
+		t.Fatal("unchanged dirty set must not rebuild")
+	}
+
+	// A change within the TTL coalesces to nothing.
+	m.corpusBuiltAt = time.Now()
+	if _, cmd := m.Update(gitStatusMsg{dirty: map[string]bool{"y.go": true}, ok: true}); cmd != nil {
+		t.Fatal("fresh corpus must absorb the change without a rebuild")
+	}
+
+	// A failed refresh never touches the corpus.
+	m.corpusBuiltAt = time.Now().Add(-corpusTTL - time.Second)
+	if _, cmd := m.Update(gitStatusMsg{ok: false}); cmd != nil {
+		t.Fatal("failed git status must not rebuild")
+	}
+}

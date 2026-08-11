@@ -158,7 +158,7 @@ func TestPickerEscCancelsWithoutMoving(t *testing.T) {
 		{URI: lsp.PathToURI(filepath.Join(root, "lib", "util.ts")), Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 0}}},
 		{URI: lsp.PathToURI(filepath.Join(root, "main.go")), Range: lsp.Range{Start: lsp.Position{Line: 2, Character: 0}}},
 	}
-	next, _ := m.handleDefinition(definitionMsg{token: "x", locs: client.locs})
+	next, _ := m.handleDefinition(definitionMsg{rel: m.openRel, token: "x", locs: client.locs})
 	m = next.(Model)
 	if !m.defPickOpen {
 		t.Fatalf("picker should open: err=%q", m.errText)
@@ -182,7 +182,7 @@ func TestPickerPreviewFollowsSelection(t *testing.T) {
 		{URI: lsp.PathToURI(filepath.Join(root, "main.go")), Range: lsp.Range{Start: lsp.Position{Line: 2, Character: 0}}},
 		{URI: lsp.PathToURI(filepath.Join(root, "lib", "util.ts")), Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 0}}},
 	}
-	next, _ := m.handleDefinition(definitionMsg{token: "x", locs: client.locs})
+	next, cmd := m.handleDefinition(definitionMsg{rel: m.openRel, token: "x", locs: client.locs})
 	m = next.(Model)
 	if !m.defPickOpen || len(m.defPickItems) != 2 {
 		t.Fatalf("picker should open with 2 hits: open=%v n=%d err=%q", m.defPickOpen, len(m.defPickItems), m.errText)
@@ -190,15 +190,24 @@ func TestPickerPreviewFollowsSelection(t *testing.T) {
 	if m.defPickPrevRel != m.defPickItems[0].rel {
 		t.Fatalf("preview should load the first candidate: %q", m.defPickPrevRel)
 	}
+	// The preview's read + tokenize is async: deliver its message.
+	if cmd == nil {
+		t.Fatal("opening the picker should fire the preview load")
+	}
+	m, _ = deliver(m, cmd())
 	if len(m.defPickPrevLines) == 0 || m.defPickPrevHl == nil {
 		t.Fatal("preview lines/highlight missing")
 	}
 
 	first := m.defPickPrevRel
-	m = key(m, keyPress(tea.KeyDown))
+	m, cmd = deliver(m, keyPress(tea.KeyDown))
 	if m.defPickPrevRel == first {
 		t.Fatalf("preview should follow selection to the other file: %q", m.defPickPrevRel)
 	}
+	if cmd == nil {
+		t.Fatal("changing the selected file should fire the preview load")
+	}
+	m, _ = deliver(m, cmd())
 
 	// The rendered overlay includes the second candidate's code and the divider.
 	out := m.renderDefPickOverlay(100, 30)
@@ -540,7 +549,7 @@ func TestPickerCompilesTokenRegexOnOpen(t *testing.T) {
 		{URI: lsp.PathToURI(filepath.Join(root, "lib", "util.ts")), Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 0}}},
 		{URI: lsp.PathToURI(filepath.Join(root, "main.go")), Range: lsp.Range{Start: lsp.Position{Line: 2, Character: 0}}},
 	}
-	next, _ := m.handleDefinition(definitionMsg{token: "x+y", locs: client.locs}) // regex metachars must be quoted
+	next, _ := m.handleDefinition(definitionMsg{rel: m.openRel, token: "x+y", locs: client.locs}) // regex metachars must be quoted
 	m = next.(Model)
 	if !m.defPickOpen {
 		t.Fatalf("picker should open: err=%q", m.errText)

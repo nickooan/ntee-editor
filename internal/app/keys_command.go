@@ -116,11 +116,16 @@ func (m Model) executeCommand(cmd string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// openFuzzy opens the Ctrl+P finder. The corpus is the full project walk with
-// recents moved to the front, so an empty query lists recently opened files.
-func (m Model) openFuzzy() (Model, tea.Cmd) {
-	m = m.closeCompletion()
-	m, cmd := m.ensureCorpus()
+// The finder's two variants share one overlay; the prompt is what tells them
+// apart (and is matched by refreshFuzzyCandidates when a rebuild lands).
+const (
+	fuzzyPromptGoto        = "goto "
+	fuzzyPromptUncommitted = "uncommitted "
+)
+
+// fuzzyGotoCandidates builds the Ctrl+P list: recents first, then the rest of
+// the corpus, directories last so an empty query stays a file list.
+func (m Model) fuzzyGotoCandidates() []string {
 	corpus := m.corpus
 	inCorpus := make(map[string]int, len(corpus))
 	for i, rel := range corpus {
@@ -139,15 +144,32 @@ func (m Model) openFuzzy() (Model, tea.Cmd) {
 			ordered = append(ordered, rel)
 		}
 	}
-	// Directories ("/"-suffixed) go last so the empty-query view stays a file
-	// list; typed queries mix them in by score.
-	ordered = append(ordered, m.dirCorpus...)
+	return append(ordered, m.dirCorpus...)
+}
 
+// fuzzyUncommittedCandidates builds the Ctrl+U list: the corpus ∩ gitDirty
+// intersection (dirs, deleted files, and rename origins in the dirty set are
+// never in the walk corpus, so only openable files remain).
+func (m Model) fuzzyUncommittedCandidates() []string {
+	var ordered []string
+	for _, rel := range m.corpus {
+		if m.gitDirty[rel] {
+			ordered = append(ordered, rel)
+		}
+	}
+	return ordered
+}
+
+// openFuzzy opens the Ctrl+P finder. The corpus is the full project walk with
+// recents moved to the front, so an empty query lists recently opened files.
+func (m Model) openFuzzy() (Model, tea.Cmd) {
+	m = m.closeCompletion()
+	m, cmd := m.ensureCorpus()
 	m.fuzzyOpen = true
 	m.fuzzyQuery = ""
 	m.fuzzyIndex = 0
-	m.fuzzyPrompt = "goto "
-	m.fuzzyCorpus = fuzzy.Prepare(ordered)
+	m.fuzzyPrompt = fuzzyPromptGoto
+	m.fuzzyCorpus = fuzzy.Prepare(m.fuzzyGotoCandidates())
 	m.fuzzyMatches = fuzzy.Filter("", m.fuzzyCorpus)
 	return m, cmd
 }
@@ -170,12 +192,7 @@ func (m Model) openUncommitted() (Model, tea.Cmd) {
 	}
 	m = m.closeCompletion()
 	m, cmd := m.ensureCorpus()
-	var ordered []string
-	for _, rel := range m.corpus {
-		if m.gitDirty[rel] {
-			ordered = append(ordered, rel)
-		}
-	}
+	ordered := m.fuzzyUncommittedCandidates()
 	if len(ordered) == 0 {
 		m.notice = "no uncommitted files"
 		m, gitCmd := m.maybeGitRefresh()
@@ -185,11 +202,39 @@ func (m Model) openUncommitted() (Model, tea.Cmd) {
 	m.fuzzyOpen = true
 	m.fuzzyQuery = ""
 	m.fuzzyIndex = 0
-	m.fuzzyPrompt = "uncommitted "
+	m.fuzzyPrompt = fuzzyPromptUncommitted
 	m.fuzzyCorpus = fuzzy.Prepare(ordered)
 	m.fuzzyMatches = fuzzy.Filter("", m.fuzzyCorpus)
 	m, gitCmd := m.maybeGitRefresh()
 	return m, tea.Batch(cmd, gitCmd)
+}
+
+// refreshFuzzyCandidates rebuilds an open finder's candidate list from the
+// current corpus (and gitDirty for the uncommitted variant) when either input
+// changes underneath it, preserving the typed filter and keeping the selection
+// on the same file when it survives the refresh.
+func (m Model) refreshFuzzyCandidates() Model {
+	if !m.fuzzyOpen {
+		return m
+	}
+	selected := m.fuzzySelectedPath()
+	previousIndex := m.fuzzyIndex
+	var ordered []string
+	if m.fuzzyPrompt == fuzzyPromptUncommitted {
+		ordered = m.fuzzyUncommittedCandidates()
+	} else {
+		ordered = m.fuzzyGotoCandidates()
+	}
+	m.fuzzyCorpus = fuzzy.Prepare(ordered)
+	m = m.refreshFuzzy() // re-filters the preserved fuzzyQuery, resets the index
+	for i, match := range m.fuzzyMatches {
+		if m.fuzzyCorpus[match.Index].Text == selected {
+			m.fuzzyIndex = i
+			return m
+		}
+	}
+	m.fuzzyIndex = input.Clamp(previousIndex, 0, max(0, len(m.fuzzyMatches)-1))
+	return m
 }
 
 // closeFuzzy hides the finder and releases the prepared corpus. That slice can

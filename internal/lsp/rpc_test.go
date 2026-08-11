@@ -133,6 +133,26 @@ func TestShutdownFailsInflight(t *testing.T) {
 	}
 }
 
+// A server that stops reading stdin must not defeat the request deadline: the
+// write runs on its own goroutine and ctx bounds the whole request, so Request
+// returns on expiry even though the pipe write is still parked.
+func TestRequestTimesOutWhenPeerStopsReading(t *testing.T) {
+	clientEnd, _ := pipePair() // server side never reads: every write parks
+	client := NewConn(clientEnd, nil)
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := client.Request(ctx, "hang", nil)
+	if err != context.DeadlineExceeded {
+		t.Fatalf("err = %v, want context.DeadlineExceeded", err)
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatal("request outlived its deadline")
+	}
+}
+
 func TestNullIDResponseDoesNotPanic(t *testing.T) {
 	// JSON-RPC 2.0 mandates `"id": null` for responses to unparseable
 	// requests; the readLoop must drop the frame, not panic.

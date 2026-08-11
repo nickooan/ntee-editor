@@ -25,7 +25,7 @@ func (m Model) renderPreview(width, height int) string {
 	var byLine map[int][]view.LineMatch
 	focused := -1
 	if m.preview.searching && m.preview.search != "" {
-		byLine = view.BuildMatchesByLine(m.previewMatches())
+		byLine = m.previewMC.matchesByLine(m.preview.corpus, m.preview.search)
 		focused = m.preview.focused
 	}
 

@@ -811,9 +811,14 @@ func (c *serverClient) stop() {
 
 	if conn != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		_, _ = conn.Request(ctx, "shutdown", nil)
+		_, err := conn.Request(ctx, "shutdown", nil)
 		cancel()
-		_ = conn.Notify("exit", nil)
+		if err == nil {
+			// Only a server that answered shutdown gets the polite exit notify —
+			// on a wedged pipe the notify would block unboundedly. Close unblocks
+			// any parked write and the kill path below reaps the process.
+			_ = conn.Notify("exit", nil)
+		}
 		_ = conn.Close()
 	}
 	if cmd != nil && cmd.Process != nil {

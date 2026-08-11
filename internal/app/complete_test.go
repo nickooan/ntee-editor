@@ -59,11 +59,27 @@ func TestCompletionStaleAnswerDropped(t *testing.T) {
 	m.edit.cy, m.edit.cx = 0, 3
 
 	// A result whose tagged word start no longer matches the cursor context.
-	msg := completionMsg{line: 0, start: 99, items: []lsp.CompletionItem{{Label: "foobar"}}}
+	msg := completionMsg{rel: m.openRel, line: 0, start: 99, items: []lsp.CompletionItem{{Label: "foobar"}}}
 	next, _ := m.handleCompletion(msg)
 	m = next.(Model)
 	if m.completionOpen {
 		t.Fatal("a stale completion answer must be dropped")
+	}
+}
+
+func TestCompletionAnswerForOtherFileDropped(t *testing.T) {
+	m, _ := newLSPTestModel(t)
+	m = m.openFileAt("main.go")
+	m.edit = newEditor("foo")
+	m.edit.cy, m.edit.cx = 0, 3
+
+	// Same line and word start as the current cursor, but the request was
+	// fired from a file the user has since left — it must not open the popup.
+	msg := completionMsg{rel: "lib/util.ts", line: 0, start: 0, items: []lsp.CompletionItem{{Label: "foobar"}}}
+	next, _ := m.handleCompletion(msg)
+	m = next.(Model)
+	if m.completionOpen {
+		t.Fatal("a completion answer for another file must be dropped")
 	}
 }
 

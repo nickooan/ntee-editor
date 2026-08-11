@@ -3,7 +3,8 @@
 package fuzzy
 
 import (
-	"sort"
+	"cmp"
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -51,13 +52,17 @@ func Prepare(candidates []string) []Prepared {
 // in the original order.
 func Filter(query string, candidates []Prepared) []Match {
 	q := []rune(strings.ToLower(query))
-	out := make([]Match, 0, len(candidates))
 	if len(q) == 0 {
+		out := make([]Match, len(candidates))
 		for i := range candidates {
-			out = append(out, Match{Index: i})
+			out[i] = Match{Index: i}
 		}
 		return out
 	}
+	// Start small: a corpus-sized capacity here is ~800KB of garbage per
+	// keystroke at the 50k-file cap, while a typed query usually keeps only a
+	// fraction of the corpus — let append grow for the broad ones.
+	out := make([]Match, 0, min(len(candidates), 1024))
 	for i := range candidates {
 		c := &candidates[i]
 		// Cheap, allocation-free reject: most candidates don't contain the query
@@ -70,11 +75,11 @@ func Filter(query string, candidates []Prepared) []Match {
 			out = append(out, Match{Index: i, Score: score})
 		}
 	}
-	sort.SliceStable(out, func(a, b int) bool {
-		if out[a].Score != out[b].Score {
-			return out[a].Score > out[b].Score
+	slices.SortStableFunc(out, func(a, b Match) int {
+		if a.Score != b.Score {
+			return cmp.Compare(b.Score, a.Score) // higher score first
 		}
-		return len(candidates[out[a].Index].Text) < len(candidates[out[b].Index].Text)
+		return cmp.Compare(len(candidates[a.Index].Text), len(candidates[b.Index].Text))
 	})
 	orderDirPrefix(query, candidates, out)
 	return out
@@ -100,23 +105,37 @@ func orderDirPrefix(query string, candidates []Prepared, matches []Match) {
 		t := candidates[m.Index].Text
 		return len(t) >= len(prefix) && strings.EqualFold(t[:len(prefix)], prefix)
 	}
-	sort.SliceStable(matches, func(a, b int) bool {
-		ca, cb := inClass(matches[a]), inClass(matches[b])
-		if ca != cb {
-			return ca
+
+	// Stable partition, in-class first, each class keeping its (score) order:
+	// one inClass evaluation per match. The previous full stable sort re-folded
+	// the prefix twice per comparison — O(n log n) case-folds on a broad query.
+	var outOfClass []Match
+	classEnd := 0
+	for _, match := range matches {
+		if inClass(match) {
+			matches[classEnd] = match // classEnd trails the read index, safe in place
+			classEnd++
+		} else {
+			outOfClass = append(outOfClass, match)
 		}
-		if ca && browse {
-			// File-explorer listing: directories (trailing "/") before files,
-			// each group alphabetical.
-			ta, tb := candidates[matches[a].Index].Text, candidates[matches[b].Index].Text
+	}
+	copy(matches[classEnd:], outOfClass)
+
+	if browse {
+		// File-explorer listing: directories (trailing "/") before files, each
+		// group alphabetical.
+		slices.SortStableFunc(matches[:classEnd], func(a, b Match) int {
+			ta, tb := candidates[a.Index].Text, candidates[b.Index].Text
 			da, db := strings.HasSuffix(ta, "/"), strings.HasSuffix(tb, "/")
 			if da != db {
-				return da
+				if da {
+					return -1
+				}
+				return 1
 			}
-			return ta < tb
-		}
-		return false // keep the existing (score) order within each class
-	})
+			return strings.Compare(ta, tb)
+		})
+	}
 }
 
 // Positions returns the matched rune indices of the best alignment of query in

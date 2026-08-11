@@ -13,44 +13,73 @@ import (
 )
 
 // queryInputSuggestions completes the typed bar text: exact/prefix over the
-// visible tree, fuzzy over the full corpus.
+// visible tree, fuzzy over the full corpus. Memoized per message via
+// frameCache (like treeEntries) so the key handler and View share one filter
+// pass over the corpus.
 func (m Model) queryInputSuggestions(entries []filetree.FileTreeEntry) []filetree.InputSuggestion {
+	// The single choke point for the popup: while a mouse click owns the bar
+	// text every consumer (render, navigation, Enter) sees "no suggestions",
+	// and nothing is memoized so lifting the flag recomputes cleanly.
+	if m.suppressQuerySuggestions {
+		return nil
+	}
+	f := m.frames
+	if f != nil && f.sugOk && f.sugSeq == f.seq && f.sugKey == m.command {
+		return f.suggestions
+	}
 	// Reads the cached corpus and its precomputed fuzzy data (populated by
-	// ensureCorpus in the key handler); never walks or re-prepares here, so
-	// this is cheap on every keystroke and render.
-	return filetree.BuildInputSuggestions(entries, m.corpus, m.dirCorpus, m.queryPrepared, m.command, filetree.MaxInputSuggestions)
+	// ensureCorpus in the key handler); never walks or re-prepares here.
+	suggestions := filetree.BuildInputSuggestions(entries, m.corpus, m.dirCorpus, m.queryPrepared, m.command, filetree.MaxInputSuggestions)
+	if f != nil {
+		f.sugOk, f.sugSeq, f.sugKey, f.suggestions = true, f.seq, m.command, suggestions
+	}
+	return suggestions
 }
 
 // handleQueryKey is the home-mode handler: the bottom input bar drives the
 // sidebar (typing expands, navigation highlights) and Enter enters/opens.
+// ensureCorpus's rebuild cmd is batched at this single return point so no
+// dispatch branch can drop it — a dropped cmd would latch corpusRebuilding
+// and freeze the search index for the rest of the session.
 func (m Model) handleQueryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	m, corpusCmd := m.ensureCorpus()
+	next, cmd := m.dispatchQueryKey(msg)
+	return next, tea.Batch(corpusCmd, cmd)
+}
+
+// dispatchQueryKey routes one query-bar keypress to its branch.
+func (m Model) dispatchQueryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	entries := m.treeEntries()
-	suggestions := m.queryInputSuggestions(entries)
-	if m.inputSuggestIndex >= len(suggestions) {
-		m.inputSuggestIndex = 0
+	// Computed only by the branches that read the popup (navigation, enter):
+	// the typing branches change m.command, so a filter pass for the pre-key
+	// text would be wasted — View computes (and memoizes) the fresh one.
+	suggest := func() []filetree.InputSuggestion {
+		suggestions := m.queryInputSuggestions(entries)
+		if m.inputSuggestIndex >= len(suggestions) {
+			m.inputSuggestIndex = 0
+		}
+		return suggestions
 	}
-	popupOpen := len(suggestions) > 0
 
 	switch msg.String() {
 	case "shift+up":
-		if popupOpen {
+		if suggestions := suggest(); len(suggestions) > 0 {
 			return m.moveInputSuggestion(suggestions, -1), nil
 		}
 		return m.moveSidebarSelection(entries, -1), nil
 	case "shift+down":
-		if popupOpen {
+		if suggestions := suggest(); len(suggestions) > 0 {
 			return m.moveInputSuggestion(suggestions, 1), nil
 		}
 		return m.moveSidebarSelection(entries, 1), nil
 
 	case "up":
-		if popupOpen {
+		if suggestions := suggest(); len(suggestions) > 0 {
 			return m.moveInputSuggestion(suggestions, -1), nil
 		}
 		m.fileScrollY = input.Clamp(m.fileScrollY-1, 0, max(0, len(m.fileLines)-1))
 	case "down":
-		if popupOpen {
+		if suggestions := suggest(); len(suggestions) > 0 {
 			return m.moveInputSuggestion(suggestions, 1), nil
 		}
 		m.fileScrollY = input.Clamp(m.fileScrollY+1, 0, max(0, len(m.fileLines)-1))
@@ -71,7 +100,7 @@ func (m Model) handleQueryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.qCursor = input.MoveCursor(m.command, m.qCursor, 1)
 
 	case "enter":
-		return m.submitQuery(entries, suggestions)
+		return m.submitQuery(entries, suggest())
 
 	case "esc":
 		return m.moveQueryToParentDirectory(), nil
@@ -87,22 +116,23 @@ func (m Model) handleQueryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.command, m.qCursor, _ = input.RemoveBeforeCursor(m.command, m.qCursor)
 		m.inputSuggestIndex = 0
 		m.keyboardSelectedCommand = "" // typing re-anchors the highlight to the text
+		m.suppressQuerySuggestions = false
 	case "space":
 		m = m.adoptPreview()
 		m.command, m.qCursor = input.InsertAtCursor(m.command, m.qCursor, " ")
 		m.inputSuggestIndex = 0
 		m.keyboardSelectedCommand = ""
+		m.suppressQuerySuggestions = false
 	default:
 		if t := keyText(msg); t != "" {
 			m = m.adoptPreview()
 			m.command, m.qCursor = input.InsertAtCursor(m.command, m.qCursor, t)
 			m.inputSuggestIndex = 0
 			m.keyboardSelectedCommand = ""
+			m.suppressQuerySuggestions = false
 		}
 	}
-	// corpusCmd (background revalidation, or nil) rides out on the typing paths
-	// that fall through here — exactly when fresh results matter.
-	return m, corpusCmd
+	return m, nil
 }
 
 // isInlineFsVerb is the bar's filesystem-command verb set — the single
@@ -351,6 +381,7 @@ func (m Model) moveQueryToParentDirectory() Model {
 	m.selectedCommand = parent
 	m.command = parent
 	m.qCursor = len([]rune(parent))
+	m.suppressQuerySuggestions = false
 	return m
 }
 

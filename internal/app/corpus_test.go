@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/nickooan/ntee-editor/internal/config"
 	"github.com/nickooan/ntee-editor/internal/filetree"
 	"github.com/nickooan/ntee-editor/internal/store"
@@ -184,5 +186,118 @@ func TestWarmStartLoadsPersistedCorpus(t *testing.T) {
 	}
 	if !containsStr(msg.files, "added.go") {
 		t.Fatalf("background rebuild missing the new file: %v", msg.files)
+	}
+}
+
+// findCorpusMsg executes cmd and digs the corpusMsg out of the result,
+// unwrapping tea.BatchMsg nesting.
+func findCorpusMsg(t *testing.T, cmd tea.Cmd) (corpusMsg, bool) {
+	t.Helper()
+	if cmd == nil {
+		return corpusMsg{}, false
+	}
+	switch msg := cmd().(type) {
+	case corpusMsg:
+		return msg, true
+	case tea.BatchMsg:
+		for _, sub := range msg {
+			if found, ok := findCorpusMsg(t, sub); ok {
+				return found, true
+			}
+		}
+	}
+	return corpusMsg{}, false
+}
+
+// TestQueryKeyBranchesPropagateCorpusRebuild is the regression test for the
+// stale-index bug: the early-return branches of the query-bar handler (enter,
+// esc, popup navigation) must propagate ensureCorpus's rebuild cmd. Dropping
+// it latched corpusRebuilding forever and froze the corpus for the session.
+func TestQueryKeyBranchesPropagateCorpusRebuild(t *testing.T) {
+	for name, msg := range map[string]tea.KeyPressMsg{
+		"enter":                keyPress(tea.KeyEnter),
+		"esc":                  keyPress(tea.KeyEsc),
+		"up with suggestions":  keyPress(tea.KeyUp),
+		"shift+down highlight": {Code: tea.KeyDown, Mod: tea.ModShift},
+	} {
+		m, _ := newTestModel(t, nil) // warm fixture
+		m = runes(m, "main")         // suggestions exist for the popup branches
+		m.corpusBuiltAt = time.Now().Add(-corpusTTL - time.Second)
+
+		next, cmd := m.Update(msg)
+		m = next.(Model)
+		if cmd == nil || !m.corpusRebuilding {
+			t.Fatalf("%s: expired TTL must fire a rebuild (cmd=%v rebuilding=%v)", name, cmd, m.corpusRebuilding)
+		}
+		rebuilt, ok := findCorpusMsg(t, cmd)
+		if !ok {
+			t.Fatalf("%s: returned cmd does not deliver a corpusMsg", name)
+		}
+		next, _ = m.Update(rebuilt)
+		m = next.(Model)
+		if m.corpusRebuilding || time.Since(m.corpusBuiltAt) > corpusTTL {
+			t.Fatalf("%s: delivering the rebuild must clear the latch", name)
+		}
+	}
+}
+
+// fuzzyMatchTexts flattens the finder's current match list to rels.
+func fuzzyMatchTexts(m Model) []string {
+	out := make([]string, 0, len(m.fuzzyMatches))
+	for _, match := range m.fuzzyMatches {
+		out = append(out, m.fuzzyCorpus[match.Index].Text)
+	}
+	return out
+}
+
+// TestCorpusMsgRefreshesOpenUncommittedFinder: an externally created (then
+// deleted) file must flow into an already-open Ctrl+U list once the corpus
+// rebuild lands, with the typed filter preserved and the index kept in range.
+func TestCorpusMsgRefreshesOpenUncommittedFinder(t *testing.T) {
+	m := uncommittedFixture(t) // lib/util.ts dirty
+	m = key(m, ctrlKey('u'))
+	m = runes(m, "ts")
+
+	root := m.root
+	must(t, os.WriteFile(filepath.Join(root, "lib", "new.ts"), []byte("export {}\n"), 0o644))
+	next, _ := m.Update(gitStatusMsg{dirty: map[string]bool{"lib/util.ts": true, "lib/new.ts": true, "lib": true}, ok: true})
+	m = rebuildCorpusNow(next.(Model))
+
+	if !m.fuzzyOpen || m.fuzzyPrompt != fuzzyPromptUncommitted || m.fuzzyQuery != "ts" {
+		t.Fatalf("finder state lost: open=%v prompt=%q query=%q", m.fuzzyOpen, m.fuzzyPrompt, m.fuzzyQuery)
+	}
+	if !containsStr(fuzzyMatchTexts(m), "lib/new.ts") {
+		t.Fatalf("new external file missing from the open finder: %v", fuzzyMatchTexts(m))
+	}
+
+	// The dirty file vanishes externally: it must drop out of the list.
+	must(t, os.Remove(filepath.Join(root, "lib", "util.ts")))
+	next, _ = m.Update(gitStatusMsg{dirty: map[string]bool{"lib/new.ts": true, "lib": true}, ok: true})
+	m = next.(Model)
+	m.fuzzyIndex = len(m.fuzzyMatches) - 1
+	m = rebuildCorpusNow(m)
+	if containsStr(fuzzyMatchTexts(m), "lib/util.ts") {
+		t.Fatalf("deleted file still listed: %v", fuzzyMatchTexts(m))
+	}
+	if len(m.fuzzyMatches) > 0 && m.fuzzyIndex >= len(m.fuzzyMatches) {
+		t.Fatalf("fuzzyIndex %d out of range of %d matches", m.fuzzyIndex, len(m.fuzzyMatches))
+	}
+}
+
+// TestCorpusMsgRefreshesOpenGotoFinder: the Ctrl+P variant re-derives too,
+// keeping the selection on the same file across the swap.
+func TestCorpusMsgRefreshesOpenGotoFinder(t *testing.T) {
+	m, root := newTestModel(t, nil)
+	m = key(m, ctrlKey('p'))
+	selected := m.fuzzySelectedPath()
+
+	must(t, os.WriteFile(filepath.Join(root, "zzz_new.go"), []byte("package main\n"), 0o644))
+	m = rebuildCorpusNow(m)
+
+	if !containsStr(fuzzyMatchTexts(m), "zzz_new.go") {
+		t.Fatalf("new external file missing from Ctrl+P: %v", fuzzyMatchTexts(m))
+	}
+	if got := m.fuzzySelectedPath(); got != selected {
+		t.Fatalf("selection moved across the rebuild: %q → %q", selected, got)
 	}
 }

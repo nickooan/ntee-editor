@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/alecthomas/chroma/v2"
+
+	"github.com/nickooan/ntee-editor/internal/view"
 )
 
 func TestHighlightLinesAlignment(t *testing.T) {
@@ -41,6 +43,30 @@ func TestHighlightLinesMultiLineToken(t *testing.T) {
 	src := strings.Split(content, "\n")
 	if len(lines) != len(src) {
 		t.Fatalf("row count %d != line count %d", len(lines), len(src))
+	}
+	for i, row := range lines {
+		var b strings.Builder
+		for _, seg := range row {
+			b.WriteString(seg.Text)
+		}
+		if b.String() != src[i] {
+			t.Fatalf("line %d mismatch: %q != %q", i, b.String(), src[i])
+		}
+	}
+}
+
+// A lone \r counts as a line break to chroma (EnsureLF converts it to \n), so
+// row indices must be computed on the same normalization — otherwise every row
+// after the stray \r wears the previous row's colors.
+func TestHighlightLinesLoneCarriageReturn(t *testing.T) {
+	content := "// a\rvar x = 1\nvar y = 2\n"
+	lines := HighlightLines("a.ts", content)
+	if lines == nil {
+		t.Fatal("ts file should have a lexer")
+	}
+	src := view.NormalizeLines(content)
+	if len(lines) != len(src) {
+		t.Fatalf("row count %d != normalized line count %d", len(lines), len(src))
 	}
 	for i, row := range lines {
 		var b strings.Builder

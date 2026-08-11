@@ -8,7 +8,7 @@ The design is shaped by a few hard constraints:
 
 - **One server per language, started lazily.** The first file you open in a language spawns its server; later projects are added as workspace folders on the same server rather than spawning more processes. Each server is scoped to the file's nearest project root (tsconfig, go.mod, …), so a monorepo frontend indexes its own few hundred files, not the whole tree.
 - **A wedged server can never freeze the UI.** All doc-sync notifications (didOpen, didChange, …) go through a bounded per-client op queue drained by a single writer goroutine. The blocking pipe write happens on that goroutine with no locks held. If the server stops consuming stdin, the writer parks — not the UI goroutine.
-- **Notices are collected, then emitted.** The message sink is Bubble Tea's `program.Send`, which is unbuffered — and the UI goroutine it hands to may itself be blocked waiting on the Manager's lock. So nothing emits while holding `Manager.mu`; notices accumulate in a slice and are drained after unlock.
+- **Notices never block their producer.** The message sink is Bubble Tea's `program.Send`, which is unbuffered and drained by the same goroutine that runs `Update` — a synchronous sink call from the UI goroutine would deadlock the editor. So `emit` only queues (bounded at 64) and wakes a single dispatcher goroutine, which delivers to the sink in order from outside any lock. Emitting under `Manager.mu` is safe.
 - **Crashes heal, crash loops don't.** A dead server is replaced on the next demand, but rapid successive deaths burn a per-language restart budget and disable the language for the session. A server that ran a long time before dying resets the budget — its crash is news, not a loop.
 - **Vue is a hybrid.** In Volar's hybrid mode the Vue server only answers template features; `<script>` intelligence comes from tsserver. The package carries bridge/mirror machinery to relay `tsserver/request` commands to the TypeScript server and mirror `.vue` document sync to it, and the Manager detects bridge cycles in config (self-bridge, A↔B) that would otherwise recurse forever.
 
@@ -57,7 +57,7 @@ The interfaces and message types the rest of the app depends on. `Client` is one
 ### rpc.go
 
 - `NewConn` — builds a `Conn` over any `io.ReadWriteCloser` and starts `readLoop` and `notificationLoop`. The handler may be nil for an outbound-only peer.
-- `Request` — sends a request and blocks until the response or context deadline. IDs are matched by raw bytes so numeric and string ids both round-trip.
+- `Request` — sends a request and blocks until the response or context deadline. The frame write runs on its own goroutine so the deadline bounds it too: against a server that stopped reading stdin the request returns on ctx expiry while the write goroutine stays parked on the dead pipe (one per attempt, reclaimed when the process dies and the pipe closes). IDs are matched by raw bytes so numeric and string ids both round-trip.
 - `Notify` — fire-and-forget notification.
 - `Close` — shuts the connection and fails every in-flight request rather than leaving callers hanging.
 - `readLoop` / `dispatch` — read frames and route them: responses to `resolveResponse`, requests to a semaphore-bounded goroutine, notifications to the ordered worker. Both request and notification paths bail out via `done` when the connection is closing.
@@ -96,7 +96,7 @@ The `clientCapabilities` var declares full-content sync, plain `Location` respon
 - `ExecuteCommand` — `workspace/executeCommand`; the bridge's transport to the TypeScript server.
 - `handleTsserverRequest` — the hybrid relay: unpacks Volar's `[id, command, args]` (tolerating the wire's extra array wrapping), relays via the bridge on a goroutine, and *always* replies `tsserver/response` — null on failure or when all 8 relay slots are busy — so the Vue server's awaited promise never hangs. The reply is double-wrapped `[[id, result]]` because vscode-jsonrpc spreads array params and Volar's handler takes one argument.
 - `handle` — the server→client handler: diagnostics to the sink, `workspace/configuration` answered with nulls, `tsserver/request` to the relay, everything else tolerated silently.
-- `stop` — deliberate shutdown: flags `stopping` so watchExit stays quiet, runs shutdown/exit with a short grace period, then kills and waits on the watcher rather than reaping the process itself.
+- `stop` — deliberate shutdown: flags `stopping` so watchExit stays quiet, runs the shutdown request with a short grace period (skipping the exit notify when the request failed — on a wedged pipe it would block unboundedly), then kills and waits on the watcher rather than reaping the process itself. Bounded end to end.
 - `describeExit` / `crashReason` — turn an exit status plus the stderr tail into a readable one-liner ("exit status 1 — TypeError: …"), preferring an error/panic-looking line and clipping for the status bar.
 - `mergeLocations` — concatenates two location lists, dropping duplicates by URI + start position.
 
@@ -106,17 +106,17 @@ The `clientCapabilities` var declares full-content sync, plain `Location` respon
 
 - `NewManager` — builds the extension→language map (immutable afterwards, read lock-free), seeds disabled reasons for config-disabled languages, and runs the bridge-cycle check so a config with a self-bridge or A↔B chain disables the language up front instead of recursing at runtime.
 - `bridgeCycleReason` — follows a language's `bridge.To` chain and reports a disable reason when it revisits a language; "" when it terminates.
-- `SetSink` / `emit` — connect the Manager to `program.Send` and flush anything emitted during startup; before the sink exists, up to 64 messages are buffered.
+- `SetSink` / `emit` / `dispatchNotices` — notice delivery. `emit` appends to a bounded queue (64) and wakes the dispatcher; it never calls the sink itself, so it is safe from any goroutine, including the UI goroutine. `dispatchNotices` is one per-Manager goroutine that drains the queue in order and calls the sink outside the lock. `SetSink` wires `program.Send` and wakes the dispatcher to flush anything queued during startup.
 - `ClientFor` — the main entry: extension → language, file → project root (memoized), then `getOrStart`.
 - `projectRootFor` — memoizes `filetree.FindProjectRoot` per directory in a lock-free `sync.Map`; the walk stats the disk, so it runs before `m.mu` is taken.
-- `getOrStart` — `getOrStartLocked` plus the lock and the deferred notice drain: every notice produced under `m.mu` is emitted only after release (the collect-then-emit rule).
+- `getOrStart` — `getOrStartLocked` plus the lock; notices produced under `m.mu` go straight to `emit`, which only queues.
 - `getOrStartLocked` — the core: returns the running server, or replaces a dead one on demand. A long-lived corpse resets the restart budget; the third rapid death disables the language with a visible reason. Fresh starts wire the bridge, mirror, and companion lookup for hybrid servers (with a runtime belt against self-bridging), and eagerly warm the companion so the first bridged request doesn't hit a cold server and time out.
 - `UnavailableReason` — the honest error string: unmapped extension gets the `--prepare-lsp` hint, a disabled language gets its actual disable reason.
 - `makeBridge` — builds the relay closure: forward a hybrid server's tsserver command to the companion via `workspace/executeCommand` and unwrap the tsserver envelope body.
 - `makeMirror` — forwards a hybrid server's doc-sync to the companion so tsserver (with @vue/typescript-plugin) has the `.vue` file in a real project; without this the bridge relays but tsserver errors "file not in project" and Volar degrades to a limited inferred-project service.
 - `Statuses` — every configured language's state (running/stopped/disabled + reason) for the inspection pane, sorted by name.
 - `Enable` — clears disabled state and the restart budget, sets a runtime override past `enable: false` in config, and eagerly starts the server so the pane turns green now; sync-detectable failures come back in `reason`, async crashes arrive later as notices.
-- `Disable` — stops the server (outside `m.mu`, mirroring ShutdownAll) and marks the language disabled for the session.
-- `ShutdownAll` — collects every client under the lock, then stops them all outside it.
+- `Disable` — detaches the server and marks the language disabled for the session; the shutdown handshake runs on its own goroutine so a wedged server can't stall the key handler that asked.
+- `ShutdownAll` — collects every client under the lock, then stops them all in parallel outside it, bounded by a shared 2s deadline (stragglers are left to their kill timers). The app calls it from a `tea.Cmd` on quit, off the UI goroutine.
 
 *Plus small helpers: `clientForLang` (explicit-language lookup used by the bridge), `fileFromArgs` (extract the tsserver command's target file), `unwrapBody` (peel the tsserver `{..., body}` envelope).*

@@ -28,12 +28,12 @@ File map:
 
 ### syntax.go
 
-- `LexerFor(filename)` — resolves the lexer for a filename: custom `.nts`/`.ntd` lexers, then the `explicitLexers` extension map (Go, TypeScript, YAML, bash, GraphQL, ...), then chroma's own filename matcher. Returns nil when the file should render unstyled. Everything is wrapped in `chroma.Coalesce` so adjacent same-type tokens merge.
-- `HighlightLines(filename, content)` — the main entry point. Tokenizes the whole buffer and buckets styled segments by line, splitting tokens that contain newlines. The result always has exactly as many rows as `view.NormalizeLines(content)` would produce; nil means "no lexer, render plain".
+- `LexerFor(filename)` — resolves the lexer for a filename: custom `.nts`/`.ntd` lexers, then the `explicitLexers` extension map (Go, TypeScript, YAML, bash, GraphQL, ...), then chroma's own filename matcher. Returns nil when the file should render unstyled. Everything is wrapped in `chroma.Coalesce` so adjacent same-type tokens merge. Results are memoized in a mutex-guarded map (chroma's registry walk is expensive and this runs on every full re-highlight) — keyed by extension for the pinned tables, by basename for the registry fallback (chroma globs can match specific basenames like `CMakeLists.txt`).
+- `HighlightLines(filename, content)` — the main entry point. Normalizes line breaks first (chroma's `EnsureLF` converts a lone `\r` to `\n`, so counting the raw content would desync rows), then tokenizes the whole buffer and buckets styled segments by line, splitting only the tokens that actually contain newlines. The result always has exactly as many rows as `view.NormalizeLines(content)` would produce; nil means "no lexer, render plain".
 
 ### theme.go
 
-- `SetStyle(name)` — selects the chroma style grammar colors come from. Unknown names and the legacy `"terminal16"` fall back to the tuned gruvbox. Called once at startup (an `init` seeds gruvbox as the default); the TUI render loop is single-goroutine, so there's no locking. Also resets the segment cache.
+- `SetStyle(name)` — selects the chroma style grammar colors come from. Unknown names and the legacy `"terminal16"` fall back to the tuned gruvbox. An `init` seeds gruvbox as the default; the inspect pane can switch styles at runtime. The style and segment cache are mutex-guarded — highlighting also runs on `tea.Cmd` goroutines (grep and def-picker previews). Also resets the segment cache.
 - `gruvboxTuned()` — derives chroma's gruvbox with red keywords/operators instead of orange, matching the classic vim/Sublime gruvbox look while keeping types gold.
 - `segmentFor(t)` — maps a chroma token type to a `view.HighlightSegment` (hex color, bold/italic/underline), memoized in `entryCache`. `Style.Get` resolves category inheritance, so every token type lands on a concrete color.
 

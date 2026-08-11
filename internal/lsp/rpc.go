@@ -115,25 +115,38 @@ func (c *Conn) Request(ctx context.Context, method string, params any) (json.Raw
 	c.pending[id] = ch
 	c.mu.Unlock()
 
+	// The write runs on its own goroutine so ctx bounds it too: a server that
+	// stopped reading stdin blocks the pipe write, and without this every
+	// request (and quit's shutdown handshake) would hang past its deadline.
+	// On timeout the goroutine stays parked on the dead pipe — one goroutine
+	// per attempt, reclaimed when the process dies and the pipe closes.
 	idRaw := json.RawMessage(id)
-	if err := c.write(&Message{JSONRPC: "2.0", ID: &idRaw, Method: method, Params: raw}); err != nil {
-		c.mu.Lock()
-		delete(c.pending, id)
-		c.mu.Unlock()
-		return nil, err
-	}
+	writeErr := make(chan error, 1)
+	go func() {
+		writeErr <- c.write(&Message{JSONRPC: "2.0", ID: &idRaw, Method: method, Params: raw})
+	}()
 
-	select {
-	case <-ctx.Done():
-		c.mu.Lock()
-		delete(c.pending, id)
-		c.mu.Unlock()
-		return nil, ctx.Err()
-	case resp := <-ch:
-		if resp.Error != nil {
-			return nil, resp.Error
+	for {
+		select {
+		case <-ctx.Done():
+			c.mu.Lock()
+			delete(c.pending, id)
+			c.mu.Unlock()
+			return nil, ctx.Err()
+		case err := <-writeErr:
+			if err != nil {
+				c.mu.Lock()
+				delete(c.pending, id)
+				c.mu.Unlock()
+				return nil, err
+			}
+			writeErr = nil // wait for the response now
+		case resp := <-ch:
+			if resp.Error != nil {
+				return nil, resp.Error
+			}
+			return resp.Result, nil
 		}
-		return resp.Result, nil
 	}
 }
 

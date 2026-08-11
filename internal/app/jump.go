@@ -146,18 +146,19 @@ const maxDefCandidates = 50
 // jumpToCandidates handles the 0/1/many outcome shared by the LSP and
 // heuristic paths. title labels the picker ("definitions of X" / "references
 // of X"); emptyErr is the 0-hit message.
-func (m Model) jumpToCandidates(title, token, emptyErr string, cands []defCandidate) Model {
+func (m Model) jumpToCandidates(title, token, emptyErr string, cands []defCandidate) (Model, tea.Cmd) {
 	switch len(cands) {
 	case 0:
 		m.errText = emptyErr
-		return m
+		return m, nil
 	case 1:
-		return m.jumpToLocation(cands[0].rel, cands[0].line, cands[0].utf16Col)
+		return m.jumpToLocation(cands[0].rel, cands[0].line, cands[0].utf16Col), nil
 	default:
 		if len(cands) > maxDefCandidates {
 			cands = cands[:maxDefCandidates]
 		}
 		m.defPickOpen = true
+		m.defPickGen++
 		m.defPickTitle = title
 		m.defPickToken = token
 		m.defPickRe = nil
@@ -171,41 +172,67 @@ func (m Model) jumpToCandidates(title, token, emptyErr string, cands []defCandid
 	}
 }
 
-// refreshDefPickPreview loads (and highlights) the selected candidate's file
-// for the picker's preview rows; re-reads only when the file changes.
-func (m Model) refreshDefPickPreview() Model {
+// defPickPreviewMsg delivers the selected candidate's preview — a disk read
+// plus a whole-file tokenize, computed off the UI goroutine (each arrow key
+// changing the file would otherwise stall key handling). rel guards against
+// the selection moving on mid-flight.
+type defPickPreviewMsg struct {
+	gen   int
+	rel   string
+	lines []string
+	hl    [][]view.HighlightSegment
+}
+
+// refreshDefPickPreview fires the async load of the selected candidate's file
+// for the picker's preview rows; re-reads only when the file changes. The
+// preview renders empty until the message lands.
+func (m Model) refreshDefPickPreview() (Model, tea.Cmd) {
 	if len(m.defPickItems) == 0 {
 		m.defPickPrevRel, m.defPickPrevLines, m.defPickPrevHl = "", nil, nil
-		return m
+		return m, nil
 	}
 	c := m.defPickItems[input.Clamp(m.defPickIndex, 0, len(m.defPickItems)-1)]
 	if c.rel == m.defPickPrevRel {
-		return m
+		return m, nil
 	}
 	m.defPickPrevRel = c.rel
 	m.defPickPrevLines, m.defPickPrevHl = nil, nil
-	f, ok := filetree.ReadViewFile(m.root, c.rel)
-	if !ok || f.Binary {
-		return m
+	gen, rel, root, maxKB := m.defPickGen, c.rel, m.root, m.cfg.Editor.MaxHighlightKB
+	return m, func() tea.Msg {
+		msg := defPickPreviewMsg{gen: gen, rel: rel}
+		f, ok := filetree.ReadViewFile(root, rel)
+		if !ok || f.Binary {
+			return msg
+		}
+		msg.lines = view.NormalizeLines(f.Content)
+		if maxKB <= 0 || len(f.Content) <= maxKB*1024 {
+			msg.hl = syntax.HighlightLines(filepath.Base(rel), f.Content)
+		}
+		return msg
 	}
-	m.defPickPrevLines = view.NormalizeLines(f.Content)
-	if kb := m.cfg.Editor.MaxHighlightKB; kb <= 0 || len(f.Content) <= kb*1024 {
-		m.defPickPrevHl = syntax.HighlightLines(filepath.Base(c.rel), f.Content)
+}
+
+// handleDefPickPreview lands the async preview for the still-selected file.
+func (m Model) handleDefPickPreview(msg defPickPreviewMsg) (tea.Model, tea.Cmd) {
+	if !m.defPickOpen || msg.gen != m.defPickGen || msg.rel != m.defPickPrevRel {
+		return m, nil
 	}
-	return m
+	m.defPickPrevLines, m.defPickPrevHl = msg.lines, msg.hl
+	return m, nil
 }
 
 // handleDefPickKey drives the multi-definition picker overlay.
 func (m Model) handleDefPickKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
 	switch msg.String() {
 	case "esc":
 		m.defPickOpen = false
 	case "up":
 		m.defPickIndex = max(0, m.defPickIndex-1)
-		m = m.refreshDefPickPreview()
+		m, cmd = m.refreshDefPickPreview()
 	case "down":
 		m.defPickIndex = min(len(m.defPickItems)-1, m.defPickIndex+1)
-		m = m.refreshDefPickPreview()
+		m, cmd = m.refreshDefPickPreview()
 	case "enter":
 		m.defPickOpen = false
 		if len(m.defPickItems) > 0 {
@@ -213,14 +240,17 @@ func (m Model) handleDefPickKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m = m.jumpToLocation(c.rel, c.line, c.utf16Col)
 		}
 	}
-	return m, nil
+	return m, cmd
 }
 
-// definitionMsg carries an async textDocument/definition result. token labels
+// definitionMsg carries an async textDocument/definition result. rel tags the
+// file that was queried so an answer landing after a tab switch is dropped
+// (its cursor comparisons would run against the wrong buffer); token labels
 // the picker; col is the rune column that was queried (the references pivot
 // re-queries there); tryCols holds fallback columns to try when the answer is
 // empty; snapped marks a query at a snapped-to column rather than the cursor.
 type definitionMsg struct {
+	rel     string
 	token   string
 	col     int
 	tryCols []int
@@ -229,8 +259,10 @@ type definitionMsg struct {
 	err     error
 }
 
-// referencesMsg carries an async textDocument/references result.
+// referencesMsg carries an async textDocument/references result. rel guards
+// against tab switches like definitionMsg's.
 type referencesMsg struct {
+	rel   string
 	token string
 	locs  []lsp.Location
 	err   error
@@ -359,11 +391,12 @@ func (m Model) requestDefinition(token string, cx int, tryCols []int, snapped bo
 		return m, nil
 	}
 	path := m.openFile.Path
+	rel := m.openRel
 	line := m.edit.cy
 	utf16Col := lsp.UTF16Col(m.edit.lines[m.edit.cy], cx)
 	return m, func() tea.Msg {
 		locs, err := client.Definition(path, line, utf16Col)
-		return definitionMsg{token: token, col: cx, tryCols: tryCols, snapped: snapped, locs: locs, err: err}
+		return definitionMsg{rel: rel, token: token, col: cx, tryCols: tryCols, snapped: snapped, locs: locs, err: err}
 	}
 }
 
@@ -379,6 +412,9 @@ func (m Model) handleDefinition(msg definitionMsg) (tea.Model, tea.Cmd) {
 	// and fires the same async lookup, so its answer must land as well.
 	if m.openFile == nil || (m.mode != modeEdit && m.mode != modeDiff && m.mode != modeBlame) {
 		return m, nil
+	}
+	if msg.rel != m.openRel {
+		return m, nil // answer for a file the user already left
 	}
 	// LSP-strict: when a server is configured for this file type, its answer
 	// is final — no heuristic fallback that could jump somewhere plausible
@@ -403,7 +439,7 @@ func (m Model) handleDefinition(msg definitionMsg) (tea.Model, tea.Cmd) {
 	}
 	if len(others) > 0 {
 		return m.jumpToCandidates("definitions of "+msg.token, msg.token,
-			"no definition or path under cursor: "+msg.token, others), nil
+			"no definition or path under cursor: "+msg.token, others)
 	}
 	if onCursor {
 		return m.requestReferences(msg.token, msg.col)
@@ -448,11 +484,12 @@ func lspLookupError(err error) string {
 func (m Model) requestReferences(token string, cx int) (tea.Model, tea.Cmd) {
 	if client, ok := m.lsp.ClientFor(m.openFile.Path); ok {
 		path := m.openFile.Path
+		rel := m.openRel
 		line := m.edit.cy
 		utf16Col := lsp.UTF16Col(m.edit.lines[m.edit.cy], cx)
 		return m, func() tea.Msg {
 			locs, err := client.References(path, line, utf16Col)
-			return referencesMsg{token: token, locs: locs, err: err}
+			return referencesMsg{rel: rel, token: token, locs: locs, err: err}
 		}
 	}
 	m.errText = m.noServerError()
@@ -467,6 +504,9 @@ func (m Model) handleReferences(msg referencesMsg) (tea.Model, tea.Cmd) {
 	if m.openFile == nil || (m.mode != modeEdit && m.mode != modeDiff && m.mode != modeBlame) {
 		return m, nil
 	}
+	if msg.rel != m.openRel {
+		return m, nil // answer for a file the user already left
+	}
 	if msg.err != nil {
 		m.errText = lspLookupError(msg.err)
 		return m, nil
@@ -479,7 +519,7 @@ func (m Model) handleReferences(msg referencesMsg) (tea.Model, tea.Cmd) {
 		cands = append(cands, c)
 	}
 	return m.jumpToCandidates("references of "+msg.token, msg.token,
-		"no references found: "+msg.token, cands), nil
+		"no references found: "+msg.token, cands)
 }
 
 // jumpToLocation pushes the origin frame and lands on (rel, line, utf16Col).

@@ -603,6 +603,29 @@ func TestDocSyncDoesNotBlockOnFullPipe(t *testing.T) {
 
 // A stop that lands while start() is still spawning must leave the client
 // dead: start() may not resurrect it (ready) or leak the child process.
+// stop must return promptly against a server that stopped reading stdin: the
+// shutdown request is ctx-bounded, and a failed handshake skips the exit
+// notify (which would park on the wedged pipe) and goes straight to close.
+func TestStopBoundedWhenPeerStopsReading(t *testing.T) {
+	clientEnd, _ := pipePair() // server side never reads: every write parks
+	c := newServerClient("go", config.LSPServerConfig{}, "/proj", nil)
+	conn := NewConn(clientEnd, c.handle)
+	if !c.becomeReady(conn) {
+		t.Fatal("becomeReady refused on a fresh client")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		c.stop()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stop hung on a wedged pipe")
+	}
+}
+
 func TestStopDuringStartDoesNotResurrect(t *testing.T) {
 	catPath, err := exec.LookPath("cat")
 	if err != nil {

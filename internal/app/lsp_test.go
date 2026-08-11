@@ -126,7 +126,7 @@ func TestLSPDefinitionJumpAndFallback(t *testing.T) {
 	// pivots to references (an identifier with no definition is treated as its
 	// own declaration); an empty references answer reports cleanly, no residue.
 	m = key(m, ctrlKey('o'))
-	next, cmd = m.handleDefinition(definitionMsg{token: "nonexistentsymbolxyz"})
+	next, cmd = m.handleDefinition(definitionMsg{rel: m.openRel, token: "nonexistentsymbolxyz"})
 	m = next.(Model)
 	for cmd != nil {
 		next, cmd = m.Update(cmd())
@@ -168,7 +168,7 @@ func TestLSPDefinitionPickerMultipleHits(t *testing.T) {
 		{URI: lsp.PathToURI(filepath.Join(root, "lib", "util.ts")), Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 0}}},
 		{URI: lsp.PathToURI(filepath.Join(root, "main.go")), Range: lsp.Range{Start: lsp.Position{Line: 2, Character: 0}}},
 	}
-	next, _ := m.handleDefinition(definitionMsg{token: "x", locs: client.locs})
+	next, _ := m.handleDefinition(definitionMsg{rel: m.openRel, token: "x", locs: client.locs})
 	m = next.(Model)
 	if !m.defPickOpen || len(m.defPickItems) != 2 {
 		t.Fatalf("picker should open with 2 LSP hits: %v %d", m.defPickOpen, len(m.defPickItems))
@@ -195,7 +195,7 @@ func TestLSPReferencesFromDefinitionLine(t *testing.T) {
 		{URI: lsp.PathToURI(filepath.Join(root, "lib", "util.ts")), Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 0}}},
 		{URI: lsp.PathToURI(filepath.Join(root, "main.go")), Range: lsp.Range{Start: lsp.Position{Line: 3, Character: 1}}},
 	}
-	next, cmd := m.handleDefinition(definitionMsg{token: "main", locs: selfLoc})
+	next, cmd := m.handleDefinition(definitionMsg{rel: m.openRel, token: "main", locs: selfLoc})
 	m = next.(Model)
 	if cmd == nil {
 		t.Fatal("on-definition hit should chain a references request")
@@ -228,7 +228,7 @@ func TestLSPStrictNoHeuristicFallback(t *testing.T) {
 	// configured an empty LSP answer must not guess a jump — it pivots to a
 	// references request (a real LSP call, not an in-buffer guess) and does not
 	// move on its own.
-	next, cmd := m.handleDefinition(definitionMsg{token: "main"})
+	next, cmd := m.handleDefinition(definitionMsg{rel: m.openRel, token: "main"})
 	m = next.(Model)
 	if cmd == nil {
 		t.Fatal("empty definition on an identifier should pivot to references")
@@ -241,16 +241,41 @@ func TestLSPStrictNoHeuristicFallback(t *testing.T) {
 	}
 
 	// A still-starting server gets the friendly message.
-	next, _ = m.handleDefinition(definitionMsg{token: "x", err: errors.New("language server not ready")})
+	next, _ = m.handleDefinition(definitionMsg{rel: m.openRel, token: "x", err: errors.New("language server not ready")})
 	m = next.(Model)
 	if !strings.Contains(m.errText, "still starting") {
 		t.Fatalf("err: %q", m.errText)
 	}
 
 	// References are strict too.
-	next, _ = m.handleReferences(referencesMsg{token: "main"})
+	next, _ = m.handleReferences(referencesMsg{rel: m.openRel, token: "main"})
 	m = next.(Model)
 	if !strings.Contains(m.errText, "no references found") {
 		t.Fatalf("refs err: %q", m.errText)
+	}
+}
+
+// An answer tagged with a file the user already left is dropped whole — no
+// jump, no picker, no error. Its candidate filtering compares against
+// m.openRel and m.edit.cy, which now describe a different buffer.
+func TestLSPAnswerForOtherFileDropped(t *testing.T) {
+	m, client := newLSPTestModel(t)
+	m = m.openFileAt("main.go")
+	root := m.root
+	m.edit.cy, m.edit.cx = 3, 0
+
+	client.locs = []lsp.Location{
+		{URI: lsp.PathToURI(filepath.Join(root, "lib", "util.ts")), Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 0}}},
+	}
+	next, cmd := m.handleDefinition(definitionMsg{rel: "lib/util.ts", token: "x", locs: client.locs})
+	m = next.(Model)
+	if cmd != nil || m.openRel != "main.go" || m.defPickOpen || m.errText != "" {
+		t.Fatalf("stale-file definition must be a no-op: open=%q pick=%v err=%q", m.openRel, m.defPickOpen, m.errText)
+	}
+
+	next, _ = m.handleReferences(referencesMsg{rel: "lib/util.ts", token: "x", locs: client.locs})
+	m = next.(Model)
+	if m.openRel != "main.go" || m.defPickOpen || m.errText != "" {
+		t.Fatalf("stale-file references must be a no-op: open=%q pick=%v err=%q", m.openRel, m.defPickOpen, m.errText)
 	}
 }

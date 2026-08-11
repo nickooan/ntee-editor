@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -286,16 +287,21 @@ type Model struct {
 	splashFrame int
 
 	// Per-line highlight cache. A nil row renders plain; rows are spliced on
-	// line insert/join so indices stay aligned between full rescans.
+	// line insert/join so indices stay aligned between full rescans. hlPath +
+	// hlHash key the cache: refreshFileHighlights skips the whole-buffer
+	// re-tokenize when the same file content is already highlighted. Hash, not
+	// rev — newEditor resets rev, so a reopened file could false-hit on rev.
 	hlLines [][]view.HighlightSegment
-	hlRev   int
+	hlHash  string
 	hlPath  string
 
 	// LSP diagnostics, keyed by root-relative path.
 	diags map[string][]lsp.Diagnostic
 
 	// Definition/reference picker (Ctrl+J with multiple hits). The preview
-	// caches the selected candidate's file (re-read on file change only).
+	// caches the selected candidate's file (re-read on file change only);
+	// defPickGen guards its async load messages across picker sessions.
+	defPickGen   int
 	defPickOpen  bool
 	defPickTitle string
 	defPickToken string
@@ -343,13 +349,14 @@ type Model struct {
 	grepCursor     int // rune offset into grepQuery
 	grepIndex      int
 	grepResults    []grepHit
-	grepFiles      []grepFile // streams in per grepBatchMsg; released on close
-	grepLoading    bool       // snapshot batches still arriving
-	grepLoadBytes  int        // bytes loaded so far, for the maxGrepBytes cap
-	grepGen        int        // bumped per openGrep; drops stale loads
-	grepSearchGen  int        // bumped per query change; tags ticks + results
-	grepResultsGen int        // grepSearchGen of the displayed grepResults
-	grepPrevLines  []string   // selected file's lines, derived on demand
+	grepFiles      []grepFile     // streams in per grepBatchMsg; released on close
+	grepFileIndex  map[string]int // rel → grepFiles index; the renderer looks up per frame
+	grepLoading    bool           // snapshot batches still arriving
+	grepLoadBytes  int            // bytes loaded so far, for the maxGrepBytes cap
+	grepGen        int            // bumped per openGrep; drops stale loads
+	grepSearchGen  int            // bumped per query change; tags ticks + results
+	grepResultsGen int            // grepSearchGen of the displayed grepResults
+	grepPrevLines  []string       // selected file's lines, derived on demand
 	grepHlRel      string
 	grepHl         [][]view.HighlightSegment
 }
@@ -738,6 +745,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case grepResultsMsg:
 		return m.handleGrepResults(msg)
 
+	case grepPreviewMsg:
+		return m.handleGrepPreview(msg)
+
+	case defPickPreviewMsg:
+		return m.handleDefPickPreview(msg)
+
 	case definitionMsg:
 		return m.handleDefinition(msg)
 
@@ -920,8 +933,13 @@ func (m Model) quit() (tea.Model, tea.Cmd) {
 	m = m.recordCursor()      // persist the active file's cursor for next launch
 	m = m.stashDraftIfDirty() // unsaved edits survive a relaunch
 	m.saveSession()
-	m.lsp.ShutdownAll()
-	return m, tea.Quit
+	// The LSP shutdown handshake runs on the cmd goroutine (bounded inside
+	// ShutdownAll), not in the key handler — a wedged server must not be able
+	// to freeze the UI on its way out.
+	return m, func() tea.Msg {
+		m.lsp.ShutdownAll()
+		return tea.QuitMsg{}
+	}
 }
 
 func (m Model) saveSession() {
@@ -943,6 +961,14 @@ type frameCache struct {
 	treeSeq int
 	treeKey string
 	entries []filetree.FileTreeEntry
+
+	// Query-bar suggestion memo (keyed by the typed bar text): the fuzzy
+	// filter over the whole corpus is the dominant per-keystroke cost in home
+	// mode, and the key handler and View must not both pay it.
+	sugOk       bool
+	sugSeq      int
+	sugKey      string
+	suggestions []filetree.InputSuggestion
 }
 
 // invalidateTreeEntries drops the per-message tree memo. Handlers that mutate
@@ -1069,6 +1095,7 @@ func (m Model) openFileAt(rel string) Model {
 func (m Model) refreshFileHighlights() Model {
 	if m.openFile == nil {
 		m.fileLines, m.hlLines = nil, nil
+		m.hlPath, m.hlHash = "", "" // a later reopen must not skip on the stale key
 		return m
 	}
 	content := m.openFile.Content
@@ -1080,13 +1107,22 @@ func (m Model) refreshFileHighlights() Model {
 	if md == modeInspect {
 		md = m.inspectPrevMode
 	}
+	var hash string
 	if md == modeEdit || md == modeSearch || md == modeSearchExec ||
 		md == modeDiff || md == modeConflict || md == modeOpenAPI ||
 		md == modeBlame || md == modeGraphQL {
-		content = m.edit.content()
+		content, hash = m.edit.contentHashed()
+	} else {
+		hash = store.ContentHash(content)
+	}
+	// Identical content already highlighted (save right after a flushed burst,
+	// Esc with no edits, undo back to a rendered state): both caches are
+	// current, skip the whole-buffer re-tokenize.
+	if m.hlPath == m.openRel && m.hlHash == hash {
+		return m
 	}
 	m.fileLines = view.NormalizeLines(content)
-	m.hlRev = m.edit.rev
+	m.hlHash = hash
 	m.hlPath = m.openRel
 	if kb := m.cfg.Editor.MaxHighlightKB; kb > 0 && len(content) > kb*1024 {
 		m.hlLines = nil // too big: render plain
@@ -1101,6 +1137,7 @@ func (m Model) refreshFileHighlights() Model {
 // segStyles (render.go) needs no reset — it is keyed by color hex — and the
 // syntax package's entry cache is reset by SetStyle itself.
 func (m Model) invalidateHighlightCaches() Model {
+	m.hlHash = "" // content is unchanged but its colors are not: force the rescan
 	m = m.refreshFileHighlights()
 	if m.searchHl != nil && m.openFile != nil { // frozen at enterSearch
 		m.searchHl = syntax.HighlightLines(m.openFile.FileName, m.searchContent)
@@ -1122,10 +1159,15 @@ func (m Model) hlMarkLine(i int) Model {
 // hlInsertLine splices a plain row at i so cached rows below a new line keep
 // their indices until the next full rescan.
 func (m Model) hlInsertLine(i int) Model {
-	if m.hlLines == nil || i < 0 || i > len(m.hlLines) {
+	return m.hlInsertLines(i, 1)
+}
+
+// hlInsertLines splices n plain rows at i in one pass (bulk paste).
+func (m Model) hlInsertLines(i, n int) Model {
+	if m.hlLines == nil || i < 0 || i > len(m.hlLines) || n < 1 {
 		return m
 	}
-	m.hlLines = append(m.hlLines[:i], append([][]view.HighlightSegment{nil}, m.hlLines[i:]...)...)
+	m.hlLines = slices.Insert(m.hlLines, i, make([][]view.HighlightSegment, n)...)
 	return m
 }
 

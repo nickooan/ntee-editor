@@ -51,28 +51,30 @@ Three design rules shape almost every function here:
 - `treeEntries` builds the sidebar entries — a stat per expanded directory plus gitignore matching — memoized per message through the shared `frameCache`, so the key handler, the sidebar renderer, and the query popup all reuse one walk per Update+View cycle. `invalidateTreeEntries` drops the memo when a handler mutates the filesystem mid-message (`:touch`/`:mkdir`/`:rm`).
 - `sidebarCommand` and `highlightedSidebarCommand` encode the query bar's three-way state split: the confirmed selection drives directory *expansion*, keyboard/popup navigation drives only the *highlight*, and an open fuzzy finder overrides both.
 - `openFileAt` is the one deliberate-open path: stat-first (a missing file errors instead of becoming a tab), stashes the outgoing buffer as a draft, closes/opens LSP documents, clears any diff/conflict/preview state, starts a fresh edit session, restores a stashed draft and the remembered cursor, and lands in edit mode.
-- `refreshFileHighlights` rebuilds the line and syntax-highlight caches from the buffer (chroma is stateful across lines, so it's whole-buffer work — run at burst boundaries, never per keystroke); files over `MaxHighlightKB` render plain. `hlMarkLine`/`hlInsertLine`/`hlRemoveLine` keep the per-line cache index-aligned between full rescans. `invalidateHighlightCaches` recomputes everything after a theme switch.
+- `refreshFileHighlights` rebuilds the line and syntax-highlight caches from the buffer (chroma is stateful across lines, so it's whole-buffer work — run at burst boundaries, never per keystroke); files over `MaxHighlightKB` render plain. It skips the whole rescan when the same file content is already highlighted, keyed by `hlPath` + a content hash (hash, not `edit.rev` — `newEditor` resets rev on reopen, so a rev compare could false-hit), so a save right after a flushed burst or an Esc with no edits costs nothing. `hlMarkLine`/`hlInsertLine`/`hlInsertLines`/`hlRemoveLine` keep the per-line cache index-aligned between full rescans. `invalidateHighlightCaches` clears the content key first (same bytes, new colors) and recomputes everything after a theme switch.
 - `handlePaste` routes bracketed-paste text to whichever input has focus, collapsing newlines for the single-line bars; the read-only modes take no paste at all.
-- `quit` persists cursor, draft, and session, shuts down the language servers, and returns `tea.Quit`.
+- `quit` persists cursor, draft, and session, then shuts the language servers down inside the returned `tea.Cmd` (bounded in `ShutdownAll`) before yielding `tea.QuitMsg` — a wedged server must not freeze the UI on the way out.
 
 *Plus small helpers: `versionTag`, `inBarMode`, `gitStatusTick`, `splashTick`, `truncatedNotice`, `keyText`, `pasteLine`, `saveSession`, `highlightedEntryIndex` — formatting, tick constructors, and thin lookups.*
 
 #### matchcache.go
 
 - `matchCache.get` memoizes `view.FindSearchMatches` per (content, query) — search mode re-derives the match list in the status line, the body, and every navigation key, so this turns 3–4 full-content regex scans per keystroke into one. Shared by pointer across Model copies.
+- `matchCache.matchesByLine` / `matchCache.splitLines` memoize the render-side derivatives under the same keys: the per-line match buckets and the content split into lines. The search body (and the document previews) rebuilt both from scratch every frame — an O(file) split per render on a large buffer.
 - `regexCache.multiline` does the same for one compiled regex (the grep overlay's preview would otherwise recompile per frame).
 
 *Plus: `searchMatches` — the Model-level accessor over `searchMC`.*
 
 #### keys_query.go
 
-- `handleQueryKey` is the home-mode handler: typing edits the bar (expanding the tree), Shift+arrows walk the popup or sidebar highlight, plain arrows scroll the previewed file, Enter submits, Esc climbs to the parent directory. It calls `ensureCorpus` first so the fuzzy suggestions always have an index to read.
+- `handleQueryKey` is the home-mode handler: typing edits the bar (expanding the tree), Shift+arrows walk the popup or sidebar highlight, plain arrows scroll the previewed file, Enter submits, Esc climbs to the parent directory. It calls `ensureCorpus` first so the fuzzy suggestions always have an index to read, and computes suggestions lazily — only the branches that read the popup pay for the corpus filter; typing branches leave it to View, which computes (and memoizes) the fresh one.
+- `queryInputSuggestions` completes the typed bar text (exact/prefix over the visible tree, fuzzy over the full corpus). This is the dominant per-keystroke cost in home mode, so it's memoized per message through `frameCache` keyed by the typed text — the key handler and View share one filter pass instead of each running their own.
 - `submitQuery` acts on Enter: inline fs commands first, then `:` commands, then the resolved target — a directory is confirmed (which is what drives expansion), a file opens straight into edit mode.
 - `parseInlineFs` recognizes the bar's filesystem commands (`<path> :mkdir <rel>`, `:touch`, `<path> :rm`), rejecting anything absolute or escaping the root; `inlineFsPathPrefix` lets the sidebar keep highlighting the target path while the command suffix is still being typed.
 - `queryCreate` performs mkdir/touch and enters the result (a new file opens for editing). `armRemoveConfirm` opens the `:rm` confirmation modal — deletion is irreversible, so Enter alone never deletes. `queryRemove` deletes and then `dropRemovedPath` forgets every tab, draft, and cursor under the removed path (an open buffer over a deleted file would silently resurrect it on save, so the editor resets instead).
 - `adoptPreview` promotes a navigated highlight into the editable text so the next keystroke continues from it — the glue between navigation and typing.
 
-*Plus small helpers: `queryInputSuggestions`, `isInlineFsVerb`, `moveInputSuggestion`, `moveSidebarSelection`, `moveQueryToParentDirectory` — suggestion plumbing and highlight movement.*
+*Plus small helpers: `isInlineFsVerb`, `moveInputSuggestion`, `moveSidebarSelection`, `moveQueryToParentDirectory` — suggestion plumbing and highlight movement.*
 
 ### Editing & history
 
@@ -80,7 +82,7 @@ Three design rules shape almost every function here:
 
 The `editor` struct is a minimal multi-line buffer: `lines`, cursor, a `dirty` flag, and `rev` — a mutation counter every mutator must bump so the highlight cache knows when to rescan.
 
-- `insert`, `newline`, `backspace`, `move` are the primitive mutations; typing over a selection replaces it because `insert` calls `deleteSelection` first.
+- `insert`, `newline`, `backspace`, `move` are the primitive mutations; typing over a selection replaces it because `insert` calls `deleteSelection` first. `insertLines` is the bulk multi-line splice paste uses — one `slices.Insert` regardless of line count, where per-line stitching was O(pasted × file lines).
 - `contentHashed` joins and hashes the buffer at most once per `rev` — burst boundaries need content+hash for dedupe, snapshot writes, and LSP sync, and without the memo each caller re-joined the whole file.
 - `expandSelection` is the progressive Ctrl+A: first press selects the word under a stable anchor, the next the whole line (which latches line-wise mode so Shift+↑/↓ can extend across lines via `extendLineSelection`). `deleteSelection` handles both span and line-wise selections as one operation.
 - `wordRange`, `identifierAt`, `identifierCols` are the token finders shared with jump/complete: whitespace-word, identifier run, and nearest-identifier-columns respectively.
@@ -92,7 +94,7 @@ The `editor` struct is a minimal multi-line buffer: `lines`, cursor, a `dirty` f
 - `handleEditKey` is the edit-mode keymap. The interesting choreography: the completion popup consumes its keys first; Esc peels state in order (signature pin → selection → the mode itself, where discarding unsaved edits deletes the draft and pushes a snapshot so one Ctrl+Z recovers the text); every buffer mutation marks its highlight line and sets `snapDirty`; and word boundaries (space, enter, cursor line change) call `flushBurst` so undo coalesces typing bursts.
 - `saveEdit` (Ctrl+S and `:w`'s shared path) writes the buffer through `filetree.WriteViewFile`, pushes a "save" snapshot, deletes the now-obsolete draft, and notifies the language server.
 - `pageEdit` pages with a one-line overlap, recomputing the viewport top from the cursor because `fileScrollY` goes stale during arrow navigation; `moveEditCursor` treats leaving a line as a burst boundary.
-- `editPaste` splits pasted text on newlines and stitches it in with `newline()` per segment, with highlight-cache upkeep, as one undo step.
+- `editPaste` splits pasted text on newlines and splices the whole block in with one `insertLines` call (plus one bulk highlight-cache splice), as one undo step.
 
 *Plus small helpers: `contentHeight`, `tabRows` — layout arithmetic.*
 
@@ -291,14 +293,15 @@ Repo-wide content search (Ctrl+G). Everything expensive is async and generation-
 - `appendGrepHits` scans whole content instead of line-at-a-time (regexp's literal-prefix fast path), resuming at the next line start after each hit so same-line matches dedupe and empty-width matches still terminate.
 - `handleGrepKey` supports a *multi-line* query (Ctrl+J inserts a newline; ↑/↓ move within the query before falling through to the result list); Enter opens the selected hit at its line.
 - `closeGrep` releases the snapshot — it can hold hundreds of MB.
-- `refreshGrepPreview` caches the selected hit's split lines and syntax highlighting, re-tokenizing only when the selection changes file.
+- `refreshGrepPreview` keeps the selected hit's preview current: the line split lands synchronously (the preview text must render this frame) and the whole-file tokenize runs in a `tea.Cmd`, landing as `grepPreviewMsg` guarded by `grepGen` + the selected rel — a per-arrow-key synchronous tokenize stalled key handling on large files. Rows render plain until it lands.
+- `grepSelectedFile` resolves the selection via `grepFileIndex` (rel → snapshot index, maintained as batches land) — the renderer calls it every frame, so a linear scan over up to 10k files was per-frame work.
 
-*Plus small helpers: `handleGrepTick`, `handleGrepResults`, `buildLineStarts`, `lineForOffset`, `grepSelectedFile`, `grepPaste`, `grepInsert`, `grepLineCol`, `grepOffsetAt`, `grepMoveCursorLine` — tick/result landing, offset math, and query-cursor plumbing.*
+*Plus small helpers: `handleGrepTick`, `handleGrepResults`, `handleGrepPreview`, `buildLineStarts`, `lineForOffset`, `grepPaste`, `grepInsert`, `grepLineCol`, `grepOffsetAt`, `grepMoveCursorLine` — tick/result landing, offset math, and query-cursor plumbing.*
 
 #### jump.go (definition picker)
 
 - `jumpToCandidates` handles the 0/1/many outcome shared by every lookup: zero errors, one jumps, many open the picker overlay (capped at 50) with a preview and a precompiled token-highlight regex.
-- `refreshDefPickPreview` loads and highlights the selected candidate's file for the preview, re-reading only when the selection changes file.
+- `refreshDefPickPreview` fires the selected candidate's preview load — a disk read plus whole-file tokenize — as a `tea.Cmd`, landing as `defPickPreviewMsg` guarded by `defPickGen` + the selected rel (each arrow key changing the file used to pay both synchronously in the key handler). Re-fires only when the selection changes file.
 
 *Plus: `handleDefPickKey` — ↑/↓/Enter/Esc over the picker.*
 
@@ -307,7 +310,7 @@ Repo-wide content search (Ctrl+G). Everything expensive is async and generation-
 - `renderGrepOverlay` is the largest overlay: top ~60% a syntax-colored preview of the selected hit, a divider, then the (possibly multi-line) query input and the result list, with loading/searching states in both panes.
 - `renderPreviewRows` renders a highlighted code window with the target line ~40% down and regex matches overlaid — shared by the grep overlay and the definition picker, which is why the two previews look identical.
 - `renderGrepInputRows` renders the multi-line grep query with the cursor on its own line/column, windowing long queries around the cursor.
-- `renderFuzzyOverlay`/`renderFuzzyRow` draw the Ctrl+P/Ctrl+U finder, computing matched-rune bold positions only for the visible rows rather than during filtering.
+- `renderFuzzyOverlay`/`renderFuzzyRow` draw the Ctrl+P/Ctrl+U finder, computing matched-rune bold positions only for the visible rows rather than during filtering, and rendering contiguous matched/unmatched runs in one lipgloss call each (a call per rune was width×rows ANSI emissions per frame).
 - `renderSplash` is the cold-start page: name, version, and an animated indexing spinner while the index builds.
 
 *Plus small helpers: `renderMessageOverlay`, `renderConfirmRmOverlay`, `renderDefPickOverlay` — centered modal boxes.*
@@ -316,7 +319,7 @@ Repo-wide content search (Ctrl+G). Everything expensive is async and generation-
 
 #### complete.go
 
-- `requestCompletion` syncs the server to the current buffer via a direct `DidChange` (not `flushBurst` — completion must not fragment the undo history mid-word) and fires an async `textDocument/completion`; `handleCompletion` drops the answer if the cursor line or identifier start moved while it was in flight.
+- `requestCompletion` syncs the server to the current buffer via a direct `DidChange` (not `flushBurst` — completion must not fragment the undo history mid-word; the content comes from the rev-keyed `contentHashed` memo, not a fresh join) and fires an async `textDocument/completion`; `handleCompletion` drops the answer if the file, cursor line, or identifier start moved while it was in flight.
 - `filterCompletions` narrows the server's raw list by the identifier prefix under the cursor, sorted by SortText; `acceptCompletion` replaces the prefix by selecting it and letting `insert` overwrite.
 - `afterEditType` is the popup lifecycle after each typed rune: `.` and identifier chars (re)request or refilter, `(`/`)` manage the signature pin, anything else closes the popup and lifts an Esc suppression.
 - `pinSignatureOnParen` implements the pinned signature row: typing `(` after a known function keeps a one-row label+signature overlay visible while arguments are typed, matching the word before the paren against the popup's candidates (or the just-accepted item). `sigCloseParen`, `sigAfterBackspace`, and `sigCheckCursor` track paren depth and cursor position so the pin drops exactly when the call is closed or left.
@@ -326,7 +329,7 @@ Repo-wide content search (Ctrl+G). Everything expensive is async and generation-
 #### jump.go (Ctrl+J / Ctrl+O)
 
 - `jumpToReference` (Ctrl+J) is a priority ladder: a path-shaped token that names a real file opens it (servers don't resolve bare paths); a cursor on an identifier queries `textDocument/definition`; a cursor on nothing tries a quoted path elsewhere on the line, then snaps to the nearest identifiers and retries (bounded at 4).
-- `handleDefinition` lands the async answer — LSP-strict: when a server exists its answer is final, no plausible-but-wrong heuristic fallback. A definition resolving to the cursor's own line (or an empty answer on an identifier the cursor sits on, as kotlin-language-server produces on declarations) pivots to `requestReferences` — the "who uses this declaration?" question. `handleReferences` lands that, excluding the definition line itself. Both accept diff/blame modes too, since Ctrl+J there fires the same lookups.
+- `handleDefinition` lands the async answer — LSP-strict: when a server exists its answer is final, no plausible-but-wrong heuristic fallback. A definition resolving to the cursor's own line (or an empty answer on an identifier the cursor sits on, as kotlin-language-server produces on declarations) pivots to `requestReferences` — the "who uses this declaration?" question. `handleReferences` lands that, excluding the definition line itself. Both accept diff/blame modes too, since Ctrl+J there fires the same lookups, and both drop an answer whose tagged `rel` no longer matches the open file — a tab switch mid-flight would otherwise interpret it against the wrong buffer.
 - `resolveJumpPath` tries a token as a file path relative to the current file's directory then the root, stat-first and root-jailed, probing configured language extensions and `index.*` files for extensionless imports.
 - `jumpLinePath` scans the cursor line's quoted spans for one that resolves to a real file — the fallback that makes Ctrl+J work on import lines even when no language server answers.
 - `jumpToLocation` pushes the origin frame (including a diff/blame-review origin, base and position) and lands at the target — same-file jumps just move the cursor; cross-file jumps go through `openJumpFile`, and a failed jump leaves no stack residue.
@@ -349,7 +352,7 @@ Diagnostics themselves land in `Update`'s `lsp.DiagnosticsMsg` branch (app.go), 
 - `renderSearchLine` renders a line with syntax segments, match backgrounds, and replace-preview spans layered by priority (preview > matches > syntax), batching consecutive same-style columns into runs; it serves the search view, the previews, and both overlay code panes.
 - `overlayCompletion`/`overlaySignature` splice the dropdown/signature box onto rendered rows with ANSI-aware slicing, anchored at the identifier/call column, flipping above the cursor when there's no room below; `completionLayout`/`completionRow` size and draw its label/signature/origin columns.
 - `renderSegments`/`renderSegmentsBg` window styled segments through a rune range, threading a row background so diff/conflict tints cover text and EOL padding alike; `segStyleWithBg` memoizes the lipgloss style per (color, background, attrs) combination in the package-level `segStyles` map — renderSegments runs for every visible row of every frame.
-- `renderSearch` draws the search body: scrolls to the focused match (or holds the edit position when there are no matches yet) and, in search-exec mode, splices the live replace preview in.
+- `renderSearch` draws the search body: scrolls to the focused match (or holds the edit position when there are no matches yet) and, in search-exec mode, splices the live replace preview in. The line split and per-line match buckets come from `matchCache`'s memos rather than being rebuilt per frame.
 - The bottom of the file holds the entire Gruvbox-derived palette and every lipgloss style — the single place colors are defined.
 
 *Plus small helpers: `padStatusRows`, `diagSummary`, `diagAtLine`, `withNotice`, `renderSidebar`, `renderExecSugs`, `renderQueryMain`, `renderQuerySuggestions`, `renderTabStrip`, `fileViewportTop`, `renderContentLine`, `plainWindow`, `plainWindowStyled`, `renderSelectedLine`, `clampByte`, `renderInputLine`, `renderInputLineStyled`, `padTo`, `truncateRunes`, `pad`, `segStyleFor`, `colorFor` — row assembly, windows, input-line drawing, and padding/truncation utilities.*

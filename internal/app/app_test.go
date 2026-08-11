@@ -290,6 +290,29 @@ func TestEscFromEditReturnsToQuery(t *testing.T) {
 	}
 }
 
+// refreshFileHighlights skips the whole-buffer re-tokenize when the same file
+// content is already highlighted (save right after a flushed burst, Esc with
+// no edits, undo back to a rendered state); an edit forces the rescan.
+func TestRefreshFileHighlightsSkipsUnchangedContent(t *testing.T) {
+	m, _ := newTestModel(t, nil)
+	m = m.openFileAt("main.go")
+	first := m.hlLines
+	if len(first) == 0 {
+		t.Fatal("go file should highlight")
+	}
+
+	m = m.refreshFileHighlights()
+	if &m.hlLines[0] != &first[0] {
+		t.Fatal("identical content must reuse the cached highlight rows")
+	}
+
+	m.edit.insert("x")
+	m = m.refreshFileHighlights()
+	if len(m.hlLines) == 0 || &m.hlLines[0] == &first[0] {
+		t.Fatal("changed content must re-tokenize")
+	}
+}
+
 func TestHeaderShowsVersion(t *testing.T) {
 	m, _ := newTestModel(t, nil)
 	frame := ansi.Strip(m.render())

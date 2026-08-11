@@ -149,7 +149,59 @@ func TestRevBumpsOnEveryMutation(t *testing.T) {
 	e.insert("b")
 	e.newline()
 	e.backspace()
-	if e.rev != start+3 {
-		t.Fatalf("rev = %d, want %d", e.rev, start+3)
+	e.insertLines([]string{"x", "y"})
+	if e.rev != start+4 {
+		t.Fatalf("rev = %d, want %d", e.rev, start+4)
+	}
+}
+
+// insertLines is the bulk paste splice: first segment joins the head of the
+// cursor line, last segment takes its tail, middles land as whole lines.
+func TestEditorInsertLines(t *testing.T) {
+	e := newEditor("abcXYZ\nrest")
+	e.cx = 3
+	e.insertLines([]string{"1", "2", "3"})
+	if e.content() != "abc1\n2\n3XYZ\nrest" {
+		t.Fatalf("content: %q", e.content())
+	}
+	if e.cy != 2 || e.cx != 1 {
+		t.Fatalf("cursor: cy=%d cx=%d", e.cy, e.cx)
+	}
+
+	// A single segment behaves exactly like insert.
+	e = newEditor("ab")
+	e.cx = 1
+	e.insertLines([]string{"-"})
+	if e.content() != "a-b" || e.cy != 0 || e.cx != 2 {
+		t.Fatalf("single segment: %q cy=%d cx=%d", e.content(), e.cy, e.cx)
+	}
+
+	// A trailing empty segment leaves the cursor at the start of the tail line.
+	e = newEditor("tail")
+	e.cx = 0
+	e.insertLines([]string{"top", ""})
+	if e.content() != "top\ntail" || e.cy != 1 || e.cx != 0 {
+		t.Fatalf("trailing newline: %q cy=%d cx=%d", e.content(), e.cy, e.cx)
+	}
+}
+
+// editPaste splices a multi-line paste in one pass and keeps the highlight
+// cache's row indices aligned with the buffer.
+func TestEditPasteMultiline(t *testing.T) {
+	m, _ := newTestModel(t, nil)
+	m = m.openFileAt("main.go")
+	m.edit.cy, m.edit.cx = 1, 0 // the blank line after "package main"
+
+	next, _ := m.editPaste("one\r\ntwo\rthree")
+	m = next.(Model)
+	want := "package main\none\ntwo\nthree\nfunc main() {\n}\n"
+	if got := m.edit.content(); got != want {
+		t.Fatalf("paste result:\n%q\nwant:\n%q", got, want)
+	}
+	if m.edit.cy != 3 || m.edit.cx != 5 {
+		t.Fatalf("cursor: cy=%d cx=%d", m.edit.cy, m.edit.cx)
+	}
+	if len(m.hlLines) != len(m.edit.lines) {
+		t.Fatalf("highlight rows %d != buffer lines %d", len(m.hlLines), len(m.edit.lines))
 	}
 }

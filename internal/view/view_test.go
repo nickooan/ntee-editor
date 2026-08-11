@@ -19,6 +19,15 @@ func TestNormalizeLinesCRLF(t *testing.T) {
 	}
 }
 
+func TestNormalizeLinesLoneCR(t *testing.T) {
+	// A bare \r is a line break too (classic-Mac remnants, stray control
+	// bytes) — it must never survive into a rendered line.
+	lines := NormalizeLines("a\rb\r\nc")
+	if len(lines) != 3 || lines[0] != "a" || lines[1] != "b" || lines[2] != "c" {
+		t.Fatalf("lone CR normalize: %#v", lines)
+	}
+}
+
 func TestFindSearchMatchesByteOffsetsUTF8(t *testing.T) {
 	// "é" is 2 bytes: the match offsets must be byte positions.
 	matches := FindSearchMatches("héllo hello", "llo")
@@ -30,6 +39,23 @@ func TestFindSearchMatchesByteOffsetsUTF8(t *testing.T) {
 	}
 	if matches[1].Start != 9 {
 		t.Fatalf("second match should start at byte 9, got %d", matches[1].Start)
+	}
+}
+
+// BuildMatchesByLine relies on FindSearchMatches emitting matches line by line
+// with increasing starts — the buckets carry no sort of their own.
+func TestBuildMatchesByLineBucketsStaySorted(t *testing.T) {
+	matches := FindSearchMatches("ab ab ab\nxx ab", "ab")
+	byLine := BuildMatchesByLine(matches)
+	if len(byLine[0]) != 3 || len(byLine[1]) != 1 {
+		t.Fatalf("buckets: %+v", byLine)
+	}
+	for line, bucket := range byLine {
+		for i := 1; i < len(bucket); i++ {
+			if bucket[i-1].Start >= bucket[i].Start {
+				t.Fatalf("line %d bucket out of order: %+v", line, bucket)
+			}
+		}
 	}
 }
 

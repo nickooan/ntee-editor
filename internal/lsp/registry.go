@@ -21,9 +21,15 @@ type Manager struct {
 	root    string
 	extLang map[string]string // ".go" → "go"
 
+	// Notices reach the program through a single dispatcher goroutine: emit
+	// only appends to queued and signals wake. The sink is program.Send, whose
+	// channel is unbuffered and drained by the goroutine that runs Update — a
+	// synchronous sink call from the UI goroutine (ClientFor fires there on
+	// every burst boundary) would deadlock the editor.
 	sinkMu sync.Mutex
 	sink   func(any)
 	queued []any
+	wake   chan struct{}
 
 	// rootCache memoizes FindProjectRoot per file directory (13 marker stats
 	// per level, otherwise repeated on every doc-sync call). Lock-free; no
@@ -37,11 +43,6 @@ type Manager struct {
 	disabled map[string]string // language → reason it is off ("" / absent = usable)
 	restarts map[string]int    // rapid dead-server replacements per language (capped)
 	override map[string]bool   // language → runtime enable overriding config (inspection mode)
-	// notices collects messages produced under mu; emitting while holding mu
-	// can deadlock — the sink is program.Send (unbuffered), and the UI
-	// goroutine it hands to may itself be waiting on mu (View → Statuses).
-	// getOrStart/Enable drain this after unlocking.
-	notices []any
 }
 
 // maxServerRestarts bounds how many times a language's crashed server is
@@ -80,15 +81,18 @@ func NewManager(cfg config.Config, root string) *Manager {
 			disabled[lang] = reason
 		}
 	}
-	return &Manager{
+	m := &Manager{
 		cfg:      cfg,
 		root:     root,
 		extLang:  extLang,
+		wake:     make(chan struct{}, 1),
 		clients:  map[string]*serverClient{},
 		disabled: disabled,
 		restarts: map[string]int{},
 		override: map[string]bool{},
 	}
+	go m.dispatchNotices()
+	return m
 }
 
 // bridgeCycleReason follows lang's bridge.To chain and reports a disable
@@ -113,31 +117,60 @@ func bridgeCycleReason(langs map[string]config.LanguageConfig, lang string) stri
 	}
 }
 
-// SetSink connects the manager to the running program (program.Send) and
-// flushes anything emitted during startup.
+// maxQueuedNotices bounds the undelivered notice buffer: notices are rare, so
+// hitting the cap means the program stopped draining — dropping is better than
+// growing without bound.
+const maxQueuedNotices = 64
+
+// SetSink connects the manager to the running program (program.Send); anything
+// emitted during startup is flushed by the dispatcher once Run starts draining.
 func (m *Manager) SetSink(sink func(any)) {
 	m.sinkMu.Lock()
 	m.sink = sink
-	queued := m.queued
-	m.queued = nil
 	m.sinkMu.Unlock()
-	for _, msg := range queued {
-		sink(msg)
+	m.wakeDispatcher()
+}
+
+// emit hands a message to the dispatcher goroutine. Never blocks, so it is
+// safe from any goroutine — including the UI goroutine, where a direct
+// program.Send would deadlock.
+func (m *Manager) emit(msg any) {
+	m.sinkMu.Lock()
+	if len(m.queued) < maxQueuedNotices {
+		m.queued = append(m.queued, msg)
+	}
+	m.sinkMu.Unlock()
+	m.wakeDispatcher()
+}
+
+func (m *Manager) wakeDispatcher() {
+	select {
+	case m.wake <- struct{}{}:
+	default:
 	}
 }
 
-func (m *Manager) emit(msg any) {
-	m.sinkMu.Lock()
-	sink := m.sink
-	if sink == nil {
-		if len(m.queued) < 64 {
-			m.queued = append(m.queued, msg)
+// dispatchNotices is the single delivery goroutine: it drains queued in order
+// and calls the sink outside the lock. One goroutine per Manager, alive for
+// the process — after the program exits, program.Send returns immediately, so
+// late notices drain harmlessly.
+func (m *Manager) dispatchNotices() {
+	for range m.wake {
+		for {
+			m.sinkMu.Lock()
+			if m.sink == nil || len(m.queued) == 0 {
+				m.sinkMu.Unlock()
+				break
+			}
+			sink := m.sink
+			queued := m.queued
+			m.queued = nil
+			m.sinkMu.Unlock()
+			for _, msg := range queued {
+				sink(msg)
+			}
 		}
-		m.sinkMu.Unlock()
-		return
 	}
-	m.sinkMu.Unlock()
-	sink(msg)
 }
 
 // ClientFor resolves (lazily starting) the server for a file's language.
@@ -169,18 +202,12 @@ func (m *Manager) projectRootFor(path string) string {
 	return root
 }
 
-// getOrStart is getOrStartLocked plus the lock and the deferred notice drain
-// — every notice produced under m.mu is emitted only after it is released.
+// getOrStart is getOrStartLocked plus the lock. Notices produced under m.mu
+// are fine: emit never calls the sink, it only queues for the dispatcher.
 func (m *Manager) getOrStart(lang, repoRoot string) (*serverClient, bool) {
 	m.mu.Lock()
-	c, ok := m.getOrStartLocked(lang, repoRoot)
-	notices := m.notices
-	m.notices = nil
-	m.mu.Unlock()
-	for _, n := range notices {
-		m.emit(n)
-	}
-	return c, ok
+	defer m.mu.Unlock()
+	return m.getOrStartLocked(lang, repoRoot)
 }
 
 // UnavailableReason explains why ClientFor fails for path: an unmapped
@@ -230,10 +257,10 @@ func (m *Manager) getOrStartLocked(lang, repoRoot string) (*serverClient, bool) 
 		m.restarts[lang]++
 		if m.restarts[lang] >= maxServerRestarts {
 			m.disabled[lang] = lang + " lsp crashed repeatedly — disabled for this session (restart ntee to retry)"
-			m.notices = append(m.notices, NoticeMsg{Text: m.disabled[lang]})
+			m.emit(NoticeMsg{Text: m.disabled[lang]})
 			return nil, false
 		}
-		m.notices = append(m.notices, NoticeMsg{Text: "restarting " + lang + " lsp"})
+		m.emit(NoticeMsg{Text: "restarting " + lang + " lsp"})
 	}
 	lc, ok := m.cfg.Languages[lang]
 	enabled := ok && (lc.IsEnabled() || m.override[lang])
@@ -243,7 +270,7 @@ func (m *Manager) getOrStartLocked(lang, repoRoot string) (*serverClient, bool) 
 	}
 	if _, err := resolveBinary(lc.LSP.Command); err != nil {
 		m.disabled[lang] = lc.LSP.Command + " not found — try: ntee --prepare-lsp"
-		m.notices = append(m.notices, NoticeMsg{Text: lc.LSP.Command + " not found — LSP disabled for " + lang})
+		m.emit(NoticeMsg{Text: lc.LSP.Command + " not found — LSP disabled for " + lang})
 		return nil, false
 	}
 	c := newServerClient(lang, *lc.LSP, repoRoot, m.emit)
@@ -383,12 +410,7 @@ func (m *Manager) Enable(lang string) (bool, string) {
 	m.override[lang] = true
 	_, ok := m.getOrStartLocked(lang, m.root)
 	reason := m.disabled[lang]
-	notices := m.notices
-	m.notices = nil
 	m.mu.Unlock()
-	for _, n := range notices {
-		m.emit(n)
-	}
 	if !ok {
 		return false, reason
 	}
@@ -405,10 +427,20 @@ func (m *Manager) Disable(lang string) {
 	m.disabled[lang] = "disabled in config"
 	m.mu.Unlock()
 	if c != nil {
-		c.stop() // outside m.mu, mirroring ShutdownAll
+		// The client is already detached and flagged disabled; the handshake is
+		// best-effort cleanup, kept off the caller (a key handler) so a wedged
+		// server can't freeze the UI.
+		go c.stop()
 	}
 }
 
+// shutdownAllTimeout bounds ShutdownAll as a whole: each stop() has its own
+// grace periods, but quit must return even if a handshake wedges.
+const shutdownAllTimeout = 2 * time.Second
+
+// ShutdownAll stops every running server in parallel and returns once all
+// handshakes finish or the shared deadline passes — stragglers are left to
+// their kill timers and process exit.
 func (m *Manager) ShutdownAll() {
 	m.mu.Lock()
 	clients := make([]*serverClient, 0, len(m.clients))
@@ -417,7 +449,21 @@ func (m *Manager) ShutdownAll() {
 	}
 	m.clients = map[string]*serverClient{}
 	m.mu.Unlock()
-	for _, c := range clients {
-		c.stop()
+	done := make(chan struct{})
+	go func() {
+		var wg sync.WaitGroup
+		for _, c := range clients {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				c.stop()
+			}()
+		}
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(shutdownAllTimeout):
 	}
 }

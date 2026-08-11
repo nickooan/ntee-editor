@@ -2,6 +2,7 @@ package lsp
 
 import (
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -134,6 +135,64 @@ func TestEmitNeverRunsUnderManagerLock(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("notice emitted while holding m.mu (deadlock)")
+	}
+}
+
+// emit must never block the producer: the sink is program.Send, whose channel
+// is drained by the goroutine that runs Update, so a notice produced on the UI
+// goroutine would deadlock the editor if delivery were synchronous. Delivery
+// happens on the dispatcher goroutine, preserving order.
+func TestEmitDoesNotBlockWhenSinkIsBlocked(t *testing.T) {
+	m := testManager(t)
+	release := make(chan struct{})
+	delivered := make(chan any, maxQueuedNotices)
+	m.SetSink(func(msg any) {
+		<-release
+		delivered <- msg
+	})
+
+	const count = 5
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < count; i++ {
+			m.emit(NoticeMsg{Text: "n" + strconv.Itoa(i)})
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("emit blocked on a stalled sink")
+	}
+
+	close(release)
+	for i := 0; i < count; i++ {
+		select {
+		case msg := <-delivered:
+			if want := "n" + strconv.Itoa(i); msg.(NoticeMsg).Text != want {
+				t.Fatalf("delivery out of order: got %q, want %q", msg.(NoticeMsg).Text, want)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("only %d of %d notices delivered", i, count)
+		}
+	}
+}
+
+// Notices emitted before SetSink are buffered and delivered by the dispatcher
+// once the sink is wired — the flush must not run synchronously on main, where
+// program.Send before program.Run would hang startup.
+func TestQueuedNoticesFlushAfterSetSink(t *testing.T) {
+	m := testManager(t)
+	m.emit(NoticeMsg{Text: "early"})
+	delivered := make(chan any, 1)
+	m.SetSink(func(msg any) { delivered <- msg })
+	select {
+	case msg := <-delivered:
+		if msg.(NoticeMsg).Text != "early" {
+			t.Fatalf("delivered %+v, want the pre-sink notice", msg)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("pre-sink notice never delivered after SetSink")
 	}
 }
 

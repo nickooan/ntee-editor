@@ -153,6 +153,25 @@ func TestFilterDirPrefixWithTailKeepsClassFirst(t *testing.T) {
 	}
 }
 
+// The partition must be stable on both sides: class members keep their score
+// order when a tail is typed, and non-class matches keep theirs.
+func TestOrderDirPrefixStablePartition(t *testing.T) {
+	corpus := []string{"a/x.go", "b/n1.go", "a/y.go", "b/n2.go", "a/z.go"}
+	candidates := Prepare(corpus)
+	matches := []Match{{Index: 1}, {Index: 0}, {Index: 3}, {Index: 2}, {Index: 4}}
+	orderDirPrefix("a/ab", candidates, matches) // tail typed: no alphabetical resort
+	var got []string
+	for _, match := range matches {
+		got = append(got, corpus[match.Index])
+	}
+	want := []string{"a/x.go", "a/y.go", "a/z.go", "b/n1.go", "b/n2.go"}
+	for i, w := range want {
+		if got[i] != w {
+			t.Fatalf("row %d = %q, want %q (full: %v)", i, got[i], w, got)
+		}
+	}
+}
+
 func TestFilterDirPrefixCaseInsensitive(t *testing.T) {
 	corpus := []string{"other/x.go", "Internal/App/b.go", "Internal/App/a.go"}
 	matches := Filter("internal/app/", Prepare(corpus))

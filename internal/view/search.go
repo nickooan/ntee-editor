@@ -2,7 +2,6 @@ package view
 
 import (
 	"regexp"
-	"sort"
 	"strings"
 )
 
@@ -68,14 +67,13 @@ func FindSearchMatches(content, query string) []SearchMatch {
 }
 
 // BuildMatchesByLine buckets matches by line, preserving each match's global
-// index and sorting each bucket by start.
+// index. Buckets inherit the input's order: FindSearchMatches (the only
+// producer) emits matches line by line with increasing starts, so each bucket
+// is already sorted by start.
 func BuildMatchesByLine(matches []SearchMatch) map[int][]LineMatch {
 	byLine := map[int][]LineMatch{}
 	for i, m := range matches {
 		byLine[m.LineIndex] = append(byLine[m.LineIndex], LineMatch{SearchMatch: m, MatchIndex: i})
-	}
-	for _, bucket := range byLine {
-		sort.Slice(bucket, func(a, b int) bool { return bucket[a].Start < bucket[b].Start })
 	}
 	return byLine
 }

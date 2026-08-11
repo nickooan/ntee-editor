@@ -1,6 +1,7 @@
 package app
 
 import (
+	"slices"
 	"sort"
 	"strings"
 	"unicode"
@@ -18,10 +19,10 @@ type editor struct {
 	cy    int
 	dirty bool
 
-	// rev counts line mutations; the model compares it against its cached
-	// highlight state to know when to rescan the buffer. Every method that
-	// mutates `lines` MUST bump it (alongside setting dirty) or highlighting
-	// goes stale.
+	// rev counts line mutations; contentHashed keys its join+hash memo on it,
+	// and the model's highlight skip (hlHash) depends on that hash being
+	// current. Every method that mutates `lines` MUST bump it (alongside
+	// setting dirty) or highlighting and snapshot dedupe go stale.
 	rev int
 
 	// sel, when non-nil, is a highlighted range [start,end) of rune columns on
@@ -105,13 +106,34 @@ func (e *editor) newline() {
 	e.deleteSelection()
 	line := e.line()
 	at := input.Clamp(e.cx, 0, len(line))
-	before := string(line[:at])
-	after := string(line[at:])
-	e.lines[e.cy] = before
-	rest := append([]string{after}, e.lines[e.cy+1:]...)
-	e.lines = append(e.lines[:e.cy+1], rest...)
+	e.lines[e.cy] = string(line[:at])
+	e.lines = slices.Insert(e.lines, e.cy+1, string(line[at:]))
 	e.cy++
 	e.cx = 0
+	e.dirty = true
+	e.rev++
+}
+
+// insertLines splices multi-line text at the cursor in one pass: the first
+// segment joins the head of the cursor line, the last segment takes its tail,
+// and the segments in between land as whole lines. One splice regardless of
+// segment count — pasting via newline()+insert() per line is
+// O(pasted × file lines).
+func (e *editor) insertLines(segments []string) {
+	if len(segments) == 1 {
+		e.insert(segments[0])
+		return
+	}
+	e.deleteSelection()
+	line := e.line()
+	at := input.Clamp(e.cx, 0, len(line))
+	e.lines[e.cy] = string(line[:at]) + segments[0]
+	rest := make([]string, len(segments)-1)
+	copy(rest, segments[1:])
+	rest[len(rest)-1] += string(line[at:])
+	e.lines = slices.Insert(e.lines, e.cy+1, rest...)
+	e.cy += len(segments) - 1
+	e.cx = len([]rune(segments[len(segments)-1]))
 	e.dirty = true
 	e.rev++
 }

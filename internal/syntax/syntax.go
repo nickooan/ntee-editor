@@ -7,6 +7,7 @@ package syntax
 import (
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/lexers"
@@ -38,23 +39,51 @@ var customLexers = map[string]chroma.Lexer{
 	".ntd": ntdLexer,
 }
 
+// lexerCache memoizes resolved (coalesced) lexers: lexers.Get/Match walk
+// chroma's whole registry, and HighlightLines re-resolves on every full
+// re-highlight. Keyed by extension for the pinned tables and by basename for
+// the registry fallback (chroma globs can match specific basenames, e.g.
+// CMakeLists.txt). Locked — highlighting runs on tea.Cmd goroutines too. A nil
+// entry ("render plain") is cached like any other result.
+var (
+	lexerCacheMu sync.Mutex
+	lexerCache   = map[string]chroma.Lexer{}
+)
+
 // LexerFor resolves the lexer for a filename, nil when the file should render
 // plain.
 func LexerFor(filename string) chroma.Lexer {
 	ext := strings.ToLower(filepath.Ext(filename))
-	if lexer, ok := customLexers[ext]; ok {
-		return chroma.Coalesce(lexer)
+	key := ext
+	_, isCustom := customLexers[ext]
+	_, isExplicit := explicitLexers[ext]
+	if !isCustom && !isExplicit {
+		key = "base:" + strings.ToLower(filepath.Base(filename))
 	}
-	var lexer chroma.Lexer
-	if name, ok := explicitLexers[ext]; ok {
-		lexer = lexers.Get(name)
-	} else {
+
+	lexerCacheMu.Lock()
+	lexer, cached := lexerCache[key]
+	lexerCacheMu.Unlock()
+	if cached {
+		return lexer
+	}
+
+	switch {
+	case isCustom:
+		lexer = chroma.Coalesce(customLexers[ext])
+	case isExplicit:
+		lexer = lexers.Get(explicitLexers[ext])
+	default:
 		lexer = lexers.Match(filepath.Base(filename))
 	}
-	if lexer == nil {
-		return nil
+	if lexer != nil && !isCustom {
+		lexer = chroma.Coalesce(lexer)
 	}
-	return chroma.Coalesce(lexer)
+
+	lexerCacheMu.Lock()
+	lexerCache[key] = lexer
+	lexerCacheMu.Unlock()
+	return lexer
 }
 
 // HighlightLines tokenizes the whole content and buckets styled segments per
@@ -65,6 +94,10 @@ func HighlightLines(filename, content string) [][]view.HighlightSegment {
 	if lexer == nil {
 		return nil
 	}
+	// Count lines on the same normalization chroma tokenizes with (EnsureLF
+	// turns lone \r into \n) — counting the raw content would shift every row
+	// after a stray \r onto the previous row's colors.
+	content = view.NormalizeLineBreaks(content)
 	it, err := lexer.Tokenise(nil, content)
 	if err != nil {
 		return nil
@@ -75,8 +108,16 @@ func HighlightLines(filename, content string) [][]view.HighlightSegment {
 	cur := 0
 	for _, token := range it.Tokens() {
 		seg := segmentFor(token.Type)
-		parts := strings.Split(token.Value, "\n")
-		for pi, part := range parts {
+		// The overwhelming majority of tokens hold no newline — appending
+		// directly skips a strings.Split allocation per token.
+		if strings.IndexByte(token.Value, '\n') < 0 {
+			if token.Value != "" {
+				seg.Text = token.Value
+				lines[cur] = append(lines[cur], seg)
+			}
+			continue
+		}
+		for pi, part := range strings.Split(token.Value, "\n") {
 			if pi > 0 {
 				lines = append(lines, nil)
 				cur++

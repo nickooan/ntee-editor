@@ -373,22 +373,31 @@ func renderFuzzyRow(path string, positions []int, width int, selected bool) stri
 	for _, p := range positions {
 		matched[p] = true
 	}
+	if width < 1 {
+		width = 1
+	}
 	runes := []rune(path)
+	if maxRunes := width - 1; len(runes) > maxRunes {
+		runes = runes[:maxRunes]
+	}
 	var b strings.Builder
 	b.WriteString(baseStyle.Render(" "))
-	rendered := 1
-	for i, r := range runes {
-		if rendered >= width {
-			break
+	// Contiguous matched/unmatched runs render in one call each — a call per
+	// rune is width×rows lipgloss ANSI emissions per frame (renderEditLine
+	// documents the same batching).
+	for start := 0; start < len(runes); {
+		end := start + 1
+		for end < len(runes) && matched[end] == matched[start] {
+			end++
 		}
-		if matched[i] {
-			b.WriteString(fuzzyBoldStyle.Render(string(r)))
-		} else {
-			b.WriteString(textStyle.Render(string(r)))
+		style := textStyle
+		if matched[start] {
+			style = fuzzyBoldStyle
 		}
-		rendered++
+		b.WriteString(style.Render(string(runes[start:end])))
+		start = end
 	}
-	if pad := width - rendered; pad > 0 {
+	if pad := width - 1 - len(runes); pad > 0 {
 		b.WriteString(baseStyle.Render(strings.Repeat(" ", pad)))
 	}
 	return b.String()

@@ -834,8 +834,8 @@ func renderSelectedLine(line string, width int) string {
 
 func (m Model) renderSearch(width, height int) string {
 	matches := m.searchMatches()
-	byLine := view.BuildMatchesByLine(matches)
-	lines := strings.Split(m.searchContent, "\n")
+	byLine := m.searchMC.matchesByLine(m.searchContent, m.searchInput)
+	lines := m.searchMC.splitLines(m.searchContent)
 
 	maxScrollY := max(0, len(lines)-height)
 	start := 0

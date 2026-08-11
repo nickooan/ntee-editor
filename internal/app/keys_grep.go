@@ -100,6 +100,7 @@ func (m Model) openGrep() (Model, tea.Cmd) {
 	m.grepIndex = 0
 	m.grepResults = nil
 	m.grepFiles = nil
+	m.grepFileIndex = nil
 	m.grepHlRel = ""
 	m.grepHl = nil
 	m.grepPrevLines = nil
@@ -118,6 +119,7 @@ func (m Model) closeGrep() Model {
 	m.grepLoading = false
 	m.grepLoadBytes = 0
 	m.grepFiles = nil
+	m.grepFileIndex = nil
 	m.grepHlRel = ""
 	m.grepHl = nil
 	m.grepPrevLines = nil
@@ -183,11 +185,15 @@ func (m Model) handleGrepBatch(msg grepBatchMsg) (tea.Model, tea.Cmd) {
 		return m, nil // stale: overlay closed or reopened — the chain ends here
 	}
 	truncated := false
+	if m.grepFileIndex == nil {
+		m.grepFileIndex = make(map[string]int, len(msg.files))
+	}
 	for _, gf := range msg.files {
 		if len(m.grepFiles) >= maxGrepFiles || m.grepLoadBytes >= maxGrepBytes {
 			truncated = true
 			break
 		}
+		m.grepFileIndex[gf.rel] = len(m.grepFiles)
 		m.grepFiles = append(m.grepFiles, gf)
 		m.grepLoadBytes += len(gf.content)
 	}
@@ -230,7 +236,7 @@ func (m Model) handleGrepResults(msg grepResultsMsg) (tea.Model, tea.Cmd) {
 	m.grepResults = msg.results
 	m.grepResultsGen = msg.gen
 	m.grepIndex = 0
-	return m.refreshGrepPreview(), nil
+	return m.refreshGrepPreview()
 }
 
 // queueGrepSearch registers a query change: short queries clear synchronously,
@@ -338,16 +344,16 @@ func appendGrepHits(dst []grepHit, f grepFile, re *regexp.Regexp, limit int) []g
 	return dst
 }
 
-// grepSelectedFile returns the corpus entry for the current selection.
+// grepSelectedFile returns the corpus entry for the current selection. Called
+// from the overlay renderer every frame, so the lookup is a map hit, not a
+// scan over a snapshot of up to maxGrepFiles entries.
 func (m Model) grepSelectedFile() (grepFile, grepHit, bool) {
 	if len(m.grepResults) == 0 {
 		return grepFile{}, grepHit{}, false
 	}
 	hit := m.grepResults[input.Clamp(m.grepIndex, 0, len(m.grepResults)-1)]
-	for _, f := range m.grepFiles {
-		if f.rel == hit.rel {
-			return f, hit, true
-		}
+	if i, ok := m.grepFileIndex[hit.rel]; ok {
+		return m.grepFiles[i], hit, true
 	}
 	return grepFile{}, grepHit{}, false
 }
@@ -366,14 +372,14 @@ func (m Model) handleGrepKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			break
 		}
 		m.grepIndex = max(0, m.grepIndex-1)
-		m = m.refreshGrepPreview()
+		m, cmd = m.refreshGrepPreview()
 	case "down":
 		if next, ok := m.grepMoveCursorLine(1); ok {
 			m = next
 			break
 		}
 		m.grepIndex = min(max(0, len(m.grepResults)-1), m.grepIndex+1)
-		m = m.refreshGrepPreview()
+		m, cmd = m.refreshGrepPreview()
 	case "left":
 		m.grepCursor = input.MoveCursor(m.grepQuery, m.grepCursor, -1)
 	case "right":
@@ -480,20 +486,42 @@ func (m Model) grepMoveCursorLine(dy int) (Model, bool) {
 	return m, true
 }
 
-// refreshGrepPreview keeps the selected hit's preview lines and syntax
-// highlighting cached (whole-buffer tokenize + line split, re-run only when
-// the selection changes file).
-func (m Model) refreshGrepPreview() Model {
+// grepPreviewMsg delivers the selected hit's whole-file tokenize, computed off
+// the UI goroutine — a per-arrow-key synchronous tokenize stalls key handling
+// on large files. rel guards against the selection moving on mid-flight.
+type grepPreviewMsg struct {
+	gen int
+	rel string
+	hl  [][]view.HighlightSegment
+}
+
+// refreshGrepPreview keeps the selected hit's preview lines current and fires
+// the async highlight when the selection changed file: the split lands
+// immediately (the preview text must render this frame), the tokenize arrives
+// as grepPreviewMsg and the rows show plain until then.
+func (m Model) refreshGrepPreview() (Model, tea.Cmd) {
 	f, _, ok := m.grepSelectedFile()
 	if !ok {
 		m.grepHlRel, m.grepHl, m.grepPrevLines = "", nil, nil
-		return m
+		return m, nil
 	}
 	if f.rel == m.grepHlRel {
-		return m
+		return m, nil
 	}
 	m.grepHlRel = f.rel
 	m.grepPrevLines = strings.Split(f.content, "\n") // pre-normalized ⇒ same as NormalizeLines
-	m.grepHl = syntax.HighlightLines(path.Base(f.rel), f.content)
-	return m
+	m.grepHl = nil
+	gen, rel, content := m.grepGen, f.rel, f.content
+	return m, func() tea.Msg {
+		return grepPreviewMsg{gen: gen, rel: rel, hl: syntax.HighlightLines(path.Base(rel), content)}
+	}
+}
+
+// handleGrepPreview lands the async tokenize for the still-selected file.
+func (m Model) handleGrepPreview(msg grepPreviewMsg) (tea.Model, tea.Cmd) {
+	if !m.grepOpen || msg.gen != m.grepGen || msg.rel != m.grepHlRel {
+		return m, nil
+	}
+	m.grepHl = msg.hl
+	return m, nil
 }

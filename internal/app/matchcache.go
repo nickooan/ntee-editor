@@ -2,6 +2,7 @@ package app
 
 import (
 	"regexp"
+	"strings"
 
 	"github.com/nickooan/ntee-editor/internal/view"
 )
@@ -18,6 +19,16 @@ type matchCache struct {
 	content, query string
 	ok             bool
 	matches        []view.SearchMatch
+
+	// Derived render structures under the same key: the per-line buckets (keyed
+	// like matches) and the content split into lines (content-only key). Both
+	// were rebuilt from scratch on every frame — an O(file) split plus a map of
+	// bucket slices per render on a large buffer.
+	byLineOK bool
+	byLine   map[int][]view.LineMatch
+	linesFor string
+	linesOK  bool
+	lines    []string
 }
 
 // get returns the matches for (content, query), recomputing only when either
@@ -29,8 +40,36 @@ func (c *matchCache) get(content, query string) []view.SearchMatch {
 	if !c.ok || content != c.content || query != c.query {
 		c.content, c.query, c.ok = content, query, true
 		c.matches = view.FindSearchMatches(content, query)
+		c.byLineOK = false
 	}
 	return c.matches
+}
+
+// matchesByLine returns the per-line buckets for (content, query), rebuilt at
+// most once per match recompute. Callers must not mutate the result.
+func (c *matchCache) matchesByLine(content, query string) map[int][]view.LineMatch {
+	if c == nil {
+		return view.BuildMatchesByLine(view.FindSearchMatches(content, query))
+	}
+	matches := c.get(content, query)
+	if !c.byLineOK {
+		c.byLine = view.BuildMatchesByLine(matches)
+		c.byLineOK = true
+	}
+	return c.byLine
+}
+
+// splitLines returns content split on "\n", re-splitting only when the content
+// changed. Callers must not mutate the result.
+func (c *matchCache) splitLines(content string) []string {
+	if c == nil {
+		return strings.Split(content, "\n")
+	}
+	if !c.linesOK || content != c.linesFor {
+		c.linesFor, c.linesOK = content, true
+		c.lines = strings.Split(content, "\n")
+	}
+	return c.lines
 }
 
 // searchMatches is the memoized match list for in-file search mode.

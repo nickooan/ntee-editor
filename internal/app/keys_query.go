@@ -13,12 +13,21 @@ import (
 )
 
 // queryInputSuggestions completes the typed bar text: exact/prefix over the
-// visible tree, fuzzy over the full corpus.
+// visible tree, fuzzy over the full corpus. Memoized per message via
+// frameCache (like treeEntries) so the key handler and View share one filter
+// pass over the corpus.
 func (m Model) queryInputSuggestions(entries []filetree.FileTreeEntry) []filetree.InputSuggestion {
+	f := m.frames
+	if f != nil && f.sugOk && f.sugSeq == f.seq && f.sugKey == m.command {
+		return f.suggestions
+	}
 	// Reads the cached corpus and its precomputed fuzzy data (populated by
-	// ensureCorpus in the key handler); never walks or re-prepares here, so
-	// this is cheap on every keystroke and render.
-	return filetree.BuildInputSuggestions(entries, m.corpus, m.dirCorpus, m.queryPrepared, m.command, filetree.MaxInputSuggestions)
+	// ensureCorpus in the key handler); never walks or re-prepares here.
+	suggestions := filetree.BuildInputSuggestions(entries, m.corpus, m.dirCorpus, m.queryPrepared, m.command, filetree.MaxInputSuggestions)
+	if f != nil {
+		f.sugOk, f.sugSeq, f.sugKey, f.suggestions = true, f.seq, m.command, suggestions
+	}
+	return suggestions
 }
 
 // handleQueryKey is the home-mode handler: the bottom input bar drives the
@@ -26,31 +35,36 @@ func (m Model) queryInputSuggestions(entries []filetree.FileTreeEntry) []filetre
 func (m Model) handleQueryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	m, corpusCmd := m.ensureCorpus()
 	entries := m.treeEntries()
-	suggestions := m.queryInputSuggestions(entries)
-	if m.inputSuggestIndex >= len(suggestions) {
-		m.inputSuggestIndex = 0
+	// Computed only by the branches that read the popup (navigation, enter):
+	// the typing branches change m.command, so a filter pass for the pre-key
+	// text would be wasted — View computes (and memoizes) the fresh one.
+	suggest := func() []filetree.InputSuggestion {
+		suggestions := m.queryInputSuggestions(entries)
+		if m.inputSuggestIndex >= len(suggestions) {
+			m.inputSuggestIndex = 0
+		}
+		return suggestions
 	}
-	popupOpen := len(suggestions) > 0
 
 	switch msg.String() {
 	case "shift+up":
-		if popupOpen {
+		if suggestions := suggest(); len(suggestions) > 0 {
 			return m.moveInputSuggestion(suggestions, -1), nil
 		}
 		return m.moveSidebarSelection(entries, -1), nil
 	case "shift+down":
-		if popupOpen {
+		if suggestions := suggest(); len(suggestions) > 0 {
 			return m.moveInputSuggestion(suggestions, 1), nil
 		}
 		return m.moveSidebarSelection(entries, 1), nil
 
 	case "up":
-		if popupOpen {
+		if suggestions := suggest(); len(suggestions) > 0 {
 			return m.moveInputSuggestion(suggestions, -1), nil
 		}
 		m.fileScrollY = input.Clamp(m.fileScrollY-1, 0, max(0, len(m.fileLines)-1))
 	case "down":
-		if popupOpen {
+		if suggestions := suggest(); len(suggestions) > 0 {
 			return m.moveInputSuggestion(suggestions, 1), nil
 		}
 		m.fileScrollY = input.Clamp(m.fileScrollY+1, 0, max(0, len(m.fileLines)-1))
@@ -71,7 +85,7 @@ func (m Model) handleQueryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.qCursor = input.MoveCursor(m.command, m.qCursor, 1)
 
 	case "enter":
-		return m.submitQuery(entries, suggestions)
+		return m.submitQuery(entries, suggest())
 
 	case "esc":
 		return m.moveQueryToParentDirectory(), nil

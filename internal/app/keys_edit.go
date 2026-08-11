@@ -211,26 +211,24 @@ func (m Model) handleEditKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// editPaste inserts bracketed-paste text into the buffer. edit.insert is
-// single-line, so the paste is split on newlines and stitched in with
-// newline() so each segment lands on its own line (with highlight upkeep).
+// editPaste inserts bracketed-paste text into the buffer: newline-split, then
+// one bulk splice into the buffer and the highlight cache (with per-line
+// stitching a large paste into a large file was quadratic).
 func (m Model) editPaste(text string) (tea.Model, tea.Cmd) {
 	if m.openFile == nil {
 		return m, nil
 	}
 	s := strings.ReplaceAll(text, "\r\n", "\n")
 	s = strings.ReplaceAll(s, "\r", "\n")
-	for i, seg := range strings.Split(s, "\n") {
-		if i > 0 {
-			cy := m.edit.cy
-			m.edit.newline()
-			m = m.hlMarkLine(cy)
-			m = m.hlInsertLine(cy + 1)
-		}
-		if seg != "" {
-			m.edit.insert(seg)
-			m = m.hlMarkLine(m.edit.cy)
-		}
+	if s == "" {
+		return m, nil
+	}
+	segments := strings.Split(s, "\n")
+	cy := m.edit.cy
+	m.edit.insertLines(segments)
+	m = m.hlMarkLine(cy)
+	if n := len(segments) - 1; n > 0 {
+		m = m.hlInsertLines(cy+1, n)
 	}
 	m.snapDirty = true
 	// Pasted text can contain unbalanced parens — depth tracking can't

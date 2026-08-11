@@ -60,16 +60,20 @@ func grepLoad(t *testing.T, m Model) Model {
 	return m
 }
 
-// grepSettle fires the pending debounce tick and delivers the search results,
-// as if grepDebounce elapsed and the background scan completed.
+// grepSettle fires the pending debounce tick and delivers the search results
+// and the follow-up preview highlight, as if grepDebounce elapsed and the
+// background scan and tokenize completed.
 func grepSettle(t *testing.T, m Model) Model {
 	t.Helper()
-	m2, cmd := deliver(m, grepTickMsg{gen: m.grepSearchGen})
-	if cmd == nil {
-		return m2
+	queue := []tea.Msg{grepTickMsg{gen: m.grepSearchGen}}
+	for len(queue) > 0 {
+		msg := queue[0]
+		queue = queue[1:]
+		var cmd tea.Cmd
+		m, cmd = deliver(m, msg)
+		queue = append(queue, execCmds(cmd)...)
 	}
-	m2, _ = deliver(m2, cmd())
-	return m2
+	return m
 }
 
 func TestGrepSearchAcrossFiles(t *testing.T) {

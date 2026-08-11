@@ -6,13 +6,20 @@
 package clipboard
 
 import (
+	"context"
 	"encoding/base64"
 	"io"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 )
+
+// copyTimeout bounds each native clipboard tool run: a hung wl-copy (no
+// compositor) or a tool holding the selection must not freeze the caller —
+// the same hard-deadline rule gitcmd applies to git spawns.
+const copyTimeout = 3 * time.Second
 
 // clipCmd is one native clipboard command candidate.
 type clipCmd struct {
@@ -43,12 +50,17 @@ func Copy(s string) error {
 		if err != nil {
 			continue
 		}
-		cmd := exec.Command(path, c.args...)
+		ctx, cancel := context.WithTimeout(context.Background(), copyTimeout)
+		cmd := exec.CommandContext(ctx, path, c.args...)
+		cmd.WaitDelay = time.Second // reclaim the process even if it ignores the kill signal's pipe close
 		cmd.Stdin = strings.NewReader(s)
-		if err := cmd.Run(); err == nil {
+		err = cmd.Run()
+		cancel()
+		if err == nil {
 			return nil
 		}
-		// Tool present but failed — try the next candidate, then OSC 52.
+		// Tool present but failed (or timed out) — try the next candidate,
+		// then OSC 52.
 	}
 	return writeOSC52(s)
 }

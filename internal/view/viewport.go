@@ -17,10 +17,21 @@ type Viewport struct {
 	SafeScrollY int
 }
 
-// NormalizeLines splits content into lines on "\n". CRLF counts as a line
-// break too, so a stray \r from any source never reaches the terminal.
+// NormalizeLineBreaks rewrites CRLF and lone CR to "\n" — the same conversion
+// chroma applies before tokenizing (EnsureLF), so line counts agree between
+// the buffer and its highlight rows.
+func NormalizeLineBreaks(content string) string {
+	if strings.IndexByte(content, '\r') < 0 {
+		return content
+	}
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	return strings.ReplaceAll(content, "\r", "\n")
+}
+
+// NormalizeLines splits content into lines on "\n". CRLF and lone CR count as
+// line breaks too, so a stray \r from any source never reaches the terminal.
 func NormalizeLines(content string) []string {
-	return strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	return strings.Split(NormalizeLineBreaks(content), "\n")
 }
 
 func sliceLine(line string, scrollX, width int) string {

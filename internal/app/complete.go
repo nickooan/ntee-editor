@@ -11,10 +11,12 @@ import (
 	"github.com/nickooan/ntee-editor/internal/lsp"
 )
 
-// completionMsg carries an async textDocument/completion result. line and start
-// tag the request's cursor line and identifier-start column so a stale answer
-// (the user moved or typed past the word) can be dropped.
+// completionMsg carries an async textDocument/completion result. rel, line and
+// start tag the request's file, cursor line, and identifier-start column so a
+// stale answer (the user switched files, moved, or typed past the word) can be
+// dropped.
 type completionMsg struct {
+	rel   string
 	line  int
 	start int
 	items []lsp.CompletionItem
@@ -60,25 +62,32 @@ func (m Model) requestCompletion() (tea.Model, tea.Cmd) {
 	}
 	// The server must see the just-typed prefix. Sync directly rather than
 	// flushBurst so completion doesn't snapshot (fragment) the undo history
-	// mid-word; the burst still flushes at its normal boundary.
-	client.DidChange(m.openFile.Path, m.edit.content(), m.edit.rev)
+	// mid-word; the burst still flushes at its normal boundary. contentHashed
+	// shares the rev-keyed join with pushSnapshot instead of re-joining.
+	content, _ := m.edit.contentHashed()
+	client.DidChange(m.openFile.Path, content, m.edit.rev)
 	line := m.edit.cy
 	start := identStart(m.edit.line(), m.edit.cx)
 	utf16Col := lsp.UTF16Col(m.edit.lines[line], m.edit.cx)
 	path := m.openFile.Path
+	rel := m.openRel
 	m.completionPending = true
 	return m, func() tea.Msg {
 		items, err := client.Completion(path, line, utf16Col)
-		return completionMsg{line: line, start: start, items: items, err: err}
+		return completionMsg{rel: rel, line: line, start: start, items: items, err: err}
 	}
 }
 
 // handleCompletion lands an async completion answer, dropping it if the buffer
-// moved on (different line or the identifier under the cursor shifted).
+// moved on (different file, different line, or the identifier under the cursor
+// shifted).
 func (m Model) handleCompletion(msg completionMsg) (tea.Model, tea.Cmd) {
 	m.completionPending = false
 	if msg.err != nil || m.mode != modeEdit || m.openFile == nil {
 		return m, nil
+	}
+	if msg.rel != m.openRel {
+		return m, nil // answer for a file the user already left
 	}
 	if m.edit.cy != msg.line || identStart(m.edit.line(), m.edit.cx) != msg.start {
 		return m, nil // context moved while the request was in flight

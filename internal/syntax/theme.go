@@ -2,6 +2,7 @@ package syntax
 
 import (
 	"strings"
+	"sync"
 
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/styles"
@@ -13,7 +14,11 @@ import (
 // the classic Sublime/vim gruvbox pattern). Style.Get resolves
 // category/subcategory inheritance, so every token gets a concrete hex color.
 
+// styleMu guards activeStyle/entryCache: highlighting runs on tea.Cmd
+// goroutines (grep and def-picker previews) while SetStyle can fire from the
+// UI goroutine's inspect command.
 var (
+	styleMu     sync.Mutex
 	activeStyle *chroma.Style
 	entryCache  map[chroma.TokenType]view.HighlightSegment
 )
@@ -36,8 +41,7 @@ func gruvboxTuned() *chroma.Style {
 }
 
 // SetStyle selects the chroma style grammar colors are drawn from. Unknown
-// names and the legacy "terminal16" fall back to gruvbox. Called once at
-// startup; the TUI render loop is single-goroutine, so no locking.
+// names and the legacy "terminal16" fall back to gruvbox.
 func SetStyle(name string) {
 	n := strings.ToLower(strings.TrimSpace(name))
 	if n == "" || n == "terminal16" {
@@ -52,13 +56,17 @@ func SetStyle(name string) {
 			style = gruvboxTuned()
 		}
 	}
+	styleMu.Lock()
 	activeStyle = style
 	entryCache = map[chroma.TokenType]view.HighlightSegment{}
+	styleMu.Unlock()
 }
 
 // segmentFor maps a token type to its styled segment (hex color + attrs).
 // Text is filled in by the caller.
 func segmentFor(t chroma.TokenType) view.HighlightSegment {
+	styleMu.Lock()
+	defer styleMu.Unlock()
 	if seg, ok := entryCache[t]; ok {
 		return seg
 	}

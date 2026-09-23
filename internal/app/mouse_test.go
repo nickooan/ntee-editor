@@ -7,8 +7,6 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
-
-	"github.com/nickooan/ntee-editor/internal/filetree"
 )
 
 // Test geometry (newTestModel: width=100, height=30, main.go fixture opened):
@@ -368,15 +366,15 @@ func TestNonLeftClickIgnored(t *testing.T) {
 }
 
 // sidebarRowOf finds the screen row of a tree entry, mirroring the viewport
-// math sidebarClickTarget uses, so tests stay valid if the fixture's entry
+// math sidebarListClickIndex uses, so tests stay valid if the fixture's entry
 // order changes.
 func sidebarRowOf(t *testing.T, m Model, rel string) int {
 	t.Helper()
 	entries := m.treeEntries()
-	vp := filetree.BuildFileTreeViewport(entries, m.sidebarInnerHeight(), 0, m.highlightedEntryIndex(entries))
+	start := sidebarWindowStart(len(entries), m.sidebarInnerHeight(), m.highlightedEntryIndex(entries))
 	for i := range entries {
 		if entries[i].RelativePath == rel {
-			return 2 + i - vp.SafeScrollY
+			return 2 + i - start
 		}
 	}
 	t.Fatalf("no sidebar entry %q", rel)
@@ -529,6 +527,42 @@ func TestSidebarDirClickFromEditModeStashes(t *testing.T) {
 	}
 	if m.notice != "" {
 		t.Fatalf("no discard notice expected, got %q", m.notice)
+	}
+}
+
+func TestSidebarClickSelectsInspectMenu(t *testing.T) {
+	m, _ := newTestModel(t, nil)
+	m = key(m, ctrlKey('t'))
+	// Rows start at y=2. The second menu row is lsp.
+	m = click(m, 2, 3)
+	if m.mode != modeInspect || m.inspectMenu != inspectMenuLSP {
+		t.Fatalf("inspect click: mode=%v menu=%d, want inspect lsp", m.mode, m.inspectMenu)
+	}
+}
+
+func TestSidebarClickJumpsPreviewOutline(t *testing.T) {
+	m, _ := newTestModel(t, nil)
+	m.mode = modeOpenAPI
+	m.preview.outline = []previewOutlineEntry{
+		{Label: "Pets", Depth: 0, LineIdx: 0},
+		{Label: "GET /pets", Depth: 1, Badge: "GET", Tail: "/pets", LineIdx: 4},
+	}
+	m.preview.lines = make([]previewLine, 8)
+	m.preview.sel = 0
+	m.preview.cursor = 0
+	m = click(m, 2, 3)
+	if m.preview.sel != 1 || m.preview.cursor != 4 {
+		t.Fatalf("outline click: sel=%d cursor=%d, want 1 and 4", m.preview.sel, m.preview.cursor)
+	}
+}
+
+func TestSidebarClickIgnoredInDiff(t *testing.T) {
+	m, _ := newTestModel(t, nil)
+	m.mode = modeDiff
+	openRel := m.openRel
+	m = click(m, 2, sidebarRowOf(t, m, "lib"))
+	if m.mode != modeDiff || m.openRel != openRel || m.command != "" {
+		t.Fatalf("diff sidebar click should be a miss: mode=%v open=%q command=%q", m.mode, m.openRel, m.command)
 	}
 }
 

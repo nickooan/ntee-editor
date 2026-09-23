@@ -34,7 +34,7 @@ Three design rules shape almost every function here:
 
 **How async results land.** Each worker Cmd captures everything it needs by value (including a copy of the buffer lines where relevant), does its work, and returns a message tagged with `gen` and usually `rel`. The `handleXReady` handler compares `gen` against the Model's current counter, `rel` against the open file, and often the mode too; a mismatch means the result is stale and it is silently dropped. Generations stay monotonic across state clears precisely so in-flight results remain identifiable.
 
-**How the files divide the work.** `app.go` is the hub: Model, `New`/`Init`/`Update`, corpus and git-status upkeep, file opening, highlight caches. `edit.go` is the pure editor struct; `keys_edit.go` its key handler; `history.go`/`drafts.go`/`tabs.go` the undo/draft/tab machinery. Each extra mode gets a `*_mode.go` (state + async compute), a `keys_*.go` (key handler), and usually a `render_*.go`. `render.go` holds View, the shared line renderers, and the whole color palette. `jump.go` and `complete.go` are the LSP consumers; `keys_grep.go` and parts of `keys_command.go` are the overlays; `mouse.go` maps clicks back through the same layout math the renderers use.
+**How the files divide the work.** `app.go` is the hub: Model, `New`/`Init`/`Update`, corpus and git-status upkeep, file opening, highlight caches. `edit.go` is the pure editor struct; `keys_edit.go` its key handler; `history.go`/`drafts.go`/`tabs.go` the undo/draft/tab machinery. Each extra mode gets a `*_mode.go` (state + async compute), a `keys_*.go` (key handler), and usually a `render_*.go`. `render.go` holds View, the shared line renderers, and the whole color palette. `sidebarlist.go` is the one left-pane list: each mode supplies rows, and that file windows, paints, and hit-tests them. `jump.go` and `complete.go` are the LSP consumers; `keys_grep.go` and parts of `keys_command.go` are the overlays; `mouse.go` maps clicks back through the same layout math the renderers use.
 
 ## Functions
 
@@ -275,8 +275,7 @@ The shared engine for the OpenAPI and GraphQL previews. The two modes were byte-
 
 #### render_preview.go
 
-- `renderPreview` windows over the rendered rows, tints the cursor row, and overlays search matches through the same `renderSearchLine` pipeline the search view uses.
-- `renderPreviewSidebar` draws the outline in place of the file tree: group headers plus badge+tail rows (method+path / kind+name), the selection following the cursor.
+- `renderPreview` windows over the rendered rows, tints the cursor row, and overlays search matches through the same `renderSearchLine` pipeline the search view uses. The outline itself is a `sidebarList` built by `previewSidebarList` (group headers plus badge+tail rows) and drawn by `renderSidebarList`.
 
 *Plus: `renderPreviewStatus` — the search-or-position status row.*
 
@@ -345,7 +344,7 @@ Diagnostics themselves land in `Update`'s `lsp.DiagnosticsMsg` branch (app.go), 
 #### render.go
 
 - `View` wraps `render()` in a `tea.View` with alt-screen, mouse cell-motion, and focus reporting (which is what feeds the git-poll pause).
-- `render` assembles the frame: header, sidebar pane (file tree, or inspect menu, or preview outline), main pane chosen by overlay-then-mode priority, tab strip, and status rows — panes tile the full width so no terminal-default stripe shows.
+- `render` assembles the frame: header, sidebar pane, main pane chosen by overlay-then-mode priority, tab strip, and status rows — panes tile the full width so no terminal-default stripe shows. The sidebar body is always `renderSidebarList` over whatever `sidebarListForMode` built.
 - `renderStatusLine` is the per-mode bottom bar; `renderEditStatus` the edit variant (filename, saved/editing, diagnostics, position, hints). The `@exec`/`@inspection` bars pre-pad in their own background so the chrome padding doesn't repaint them.
 - `renderFile` is the main file renderer: line-number gutter with diagnostic dots, viewport following the cursor via `fileViewportTop` (the shared function that keeps renderers, paging, and mouse math agreeing on what's on screen), the cursor line via `renderEditLine`, and — in edit mode — the completion dropdown or pinned signature spliced over the rows.
 - `renderEditLine` draws the cursor line with a horizontal window that follows the cursor and at most five style runs (line-highlight / selection / cursor cell) instead of a Render per column — a deliberate ANSI-call-count optimization repeated across the renderers.
@@ -355,7 +354,17 @@ Diagnostics themselves land in `Update`'s `lsp.DiagnosticsMsg` branch (app.go), 
 - `renderSearch` draws the search body: scrolls to the focused match (or holds the edit position when there are no matches yet) and, in search-exec mode, splices the live replace preview in. The line split and per-line match buckets come from `matchCache`'s memos rather than being rebuilt per frame.
 - The bottom of the file holds the entire Gruvbox-derived palette and every lipgloss style — the single place colors are defined.
 
-*Plus small helpers: `padStatusRows`, `diagSummary`, `diagAtLine`, `withNotice`, `renderSidebar`, `renderExecSugs`, `renderQueryMain`, `renderQuerySuggestions`, `renderTabStrip` (window math delegated to `tabStripWindow`/`tabLabel`, shared with the tab click hit-test), `fileViewportTop`, `renderContentLine`, `plainWindow`, `plainWindowStyled`, `renderSelectedLine`, `clampByte`, `renderInputLine`, `renderInputLineStyled`, `padTo`, `truncateRunes`, `pad`, `segStyleFor`, `colorFor` — row assembly, windows, input-line drawing, and padding/truncation utilities.*
+*Plus small helpers: `padStatusRows`, `diagSummary`, `diagAtLine`, `withNotice`, `renderExecSugs`, `renderQueryMain`, `renderQuerySuggestions`, `renderTabStrip` (window math delegated to `tabStripWindow`/`tabLabel`, shared with the tab click hit-test), `fileViewportTop`, `renderContentLine`, `plainWindow`, `plainWindowStyled`, `renderSelectedLine`, `clampByte`, `renderInputLine`, `renderInputLineStyled`, `padTo`, `truncateRunes`, `pad`, `segStyleFor`, `colorFor` — row assembly, windows, input-line drawing, and padding/truncation utilities.*
+
+#### sidebarlist.go
+
+The left pane is one list. File tree, inspection menu, and preview outline each build rows; scrolling, the selection bar, and click-to-row live here so a new sidebar behavior is added once.
+
+- `sidebarListForMode` picks the list: `inspectSidebarList` (the menu names), `previewSidebarList` (group headers, or a colored badge plus a tail), or `fileTreeSidebarList` (tree labels and the uncommitted / open / dimmed / directory colors). `selectedIndex` is whatever that mode already chose — the typed-path highlight, `inspectMenu`, or `preview.sel`.
+- `renderSidebarList` draws the visible window. A selected row is one selection-bar label; an unselected row keeps each segment's own style, and the last segment fills the remaining width.
+- `sidebarListClickIndex` maps a cell to a row with `sidebarWindowStart`, the same centering the renderer uses (a negative index starts at the top). `activateSidebarRow` then acts: query and edit open a file or expand a directory (popup stays hidden; a directory click from edit stashes the draft), inspection selects that menu row, and a preview jumps via `jumpPreviewOutline`. Diff, blame, search, conflict, and the command bars draw the file tree but leave the click as a miss.
+
+*Plus small helpers: `sidebarWindowStart`, `renderSidebarRow`, `sidebarRowPlain`, `sidebarSegmentText`, `fileTreeEntryStyle`, `activateFileTreeRow` — window math, row painting, tree colors, and the file-tree click itself.*
 
 #### render_diff.go
 
@@ -382,7 +391,7 @@ Diagnostics themselves land in `Update`'s `lsp.DiagnosticsMsg` branch (app.go), 
 
 - `renderInspectMain` routes to the selected panel: `renderInspectDB` (record counts, live/dead log bytes, blob usage, generation warnings), `renderInspectLSP` (per-language running/stopped/disabled status from the registry), `renderInspectSystem` (version and syntax style).
 
-*Plus small helpers: `renderInspectMenu`, `humanBytes`, `percent` — the left menu and number formatting.*
+*Plus small helpers: `humanBytes`, `percent` — number formatting. The left menu is `inspectSidebarList` in sidebarlist.go.*
 
 ### Mouse
 
@@ -391,7 +400,7 @@ Diagnostics themselves land in `Update`'s `lsp.DiagnosticsMsg` branch (app.go), 
 - `handleMouse` routes mouse input: left-click (and Ctrl+click = jump-to-definition) places the cursor; the vertical wheel scrolls. Drags, releases, and horizontal wheel are deliberately ignored so a trackpad swipe never moves the cursor. Overlays own their own navigation and swallow everything. Tab-strip and sidebar clicks are checked first (they sit above the mode-specific content handlers); misses fall through untouched.
 - `editClickTarget` maps a terminal cell to a buffer position by mirroring View/renderFile's exact layout math — header, borders, tab strip, `sidebarWidth` (the single source of truth shared with View so click math can't drift), gutter, viewport, and the cursor line's horizontal window. `diffClickTarget` and `blameClickTarget` are the same math over their own rows and gutters.
 - `handleEditClick` anchors the viewport explicitly so a click never drags the view: an ordinary click freezes the window, clicking the top visible line pages up, the bottom visible line pages down. `handleDiffClick`/`handleBlameClick` reuse the same anchoring.
-- `sidebarClickTarget` maps a cell to a tree-entry index by mirroring renderSidebar (rows from y=2 with no tab offset — the strip lives in the main pane — and the same highlight-centered viewport). `handleSidebarClick` (query and edit mode only) then mirrors `submitQuery`'s two branches: a file opens straight into edit mode, a directory is confirmed/expanded — but with the completion popup suppressed, because a click isn't typing. A directory click from edit mode stashes the unsaved buffer (like a tab switch, never the Esc discard) before switching to query mode.
+- `handleSidebarClick` asks `sidebarListClickIndex` which row was hit, then `activateSidebarRow` (both in sidebarlist.go). Rows start at y=2 with no tab offset — the strip lives in the main pane — and the window is the same one the list was drawn with. A miss falls through to the main-pane handler.
 - `tabClickTarget` maps a cell on the strip row to a tab index via `tabStripWindow`, honoring the sliding window and treating the trailing fill as a miss; `handleTabStripClick` switches through `activateTab` (draft stash/restore, so unsaved tabs stay red) and swallows a click on the already-active tab.
 - `wheelScroll` dispatches a wheel notch per mode — moving the cursor where the viewport follows it (edit/diff/blame/preview/conflict), nudging the scroll offset in the query view.
 

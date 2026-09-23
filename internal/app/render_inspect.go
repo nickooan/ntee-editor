@@ -9,21 +9,6 @@ import (
 	"github.com/nickooan/ntee-editor/internal/store"
 )
 
-// renderInspectMenu draws the inspection dashboard's left pane: a one-level
-// menu styled like the file sidebar (selected row gets the selection bar).
-func (m Model) renderInspectMenu(width, height int) string {
-	rows := make([]string, 0, height)
-	for i, item := range inspectMenuItems {
-		label := padTo(truncateRunes(" "+item, width), width)
-		if i == m.inspectMenu {
-			rows = append(rows, selectedEntryStyle.Render(label))
-		} else {
-			rows = append(rows, dirStyle.Render(label))
-		}
-	}
-	return strings.Join(rows, "\n")
-}
-
 // renderInspectMain draws the right info pane for the selected menu item.
 func (m Model) renderInspectMain(width, height int) string {
 	switch m.inspectMenu {

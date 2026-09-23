@@ -19,7 +19,7 @@ func TestRenderPreviewSidebarRows(t *testing.T) {
 	m.mode = modeOpenAPI
 	m.preview.outline = outline
 	m.preview.sel = 0
-	got := ansi.Strip(m.renderPreviewSidebar(30, 5))
+	got := ansi.Strip(renderSidebarList(m.previewSidebarList(), 30, 5))
 	rows := strings.Split(got, "\n")
 	if len(rows) != 2 {
 		t.Fatalf("rows = %d: %q", len(rows), got)
@@ -37,7 +37,7 @@ func TestRenderPreviewSidebarRows(t *testing.T) {
 		{Label: "Types", Depth: 0},
 		{Label: "User", Depth: 1, Badge: "type", Tail: "User", Color: "#83a598"},
 	}
-	got = ansi.Strip(m.renderPreviewSidebar(30, 5))
+	got = ansi.Strip(renderSidebarList(m.previewSidebarList(), 30, 5))
 	rows = strings.Split(got, "\n")
 	// graphql badge column is 6 wide: "  " + "type  " + "User"
 	if !strings.HasPrefix(rows[1], "  type  User") {
@@ -46,7 +46,7 @@ func TestRenderPreviewSidebarRows(t *testing.T) {
 
 	// Selected entry renders badge+tail as one highlighted label.
 	m.preview.sel = 1
-	got = ansi.Strip(m.renderPreviewSidebar(30, 5))
+	got = ansi.Strip(renderSidebarList(m.previewSidebarList(), 30, 5))
 	rows = strings.Split(got, "\n")
 	if !strings.HasPrefix(rows[1], "  type  User") {
 		t.Fatalf("selected entry row = %q", rows[1])

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/nickooan/ntee-editor/internal/input"
 	"github.com/nickooan/ntee-editor/internal/view"
 )
 
@@ -43,39 +42,6 @@ func (m Model) renderPreview(width, height int) string {
 			rows = append(rows, renderSegmentsBg(line.Segs, 0, width, hexLineHl, cursorLineStyle))
 		default:
 			rows = append(rows, renderSegments(line.Segs, 0, width))
-		}
-	}
-	return strings.Join(rows, "\n")
-}
-
-// renderPreviewSidebar draws the outline pane replacing the file tree: group
-// headers and badge+tail rows (method+path / kind+name), selection tracking
-// the document cursor.
-func (m Model) renderPreviewSidebar(width, height int) string {
-	k := m.previewDesc()
-	o := m.preview.outline
-	if len(o) == 0 || height < 1 {
-		return dirStyle.Render(padTo(truncateRunes(" outline", width), width))
-	}
-	start := input.Clamp(m.preview.sel-height/2, 0, max(0, len(o)-height))
-	rows := make([]string, 0, height)
-	for i := start; i < min(start+height, len(o)); i++ {
-		e := o[i]
-		switch {
-		case i == m.preview.sel:
-			label := " " + e.Label
-			if e.Depth > 0 {
-				label = "  " + padTo(e.Badge, k.badgeW) + e.Tail
-			}
-			rows = append(rows, selectedEntryStyle.Render(padTo(truncateRunes(label, width), width)))
-		case e.Depth == 0:
-			rows = append(rows, dirStyle.Render(padTo(truncateRunes(" "+e.Label, width), width)))
-		default:
-			badge := segStyleFor(view.HighlightSegment{Color: e.Color, Bold: true}).
-				Render("  " + padTo(e.Badge, k.badgeW))
-			tailW := max(1, width-(k.badgeW+2))
-			tail := fileStyle.Render(padTo(truncateRunes(e.Tail, tailW), tailW))
-			rows = append(rows, badge+tail)
 		}
 	}
 	return strings.Join(rows, "\n")

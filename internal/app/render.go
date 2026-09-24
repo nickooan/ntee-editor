@@ -13,7 +13,6 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/nickooan/ntee-editor/internal/filetree"
 	"github.com/nickooan/ntee-editor/internal/input"
 	"github.com/nickooan/ntee-editor/internal/lsp"
 	"github.com/nickooan/ntee-editor/internal/view"
@@ -44,15 +43,7 @@ func (m Model) render() string {
 	// terminal-default background against the themed panes.
 	mainWidth := max(3, m.width-sidebarWidth)
 
-	sidebarBody := m.renderSidebar(sidebarWidth-4, bodyHeight-2)
-	if m.mode == modeInspect {
-		// Inspection owns both panes: the file tree gives way to the menu.
-		sidebarBody = m.renderInspectMenu(sidebarWidth-4, bodyHeight-2)
-	}
-	if m.mode == modeOpenAPI || m.mode == modeGraphQL {
-		// The document preview replaces the file tree with its outline.
-		sidebarBody = m.renderPreviewSidebar(sidebarWidth-4, bodyHeight-2)
-	}
+	sidebarBody := renderSidebarList(m.sidebarListForMode(sidebarWidth-4), sidebarWidth-4, bodyHeight-2)
 	// lipgloss v2: Width/Height include the border, so the panes take the
 	// full slot (v1 set the inner size and the border grew them by 2).
 	sidebar := paneStyle.Width(sidebarWidth).Height(bodyHeight).Render(sidebarBody)
@@ -287,39 +278,6 @@ func withNotice(m Model, line string) string {
 		line += statusTextStyle.Render("   ") + noticeStyle.Render(m.notice)
 	}
 	return line
-}
-
-func (m Model) renderSidebar(width, height int) string {
-	entries := m.treeEntries()
-	if len(entries) == 0 {
-		return baseStyle.Render("(empty)")
-	}
-	highlighted := m.highlightedEntryIndex(entries)
-	vp := filetree.BuildFileTreeViewport(entries, height, 0, highlighted)
-
-	lines := make([]string, 0, len(vp.Entries))
-	for i, entry := range vp.Entries {
-		label := filetree.FormatFileTreeEntryLabel(entry, width)
-		switch {
-		case highlighted >= 0 && vp.SafeScrollY+i == highlighted:
-			lines = append(lines, selectedEntryStyle.Render(label))
-		// Uncommitted outranks the open-file green: "yellow instead of green"
-		// is exactly the signal that the open file has unsaved-to-git work.
-		case entry.Uncommitted && entry.Type == "directory":
-			lines = append(lines, uncommittedDirStyle.Render(label))
-		case entry.Uncommitted:
-			lines = append(lines, uncommittedFileStyle.Render(label))
-		case entry.RelativePath == m.openRel && m.openRel != "":
-			lines = append(lines, openFileStyle.Render(label))
-		case entry.Dimmed:
-			lines = append(lines, ignoredFileStyle.Render(label))
-		case entry.Type == "directory":
-			lines = append(lines, dirStyle.Render(label))
-		default:
-			lines = append(lines, fileStyle.Render(label))
-		}
-	}
-	return strings.Join(lines, "\n")
 }
 
 // renderExecSugs renders the @exec bar's inline suggestion strip: candidates

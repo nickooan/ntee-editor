@@ -41,7 +41,7 @@ brew install --cask nickooan/tap/ntee
 
 **Updating**: `brew upgrade --cask ntee`.
 
-On Linux, or to build from source, install with Go (1.25+) — the binary lands
+On Linux, or to build from source, install with Go 1.25.13+ — the binary lands
 in `~/go/bin`, make sure it's on your PATH:
 
 ```sh

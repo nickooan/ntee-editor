@@ -5,7 +5,6 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/nickooan/ntee-editor/internal/filetree"
 	"github.com/nickooan/ntee-editor/internal/input"
 )
 
@@ -363,72 +362,15 @@ func (m Model) wheelScroll(dir int) Model {
 	return m
 }
 
-// sidebarClickTarget maps a terminal cell to an index into treeEntries(),
-// mirroring renderSidebar's layout: rows start at y=2 (header + pane top
-// border) with no tab-strip offset — unlike every other hit-tester, since the
-// strip lives in the main pane only — inner columns 1..sidebarWidth-2, and the
-// same highlight-centered viewport window.
-func (m Model) sidebarClickTarget(x, y int) (int, bool) {
-	if x < 1 || x > m.sidebarWidth()-2 {
-		return 0, false
-	}
-	row := y - 2
-	height := m.sidebarInnerHeight()
-	if row < 0 || row >= height {
-		return 0, false
-	}
-	entries := m.treeEntries()
-	vp := filetree.BuildFileTreeViewport(entries, height, 0, m.highlightedEntryIndex(entries))
-	if row >= len(vp.Entries) {
-		return 0, false
-	}
-	return vp.SafeScrollY + row, true
-}
-
-// handleSidebarClick opens a clicked file or expands a clicked directory,
-// mirroring submitQuery's two branches — except that a click is not typing,
-// so the directory case keeps the completion popup hidden. Active in query
-// and edit mode only; the other modes repurpose the pane or review the open
-// buffer, so their clicks fall through untouched.
+// handleSidebarClick resolves a click to a sidebar row and activates it.
+// A miss (including modes that draw the file tree but do not act on it)
+// falls through so the main pane can handle the click.
 func (m Model) handleSidebarClick(x, y int) (Model, bool) {
-	if m.mode != modeQuery && m.mode != modeEdit {
-		return m, false
-	}
-	idx, ok := m.sidebarClickTarget(x, y)
+	rowIndex, ok := m.sidebarListClickIndex(x, y)
 	if !ok {
 		return m, false
 	}
-	entry := m.treeEntries()[idx]
-	m.commandPreview = ""
-	m.keyboardSelectedCommand = ""
-	m.inputSuggestIndex = 0
-
-	if entry.Type == "directory" {
-		if m.mode == modeEdit {
-			// Leaving edit mode by mouse keeps the unsaved work (unlike Esc,
-			// which deliberately discards): stash exactly like a tab switch.
-			m = m.recordCursor()
-			m = m.flushBurst()
-			m = m.stashDraftIfDirty()
-			m = m.closeCompletion()
-			m = m.sigUnpin()
-			m.jumpStack = nil
-			m.mode = modeQuery
-			m = m.refreshFileHighlights()
-		}
-		m.selectedCommand = entry.CommandValue
-		m.command = entry.CommandValue
-		m.qCursor = len([]rune(m.command))
-		m.suppressQuerySuggestions = true
-		return m, true
-	}
-
-	m.suppressQuerySuggestions = false
-	m.command, m.qCursor = "", 0
-	if m.mode == modeEdit {
-		m = m.closeCompletion()
-	}
-	return m.openFileAt(entry.RelativePath), true
+	return m.activateSidebarRow(rowIndex)
 }
 
 // tabClickTarget maps a cell on the tab-strip row to a tab index, mirroring

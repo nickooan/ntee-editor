@@ -55,10 +55,21 @@ type Session struct {
 	Command   string   `json:"command"`
 	Expanded  []string `json:"expanded,omitempty"`
 	TreeIndex int      `json:"treeIndex,omitempty"`
-	// WorkspaceRepo is the Ctrl+W selection: "" is the whole workspace (every
-	// nested repo's changes), otherwise the root-relative git repo directory.
-	// Ignored when the opened directory is itself a git repository.
+	// WorkspaceRepo is the Ctrl+W selection: "" is the whole workspace,
+	// otherwise the workspace-relative git repo directory the editor is
+	// rooted at. Ignored when the opened directory is itself a git repository.
 	WorkspaceRepo string `json:"workspaceRepo,omitempty"`
+	// Repos remembers each repo's own position (keyed by WorkspaceRepo-style
+	// path), so switching back with Ctrl+W — or relaunching — returns to it.
+	// LastFile/Command above stay the workspace's own position.
+	Repos map[string]RepoSession `json:"repos,omitempty"`
+}
+
+// RepoSession is one repo's remembered position. Paths are relative to the
+// repo root, like everything the editor sees while rooted there.
+type RepoSession struct {
+	LastFile string `json:"lastFile"`
+	Command  string `json:"command"`
 }
 
 // DraftStep is one undo checkpoint carried inside a Draft.
@@ -147,6 +158,13 @@ type Backend interface {
 	LoadTabs() (Tabs, bool)
 	SaveCorpus(c CorpusIndex) error
 	LoadCorpus() (CorpusIndex, bool)
+	// The *For variants address one scope's singleton: "" is the project's
+	// own record (what SaveTabs/SaveCorpus use), anything else a nested repo
+	// the editor was re-rooted at with Ctrl+W (see Scoped).
+	SaveTabsFor(scope string, t Tabs) error
+	LoadTabsFor(scope string) (Tabs, bool)
+	SaveCorpusFor(scope string, c CorpusIndex) error
+	LoadCorpusFor(scope string) (CorpusIndex, bool)
 	Close() error
 }
 
@@ -157,9 +175,20 @@ const (
 	sessionKey    = "session:current"
 	tabsKey       = "tabs:current"
 	corpusKey     = "corpus:current"
+	tabsRepoKey   = "tabs:repo:"
+	corpusRepoKey = "corpus:repo:"
 )
 
 func versionKey(seq int64) string { return fmt.Sprintf("%s%016d", versionPrefix, seq) }
+
+// scopedKey picks a singleton key: the project's own for scope "", else the
+// repo-keyed variant.
+func scopedKey(projectKey, repoPrefix, scope string) string {
+	if scope == "" {
+		return projectKey
+	}
+	return repoPrefix + scope
+}
 
 // Store is the ntee-db-backed Backend.
 type Store struct {
@@ -368,16 +397,19 @@ func (s *Store) DeleteDraft(path string) error {
 	return s.db.Delete(draftPrefix + path)
 }
 
-func (s *Store) SaveTabs(t Tabs) error {
+func (s *Store) SaveTabs(t Tabs) error  { return s.SaveTabsFor("", t) }
+func (s *Store) LoadTabs() (Tabs, bool) { return s.LoadTabsFor("") }
+
+func (s *Store) SaveTabsFor(scope string, t Tabs) error {
 	data, err := json.Marshal(t)
 	if err != nil {
 		return err
 	}
-	return s.db.Put(tabsKey, data)
+	return s.db.Put(scopedKey(tabsKey, tabsRepoKey, scope), data)
 }
 
-func (s *Store) LoadTabs() (Tabs, bool) {
-	data, ok, err := s.db.Get(tabsKey)
+func (s *Store) LoadTabsFor(scope string) (Tabs, bool) {
+	data, ok, err := s.db.Get(scopedKey(tabsKey, tabsRepoKey, scope))
 	if err != nil || !ok {
 		return Tabs{}, false
 	}
@@ -388,19 +420,23 @@ func (s *Store) LoadTabs() (Tabs, bool) {
 	return t, true
 }
 
-// Corpus is a singleton (fixed key): each SaveCorpus overwrites the previous,
-// so the store holds exactly one index. A large Files/DirMtimes JSON (≥64 KiB)
+// Corpus is a singleton per scope (fixed key): each save overwrites the
+// previous, so the store holds one index for the project plus one per repo the
+// editor has been rooted at. A large Files/DirMtimes JSON (≥64 KiB)
 // auto-offloads to ntee-db's blob side-file, out of the heap.
-func (s *Store) SaveCorpus(c CorpusIndex) error {
+func (s *Store) SaveCorpus(c CorpusIndex) error  { return s.SaveCorpusFor("", c) }
+func (s *Store) LoadCorpus() (CorpusIndex, bool) { return s.LoadCorpusFor("") }
+
+func (s *Store) SaveCorpusFor(scope string, c CorpusIndex) error {
 	data, err := json.Marshal(c)
 	if err != nil {
 		return err
 	}
-	return s.db.Put(corpusKey, data)
+	return s.db.Put(scopedKey(corpusKey, corpusRepoKey, scope), data)
 }
 
-func (s *Store) LoadCorpus() (CorpusIndex, bool) {
-	data, ok, err := s.db.Get(corpusKey)
+func (s *Store) LoadCorpusFor(scope string) (CorpusIndex, bool) {
+	data, ok, err := s.db.Get(scopedKey(corpusKey, corpusRepoKey, scope))
 	if err != nil || !ok {
 		return CorpusIndex{}, false
 	}

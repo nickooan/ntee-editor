@@ -82,10 +82,6 @@ func (m Model) executeCommand(cmd string) (tea.Model, tea.Cmd) {
 			m.errText = "no open file"
 			break
 		}
-		if m.isReadOnlyPath(m.openRel) {
-			m.errText = "read-only: outside repo " + m.activeRepo
-			break
-		}
 		snap, ok := m.db.LastSave(m.openRel)
 		if !ok {
 			m.errText = "no saved snapshot to revert to"
@@ -260,14 +256,14 @@ func (m Model) closeFuzzy() Model {
 	return m
 }
 
-// workspaceLabel is the Ctrl+W row that selects the whole opened directory,
-// shown as its base name with a trailing slash.
+// workspaceLabel is the Ctrl+W row that roots the editor back at the opened
+// directory, shown as its base name with a trailing slash.
 func (m Model) workspaceLabel() string {
-	return filepath.Base(m.root) + "/"
+	return filepath.Base(m.workspaceRoot) + "/"
 }
 
 // repoPickerCandidates is the Ctrl+W list: the workspace itself first, then
-// each nested git repo's root-relative directory. rels[i] is "" for the
+// each nested git repo's workspace-relative directory. rels[i] is "" for the
 // workspace row and the repo path for the others.
 func (m Model) repoPickerCandidates() (labels, rels []string) {
 	labels = append(labels, m.workspaceLabel())
@@ -281,9 +277,10 @@ func (m Model) repoPickerCandidates() (labels, rels []string) {
 
 // openRepoPicker opens the Ctrl+W repo list. The opened directory has to be a
 // workspace — a directory that is not itself a git repository. The list is
-// repo roots only (plus the workspace row), filtered like Ctrl+P.
+// repo roots only (plus the workspace row), filtered like Ctrl+P, and is the
+// same whichever root the editor is currently at.
 func (m Model) openRepoPicker() (Model, tea.Cmd) {
-	if m.gitRepo {
+	if m.workspaceIsRepo {
 		m.errText = "not a workspace directory"
 		return m, nil
 	}
@@ -299,43 +296,22 @@ func (m Model) openRepoPicker() (Model, tea.Cmd) {
 	return m, nil
 }
 
-// selectWorkspaceRepo remembers the Ctrl+W choice ("" = the whole workspace)
-// and refreshes sidebar highlights for that scope. The file tree root stays
-// the opened directory.
+// selectWorkspaceRepo applies the Ctrl+W choice: it re-roots the editor at
+// that repo ("" = the opened directory), so the tree, search, and git views
+// all work on it alone. Choosing the current root just closes the picker.
 func (m Model) selectWorkspaceRepo(rel string) (Model, tea.Cmd) {
 	rel = strings.Trim(filepath.ToSlash(rel), "/")
 	m = m.closeFuzzy()
 	if rel == m.activeRepo {
 		return m, nil
 	}
-	m.activeRepo = rel
-	if rel != "" {
-		// Move the sidebar and query bar onto the selected repo's root so the
-		// tree expands into it and arrow navigation starts inside its edge.
-		root := m.repoRootCommand()
-		m.selectedCommand = root
-		m.command = root
-		m.qCursor = len([]rune(root))
-		m.keyboardSelectedCommand = ""
-		m.commandPreview = ""
-		m.suppressQuerySuggestions = false
-	}
-	m = m.rebuildQueryScope()
-	m.saveSession()
+	m, cmd := m.switchRoot(rel)
 	if rel == "" {
 		m.notice = "workspace " + strings.TrimSuffix(m.workspaceLabel(), "/")
 	} else {
 		m.notice = "repo " + rel
 	}
-	// A buffer left outside the new scope can no longer be edited: stash its
-	// unsaved work and drop it to the view pane.
-	if m.openFile != nil && m.mode != modeQuery && m.isReadOnlyPath(m.openRel) {
-		m = m.leaveEditForReadOnly()
-	}
-	// Drop an in-flight scan for the previous scope. Its result carries the
-	// old scope and is ignored; this spawn replaces the highlights now.
-	m.gitStatusRunning = false
-	return m.maybeGitRefresh()
+	return m, cmd
 }
 
 func (m Model) handleFuzzyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {

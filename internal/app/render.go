@@ -119,15 +119,8 @@ func (m Model) renderStatusLine() string {
 		} else {
 			line += renderInputLine(m.command, m.qCursor)
 		}
-		hint := "Enter open+edit · Shift+↑/↓ tree · Esc parent · :mkdir/:touch/:rm · Ctrl+P goto · Ctrl+F find · Ctrl+W repo · Q quit"
-		if m.openFile != nil && m.isReadOnlyPath(m.openRel) {
-			hint = "read-only (outside repo " + m.activeRepo + ") · " + hint
-		}
-		line = withNotice(m, line)
-		if warning := m.outsideRepoWarning(); warning != "" {
-			line += statusTextStyle.Render("   ") + warnStyle.Render(warning)
-		}
-		return line + "\n" + hintStyle.Render(hint)
+		return withNotice(m, line) + "\n" +
+			hintStyle.Render("Enter open+edit · Shift+↑/↓ tree · Esc parent · :mkdir/:touch/:rm · Ctrl+P goto · Ctrl+W repo · Q quit")
 	case modeEdit:
 		return m.renderEditStatus()
 	case modeExec:
@@ -1020,23 +1013,20 @@ func truncateRunes(s string, width int) string {
 	return s
 }
 
-// renderHeader builds the top chrome row: the version/root title plus, when a
-// workspace repo is selected with Ctrl+W, a "working repo: x" label in the
-// same bold yellow the sidebar uses for uncommitted changes. Styling the label
-// apart from the title means Width() can no longer fill the row, so the plain
-// widths are measured and padded by hand; a row too wide for the terminal is
-// cut from the title first so the repo name survives.
+// renderHeader builds the top chrome row: the version and the opened
+// directory, then — when Ctrl+W has rooted the editor at a nested repo — a
+// bold orange "working repo: x" label right after the path, where the eye
+// already is (not pushed to the far edge on a wide terminal). Styling the
+// label apart from the title means Width() can no longer fill the row, so it
+// is padded by hand; a row too wide for the terminal cuts the title first so
+// the repo name survives.
 func (m Model) renderHeader() string {
 	const sep = "  ·  "
-	title := "ntee-editor " + versionTag() + sep + m.root
-	repo := ""
-	if m.activeRepo != "" && !m.gitRepo {
-		repo = "working repo: " + m.activeRepo
-	}
-
-	if repo == "" {
+	title := "ntee-editor " + versionTag() + sep + m.workspaceRoot
+	if m.activeRepo == "" {
 		return headerStyle.Width(m.width).Render(truncateRunes(title, m.width))
 	}
+	repo := "working repo: " + m.activeRepo
 
 	repoWidth := len([]rune(repo))
 	titleBudget := m.width - len(sep) - repoWidth
@@ -1047,7 +1037,7 @@ func (m Model) renderHeader() string {
 		return headerRepoStyle.Render(repo) +
 			headerStyle.Render(strings.Repeat(" ", max(0, m.width-repoWidth)))
 	}
-	line := headerStyle.Render(padTo(truncateRunes(title, titleBudget), titleBudget)) +
+	line := headerStyle.Render(truncateRunes(title, titleBudget)) +
 		headerStyle.Render(sep) +
 		headerRepoStyle.Render(repo)
 	if pad := m.width - lipgloss.Width(line); pad > 0 {
@@ -1276,5 +1266,4 @@ var (
 	editingStyle = lipgloss.NewStyle().Foreground(colYellow).Bold(true).Background(colBgChrome) // unsaved edits
 	savedStyle   = lipgloss.NewStyle().Foreground(colGreen).Bold(true).Background(colBgChrome)  // in sync with disk
 	errStyle     = lipgloss.NewStyle().Foreground(colRed).Bold(true).Background(colBgChrome)
-	warnStyle    = lipgloss.NewStyle().Foreground(colOrange).Bold(true).Background(colBgChrome) // outside the working repo
 )

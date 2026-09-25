@@ -85,7 +85,7 @@ Five things to know in your first five minutes:
 |---|---|
 | `Ctrl+P` | **Goto file** — fuzzy finder; empty query lists recent files |
 | `Ctrl+U` | Goto **uncommitted** file — same finder, limited to git-dirty paths |
-| `Ctrl+W` | **Workspace repo** — pick a nested git repo under the opened directory (or the directory itself). Query-bar search and change highlights then follow that repo; the file tree stays rooted at the opened directory. The sidebar and query bar move onto the repo root, and the repo folder stays expanded. `Shift+↑/↓` and `Esc` can still leave the repo; while the highlight is outside it the status line shows an orange `outside repo … · read-only` warning, and typing brings the highlight back to matching files inside the repo. Files outside it open read-only (`Ctrl+P`/`Ctrl+G`/`Ctrl+F` still work; `Ctrl+O` returns along a jump). The selected repo is named in orange in the title bar. Pick the top row to go back to the whole workspace. Refused when the opened directory is already a git repo |
+| `Ctrl+W` | **Workspace repo** — re-root the editor at a nested git repo under the opened directory (pick the top `name/` row to go back to the whole workspace). The file tree, query bar, `Ctrl+P`/`Ctrl+U`/`Ctrl+G`, change highlights, and git views then cover that repo only, as if you had opened it directly; the title bar shows `working repo: …` in orange next to the path. Each repo remembers its own tabs, open file, and tree position (also across relaunch), and switching stashes unsaved edits as a draft. Refused when the opened directory is already a git repo |
 | `Ctrl+G` | **Grep the repo** — colored preview on top, results below; `↑/↓` + `Enter` jumps |
 | `Ctrl+T` | **Inspection dashboard** — store stats + LSP control ([below](#inspection-mode-ctrlt)) |
 | `Shift+Tab` | Cycle the focused tab (wraps) |
@@ -131,11 +131,6 @@ Powered by the file's language server.
 Type to search — matches highlight live (case-insensitive; regex supported,
 falling back to literal). `↑/↓` cycles the focused match (orange), `Enter`
 jumps the cursor to it, `Esc` backs out.
-
-In the read-only view of a file outside the selected Ctrl+W repo, `Ctrl+F`
-still searches and `Enter` scrolls to the match, but `Ctrl+E` refuses ("replace
-disabled") because there is no edit session. `Ctrl+O` likewise works from that
-view, so a jump that landed outside the repo can be walked back.
 
 Press **`Ctrl+E` while matches are highlighted** to enter the replace bar:
 

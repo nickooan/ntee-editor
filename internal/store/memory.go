@@ -13,8 +13,8 @@ type Memory struct {
 	snapshots map[int64]Snapshot
 	session   *Session
 	drafts    map[string]Draft
-	tabs      *Tabs
-	corpus    *CorpusIndex
+	tabs      map[string]Tabs        // by scope ("" = the project)
+	corpus    map[string]CorpusIndex // by scope
 }
 
 func (m *Memory) Maintenance() (DBInfo, error) { return DBInfo{}, ErrNoStats }
@@ -26,6 +26,8 @@ func NewMemory() *Memory {
 		opened:    map[string]OpenedFile{},
 		snapshots: map[int64]Snapshot{},
 		drafts:    map[string]Draft{},
+		tabs:      map[string]Tabs{},
+		corpus:    map[string]CorpusIndex{},
 	}
 }
 
@@ -111,26 +113,27 @@ func (m *Memory) DeleteDraft(path string) error {
 	return nil
 }
 
-func (m *Memory) SaveTabs(t Tabs) error {
-	m.tabs = &t
+func (m *Memory) SaveTabs(t Tabs) error           { return m.SaveTabsFor("", t) }
+func (m *Memory) LoadTabs() (Tabs, bool)          { return m.LoadTabsFor("") }
+func (m *Memory) SaveCorpus(c CorpusIndex) error  { return m.SaveCorpusFor("", c) }
+func (m *Memory) LoadCorpus() (CorpusIndex, bool) { return m.LoadCorpusFor("") }
+
+func (m *Memory) SaveTabsFor(scope string, t Tabs) error {
+	m.tabs[scope] = t
 	return nil
 }
 
-func (m *Memory) LoadTabs() (Tabs, bool) {
-	if m.tabs == nil {
-		return Tabs{}, false
-	}
-	return *m.tabs, true
+func (m *Memory) LoadTabsFor(scope string) (Tabs, bool) {
+	t, ok := m.tabs[scope]
+	return t, ok
 }
 
-func (m *Memory) SaveCorpus(c CorpusIndex) error {
-	m.corpus = &c
+func (m *Memory) SaveCorpusFor(scope string, c CorpusIndex) error {
+	m.corpus[scope] = c
 	return nil
 }
 
-func (m *Memory) LoadCorpus() (CorpusIndex, bool) {
-	if m.corpus == nil {
-		return CorpusIndex{}, false
-	}
-	return *m.corpus, true
+func (m *Memory) LoadCorpusFor(scope string) (CorpusIndex, bool) {
+	c, ok := m.corpus[scope]
+	return c, ok
 }

@@ -46,10 +46,6 @@ func (m Model) handleSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "down", "ctrl+f":
 		m = m.nextMatch(1)
 	case "ctrl+e":
-		if m.searchPrevMode != modeEdit {
-			m.errText = "read-only view: replace disabled"
-			break
-		}
 		if m.searchInput != "" && len(m.searchMatches()) > 0 {
 			return m.enterSearchExec(), nil
 		}

@@ -425,6 +425,12 @@ func (m Model) handleDefinition(msg definitionMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	all := m.collectInRootCandidates(msg.locs)
+	if len(all) == 0 && len(msg.locs) > 0 && m.activeRepo != "" {
+		// The server found it, but in another repo of the workspace — say so
+		// rather than falling through to "no definition found".
+		m.errText = "definition is outside repo " + m.activeRepo
+		return m, nil
+	}
 	// Split off hits on the cursor's own line: those mean the cursor is
 	// already ON the definition, where the useful question becomes "who
 	// references this?".
@@ -600,7 +606,7 @@ func (m Model) jumpBack() (tea.Model, tea.Cmd) {
 	if !ok {
 		return next, nil
 	}
-	if frame.inDiff && !next.isReadOnlyPath(frame.relPath) {
+	if frame.inDiff {
 		// The origin was a diff review: re-enter it. The diff is re-derived
 		// (the buffer may have changed at the jump target); diffPending*
 		// restore the review position when the recomputed rows land.
@@ -612,7 +618,7 @@ func (m Model) jumpBack() (tea.Model, tea.Cmd) {
 		next.mode = modeDiff
 		return next, next.computeDiffCmd()
 	}
-	if frame.inBlame && !next.isReadOnlyPath(frame.relPath) {
+	if frame.inBlame {
 		// The origin was a blame view: same re-entry story.
 		next.blamePendingCursor, next.blamePendingScroll = frame.blameCursor, frame.blameScrollY
 		next.blameHasPending = true
@@ -645,13 +651,11 @@ func (m Model) openJumpFile(rel string, cy, cx, scrollY int) (Model, bool) {
 	m.openRel = rel
 	m.selectedCommand = rel
 	m = m.beginEditSession(f.Content) // does not touch the jump stack
-	readOnly := m.isReadOnlyPath(rel)
-	if !readOnly {
-		if d, ok := m.db.LoadDraft(rel); ok {
-			m = m.restoreDraft(d)
-		}
+	if d, ok := m.db.LoadDraft(rel); ok {
+		m = m.restoreDraft(d)
 	}
 	m = m.addTab(rel)
+	m.mode = modeEdit
 	m.edit.cy, m.edit.cx = cy, cx
 	m.edit.clampCursor()
 	m.fileScrollY = scrollY
@@ -659,13 +663,5 @@ func (m Model) openJumpFile(rel string, cy, cx, scrollY int) (Model, bool) {
 	if client, ok := m.lsp.ClientFor(f.Path); ok {
 		client.DidOpen(f.Path, f.Content)
 	}
-	if readOnly {
-		// Outside the selected repo: land in the view pane. The jump trail is
-		// kept, so Ctrl+O returns from this read-only stop.
-		m.mode = modeQuery
-		m.notice = "read-only: outside repo " + m.activeRepo
-		return m, true
-	}
-	m.mode = modeEdit
 	return m, true
 }

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"path/filepath"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -121,6 +122,7 @@ func (m Model) executeCommand(cmd string) (tea.Model, tea.Cmd) {
 const (
 	fuzzyPromptGoto        = "goto "
 	fuzzyPromptUncommitted = "uncommitted "
+	fuzzyPromptRepo        = "Repo: "
 )
 
 // fuzzyGotoCandidates builds the Ctrl+P list: recents first, then the rest of
@@ -180,7 +182,7 @@ func (m Model) openFuzzy() (Model, tea.Cmd) {
 // set are never in the walk corpus, so only openable files remain). A fresh
 // status refresh is batched so the set stays honest for the next open.
 func (m Model) openUncommitted() (Model, tea.Cmd) {
-	if !m.gitRepo {
+	if !m.gitStatusEnabled() {
 		m.errText = "not a git repository"
 		return m, nil
 	}
@@ -220,9 +222,12 @@ func (m Model) refreshFuzzyCandidates() Model {
 	selected := m.fuzzySelectedPath()
 	previousIndex := m.fuzzyIndex
 	var ordered []string
-	if m.fuzzyPrompt == fuzzyPromptUncommitted {
+	switch m.fuzzyPrompt {
+	case fuzzyPromptUncommitted:
 		ordered = m.fuzzyUncommittedCandidates()
-	} else {
+	case fuzzyPromptRepo:
+		ordered, m.repoRels = m.repoPickerCandidates()
+	default:
 		ordered = m.fuzzyGotoCandidates()
 	}
 	m.fuzzyCorpus = fuzzy.Prepare(ordered)
@@ -247,12 +252,74 @@ func (m Model) closeFuzzy() Model {
 	m.fuzzyQuery = ""
 	m.fuzzyIndex = 0
 	m.fuzzyPrompt = ""
+	m.repoRels = nil
 	return m
+}
+
+// workspaceLabel is the Ctrl+W row that roots the editor back at the opened
+// directory, shown as its base name with a trailing slash.
+func (m Model) workspaceLabel() string {
+	return filepath.Base(m.workspaceRoot) + "/"
+}
+
+// repoPickerCandidates is the Ctrl+W list: the workspace itself first, then
+// each nested git repo's workspace-relative directory. rels[i] is "" for the
+// workspace row and the repo path for the others.
+func (m Model) repoPickerCandidates() (labels, rels []string) {
+	labels = append(labels, m.workspaceLabel())
+	rels = append(rels, "")
+	for _, rel := range m.workspaceRepos {
+		labels = append(labels, rel+"/")
+		rels = append(rels, rel)
+	}
+	return labels, rels
+}
+
+// openRepoPicker opens the Ctrl+W repo list. The opened directory has to be a
+// workspace — a directory that is not itself a git repository. The list is
+// repo roots only (plus the workspace row), filtered like Ctrl+P, and is the
+// same whichever root the editor is currently at.
+func (m Model) openRepoPicker() (Model, tea.Cmd) {
+	if m.workspaceIsRepo {
+		m.errText = "not a workspace directory"
+		return m, nil
+	}
+	m = m.closeCompletion()
+	labels, rels := m.repoPickerCandidates()
+	m.fuzzyOpen = true
+	m.fuzzyQuery = ""
+	m.fuzzyIndex = 0
+	m.fuzzyPrompt = fuzzyPromptRepo
+	m.repoRels = rels
+	m.fuzzyCorpus = fuzzy.Prepare(labels)
+	m.fuzzyMatches = fuzzy.Filter("", m.fuzzyCorpus)
+	return m, nil
+}
+
+// selectWorkspaceRepo applies the Ctrl+W choice: it re-roots the editor at
+// that repo ("" = the opened directory), so the tree, search, and git views
+// all work on it alone. Choosing the current root just closes the picker.
+func (m Model) selectWorkspaceRepo(rel string) (Model, tea.Cmd) {
+	rel = strings.Trim(filepath.ToSlash(rel), "/")
+	m = m.closeFuzzy()
+	if rel == m.activeRepo {
+		return m, nil
+	}
+	m, cmd := m.switchRoot(rel)
+	if rel == "" {
+		m.notice = "workspace " + strings.TrimSuffix(m.workspaceLabel(), "/")
+	} else {
+		m.notice = "repo " + rel
+	}
+	return m, cmd
 }
 
 func (m Model) handleFuzzyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "esc", "ctrl+p", "ctrl+u":
+	case "esc", "ctrl+p", "ctrl+u", "ctrl+w":
+		if msg.String() == "ctrl+w" && m.fuzzyPrompt != fuzzyPromptRepo {
+			return m.openRepoPicker()
+		}
 		m = m.closeFuzzy()
 	case "enter":
 		if len(m.fuzzyMatches) == 0 {
@@ -260,7 +327,15 @@ func (m Model) handleFuzzyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			break
 		}
 		idx := input.Clamp(m.fuzzyIndex, 0, len(m.fuzzyMatches)-1)
-		rel := m.fuzzyCorpus[m.fuzzyMatches[idx].Index].Text
+		matchIndex := m.fuzzyMatches[idx].Index
+		if m.fuzzyPrompt == fuzzyPromptRepo {
+			rel := ""
+			if matchIndex >= 0 && matchIndex < len(m.repoRels) {
+				rel = m.repoRels[matchIndex]
+			}
+			return m.selectWorkspaceRepo(rel)
+		}
+		rel := m.fuzzyCorpus[matchIndex].Text
 		if strings.HasSuffix(rel, "/") {
 			// Directory: drill down inside the finder instead of opening.
 			m.fuzzyQuery = rel
@@ -313,9 +388,14 @@ func (m Model) fuzzySelectedPath() string {
 
 func (m Model) refreshFuzzy() Model {
 	m.fuzzyMatches = fuzzy.Filter(m.fuzzyQuery, m.fuzzyCorpus)
-	// After Enter-on-a-directory sets the query to that directory, the dir
-	// itself would rank first (exact, shortest) and Enter would loop on it;
-	// a dir candidate equal to the query offers nothing, so drop it.
+	// Repo rows are directories the user selects, not drills into, so an
+	// exact "repo/" query must stay in the list. The goto finder drops that
+	// row: Enter-on-a-directory sets the query to the dir, and leaving it
+	// ranked first would loop.
+	if m.fuzzyPrompt == fuzzyPromptRepo {
+		m.fuzzyIndex = 0
+		return m
+	}
 	if q := strings.ToLower(m.fuzzyQuery); strings.HasSuffix(q, "/") {
 		kept := m.fuzzyMatches[:0]
 		for _, match := range m.fuzzyMatches {

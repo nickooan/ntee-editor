@@ -221,6 +221,56 @@ func IsGitRepo(dir string) bool {
 	return err == nil
 }
 
+// FindNestedGitRepos returns the root-relative paths of every directory under
+// root that contains a .git entry, excluding root itself. The walk uses the
+// same cached directory listings as the file tree, skips hard- and
+// soft-ignored names (.git is seen so a repo is recorded, then not descended),
+// and does not apply gitignore — a workspace of repos has no single ignore
+// file covering them. Call it off the UI goroutine.
+func FindNestedGitRepos(root string, ignore []string) []string {
+	if root == "" {
+		return nil
+	}
+	resolvedRoot, err := filepath.Abs(root)
+	if err != nil {
+		return nil
+	}
+	var repos []string
+	var walk func(dirPath string, depth int)
+	walk = func(dirPath string, depth int) {
+		if depth > maxScanDepth {
+			return
+		}
+		resolvedDir := filepath.Join(resolvedRoot, dirPath)
+		if !isInsideRoot(resolvedRoot, resolvedDir) {
+			return
+		}
+		children, _, err := readDirectorySorted(resolvedDir)
+		if err != nil {
+			return
+		}
+		for _, child := range children {
+			if child.name == ".git" && dirPath != "" {
+				repos = append(repos, dirPath)
+				break
+			}
+		}
+		for _, child := range children {
+			if !child.isDir || hardIgnored(child.name, ignore) || softIgnored(child.name) {
+				continue
+			}
+			rel := child.name
+			if dirPath != "" {
+				rel = dirPath + "/" + child.name
+			}
+			walk(rel, depth+1)
+		}
+	}
+	walk("", 0)
+	sort.Strings(repos)
+	return repos
+}
+
 // FindRepoRoot returns the nearest ancestor of filePath — walking up to and
 // including editorRoot — that IsGitRepo. If none is found, or filePath lies
 // outside editorRoot, it returns the absolute editorRoot. Used to scope a
@@ -580,22 +630,31 @@ func BuildExpandedDirectoryPaths(command string) map[string]bool {
 	return out
 }
 
-// FindFileTreeMatchIndex returns the best match (exact > prefix > substring)
-// for input over CommandValue/Name, or -1.
+// FindFileTreeMatchIndex returns the best match for input over
+// CommandValue/Name, or -1: an exact full path, then an exact name, then a
+// prefix, then a substring. The full path outranks the name so a root-level
+// "main.go" is not shadowed by an earlier nested ".../main.go".
 func FindFileTreeMatchIndex(entries []FileTreeEntry, input string) int {
 	normalized := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(input), "\\", "/"))
 	if normalized == "" {
 		return -1
 	}
 
+	exactName := -1
 	startsWith := -1
 	includes := -1
 	for i, entry := range entries {
 		command := strings.ToLower(entry.CommandValue)
 		name := strings.ToLower(entry.Name)
 
-		if command == normalized || name == normalized {
+		if command == normalized {
 			return i
+		}
+		if name == normalized {
+			if exactName == -1 {
+				exactName = i
+			}
+			continue
 		}
 		if startsWith == -1 && (strings.HasPrefix(command, normalized) || strings.HasPrefix(name, normalized)) {
 			startsWith = i
@@ -605,6 +664,9 @@ func FindFileTreeMatchIndex(entries []FileTreeEntry, input string) int {
 		}
 	}
 
+	if exactName != -1 {
+		return exactName
+	}
 	if startsWith != -1 {
 		return startsWith
 	}

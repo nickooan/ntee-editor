@@ -85,6 +85,7 @@ Five things to know in your first five minutes:
 |---|---|
 | `Ctrl+P` | **Goto file** — fuzzy finder; empty query lists recent files |
 | `Ctrl+U` | Goto **uncommitted** file — same finder, limited to git-dirty paths |
+| `Ctrl+W` | **Workspace repo** — re-root the editor at a nested git repo under the opened directory (pick the top `name/` row to go back to the whole workspace). The file tree, query bar, `Ctrl+P`/`Ctrl+U`/`Ctrl+G`, change highlights, and git views then cover that repo only, as if you had opened it directly; the title bar shows `working repo: …` in orange next to the path. Each repo remembers its own tabs, open file, and tree position (also across relaunch), and switching stashes unsaved edits as a draft. Refused when the opened directory is already a git repo |
 | `Ctrl+G` | **Grep the repo** — colored preview on top, results below; `↑/↓` + `Enter` jumps |
 | `Ctrl+T` | **Inspection dashboard** — store stats + LSP control ([below](#inspection-mode-ctrlt)) |
 | `Shift+Tab` | Cycle the focused tab (wraps) |
@@ -150,11 +151,11 @@ Editor commands with Tab-completed suggestions:
 
 | Command | Action |
 |---|---|
-| `copy` (`cp`) `[a-b\|all\|fpath]` | copy the selection, a line range, the whole buffer, or the file's path |
+| `copy` (`cp`) `[a-b\|all\|fpath]` | copy the selection, a line range, the whole buffer, or the file's path (relative to its git repo when it is in one) |
 | `jump` (`jp`) `<line\|top\|end>` | go to a line (lands ~30% from the top) |
 | `git scf` | **s**olve **c**on**f**lict: review the buffer's conflicts interactively — ours tinted green, theirs blue, markers yellow. `↑/↓` move line by line, `Shift+↑/↓` jump between conflict blocks; on a marker line a picker pops up: `←/→` choose **Use HEAD / Use \<branch\> / Use both**, `Enter` applies (each apply is one `Ctrl+Z` step), `Esc` back to editing at the cursor — applied resolutions stay, untouched conflicts remain |
-| `git diff [rev]` | review the file's uncommitted changes (or its diff against `rev`) in a read-only GitHub-style view: added lines green with a `+` gutter marker, removed lines red with `-` (no number). `↑/↓`/`PgUp`/`PgDn` review, `Shift+↑/↓` jump between change hunks, `Ctrl+J` jump to definition (`Ctrl+O` returns to the review), `Esc` back to editing at the reviewed line |
-| `git blame` | annotate every line with its author and commit date in a read-only view — the gutter shows `author date │` instead of line numbers; unsaved or uncommitted lines show a dimmed `uncommitted` placeholder. `↑/↓`/`PgUp`/`PgDn` move, `Shift+↑/↓` jump between commit groups, `Ctrl+J` jump to definition (`Ctrl+O` returns to the blame), `Esc` back to editing at the cursor line |
+| `git diff [rev]` | review the file's uncommitted changes (or its diff against `rev`) in a read-only GitHub-style view: added lines green with a `+` gutter marker, removed lines red with `-` (no number). `↑/↓`/`PgUp`/`PgDn` review, `Shift+↑/↓` jump between change hunks, `Ctrl+J` jump to definition (`Ctrl+O` returns to the review), `Esc` back to editing at the reviewed line. In a workspace the file's own repo is used |
+| `git blame` | annotate every line with its author and commit date in a read-only view — the gutter shows `author date │` instead of line numbers; unsaved or uncommitted lines show a dimmed `uncommitted` placeholder. `↑/↓`/`PgUp`/`PgDn` move, `Shift+↑/↓` jump between commit groups, `Ctrl+J` jump to definition (`Ctrl+O` returns to the blame), `Esc` back to editing at the cursor line. In a workspace the file's own repo is used |
 | `tab <name\|cl\|cr>` | switch tab / close-left / close-right |
 
 ### Command bar (`:`)

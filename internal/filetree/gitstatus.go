@@ -1,6 +1,7 @@
 package filetree
 
 import (
+	"path/filepath"
 	"strings"
 
 	"github.com/nickooan/ntee-editor/internal/gitcmd"
@@ -32,6 +33,41 @@ func GitDirtySet(root string) (map[string]bool, bool) {
 		markDirty(dirty, p)
 	}
 	return dirty, true
+}
+
+// MergeRepoDirty unions GitDirtySet for each root-relative repo. Paths are
+// rewritten to be relative to root (so the sidebar can look them up), and
+// ancestors above each repo are marked too — a collapsed parent of a repo
+// still renders dirty. ok is false only when every repo fails or repos is
+// empty. Call it off the UI goroutine.
+func MergeRepoDirty(root string, repos []string) (map[string]bool, bool) {
+	if len(repos) == 0 {
+		return nil, false
+	}
+	merged := map[string]bool{}
+	anyOK := false
+	for _, rel := range repos {
+		rel = strings.Trim(filepath.ToSlash(rel), "/")
+		if rel == "" || rel == "." {
+			continue
+		}
+		dirty, ok := GitDirtySet(filepath.Join(root, filepath.FromSlash(rel)))
+		if !ok {
+			continue
+		}
+		anyOK = true
+		for path := range dirty {
+			full := rel
+			if path != "" {
+				full = rel + "/" + path
+			}
+			markDirty(merged, full)
+		}
+	}
+	if !anyOK {
+		return nil, false
+	}
+	return merged, true
 }
 
 // parsePorcelain extracts the repo-relative paths from `git status --porcelain

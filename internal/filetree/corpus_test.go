@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -58,6 +59,24 @@ func TestBuildAllEntriesHonorsMaxFiles(t *testing.T) {
 	all, _, trunc := BuildAllEntries(root, nil, nil, 0)
 	if trunc || len(all) != 20 {
 		t.Fatalf("unlimited walk wrong: truncated=%v n=%d", trunc, len(all))
+	}
+}
+
+func TestFindNestedGitRepos(t *testing.T) {
+	ClearDirCache()
+	root := t.TempDir()
+	mkfile(t, root, "notes.txt")
+	mkfile(t, root, "apps/web/.git/config")
+	mkfile(t, root, "apps/web/main.go")
+	mkfile(t, root, "libs/core/.git/config")
+	mkfile(t, root, "libs/core/lib.go")
+	mkfile(t, root, "libs/core/nested/.git/HEAD")
+	mkfile(t, root, "skip/node_modules/pkg/.git/config")
+
+	got := FindNestedGitRepos(root, nil)
+	want := []string{"apps/web", "libs/core", "libs/core/nested"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("FindNestedGitRepos = %v, want %v", got, want)
 	}
 }
 

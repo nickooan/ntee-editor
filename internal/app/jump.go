@@ -425,6 +425,12 @@ func (m Model) handleDefinition(msg definitionMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	all := m.collectInRootCandidates(msg.locs)
+	if len(all) == 0 && len(msg.locs) > 0 && m.activeRepo != "" {
+		// The server found it, but in another repo of the workspace — say so
+		// rather than falling through to "no definition found".
+		m.errText = "definition is outside repo " + m.activeRepo
+		return m, nil
+	}
 	// Split off hits on the cursor's own line: those mean the cursor is
 	// already ON the definition, where the useful question becomes "who
 	// references this?".

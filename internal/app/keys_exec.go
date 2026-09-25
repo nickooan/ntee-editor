@@ -107,7 +107,7 @@ func (m Model) runExecCommand(cmd string) (tea.Model, tea.Cmd) {
 		}
 		return m.enterPreview(&graphqlKind)
 	case "cpfp":
-		m = m.execCopyPath(m.openRel)
+		m = m.execCopyPath(m.repoRelativePath(m.openRel))
 	case "cpafp":
 		var abs string
 		if m.openFile != nil {
@@ -130,8 +130,9 @@ func (m Model) runExecCommand(cmd string) (tea.Model, tea.Cmd) {
 
 // execCopy copies to the clipboard by argument: the selection (no arg), a line
 // range ("a" / "a-b", 1-based inclusive), "all" (whole buffer), or "fpath" (the
-// file's root-relative path). On success it flashes "copied" and returns to edit
-// mode; on error it stays in exec mode so the user can correct the input.
+// file's repo-relative path, else its workspace path). On success it flashes
+// "copied" and returns to edit mode; on error it stays in exec mode so the
+// user can correct the input.
 func (m Model) execCopy(arg string) Model {
 	var text string
 	switch {
@@ -144,7 +145,7 @@ func (m Model) execCopy(arg string) Model {
 	case arg == "all":
 		text = m.edit.content() + "\n"
 	case arg == "fpath":
-		text = m.openRel
+		text = m.repoRelativePath(m.openRel)
 	default:
 		lo, hi, ok := parseLineRange(arg, len(m.edit.lines))
 		if !ok {

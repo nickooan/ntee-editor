@@ -43,9 +43,9 @@ The files divide the work cleanly:
 
 `chainIgnored` asks a shallow-to-deep chain of directory-scoped matchers whether a path is ignored; a deeper file's opinion wins, including `!` re-includes. `loadNestedGitignore` compiles a directory's own `.gitignore` through the mtime-keyed cache, and `extendChain` appends it to the chain — using a full-slice-expression append so sibling recursions can't clobber each other's backing array. `hasGitignore` lets the walk skip all of that for the vast majority of directories that have no `.gitignore` at all.
 
-`FindRepoRoot` walks up from a file to the nearest `.git` (bounded by the editor root); `FindProjectRoot` does the same for language-project markers (`go.mod`, `package.json`, `Cargo.toml`, …) so a language server in a monorepo scopes to the sub-project, not the whole repo.
+`FindRepoRoot` walks up from a file to the nearest `.git` (bounded by the editor root); `FindProjectRoot` does the same for language-project markers (`go.mod`, `package.json`, `Cargo.toml`, …) so a language server in a monorepo scopes to the sub-project, not the whole repo. `FindNestedGitRepos` lists every directory under a workspace root that contains a `.git` entry (the root itself excluded), using the same cached listings as the tree — this is what Ctrl+W offers.
 
-`BuildExpandedDirectoryPaths` turns a typed command path into the set of directories to expand — every ancestor, plus the last segment when the path ends in `/`. `FindFileTreeMatchIndex` picks the entry a typed input refers to (exact beats prefix beats substring), and `ResolveHighlightedEntry` falls back to the nearest expanded ancestor directory when nothing matches.
+`BuildExpandedDirectoryPaths` turns a typed command path into the set of directories to expand — every ancestor, plus the last segment when the path ends in `/`. `FindFileTreeMatchIndex` picks the entry a typed input refers to (exact full path beats exact name beats prefix beats substring — so a root-level `main.go` is not shadowed by an earlier nested `web/main.go`), and `ResolveHighlightedEntry` falls back to the nearest expanded ancestor directory when nothing matches.
 
 `BuildFileTreeViewport` windows the entry list to the visible height, centering the highlighted row.
 
@@ -81,7 +81,7 @@ The files divide the work cleanly:
 
 `GitDirtySet` shells out to `git status --porcelain -z --untracked-files=all` (via `gitcmd`, so it can't hang) and returns every dirty path *plus every ancestor directory* as a set — that pre-marking is what lets a collapsed directory render yellow with a plain O(1) lookup at walk time. `ok=false` means "not a repo or git failed"; callers treat it as feature-off. Run it off the UI goroutine.
 
-`parsePorcelain` extracts repo-relative paths from the NUL-separated porcelain records, handling the extra origin-path record that rename/copy entries carry (both sides count as changes). It's a pure function, unit-tested without git. `markDirty` inserts one path and all its ancestors into the set.
+`parsePorcelain` extracts repo-relative paths from the NUL-separated porcelain records, handling the extra origin-path record that rename/copy entries carry (both sides count as changes). It's a pure function, unit-tested without git. `markDirty` inserts one path and all its ancestors into the set. `MergeRepoDirty` runs `GitDirtySet` in each nested repo of a workspace and prefixes the paths so they match the workspace-rooted tree; ancestors above each repo are marked too.
 
 ### inputsuggest.go
 

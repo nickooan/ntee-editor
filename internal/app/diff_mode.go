@@ -54,8 +54,8 @@ func (m Model) enterDiff(base string) (tea.Model, tea.Cmd) {
 		m.errText = "no file open"
 		return m, nil
 	}
-	if !m.gitRepo {
-		m.errText = "not a git repository"
+	if _, _, ok, loading := m.gitScopeFor(m.openRel); !ok {
+		m.errText = gitScopeError(loading)
 		return m, nil
 	}
 	// A revision starting with "-" would reach git's argv as an option, not an
@@ -92,7 +92,8 @@ func (m Model) clearDiffState() Model {
 // goroutine (precedent: refreshGitStatusCmd). The snapshot copy also makes
 // the closure safe against buffer edits racing a stale result.
 func (m Model) computeDiffCmd() tea.Cmd {
-	gen, rel, base, root := m.diffGen, m.openRel, m.diffBase, m.root
+	gen, rel, base := m.diffGen, m.openRel, m.diffBase
+	root, repoRel, _, _ := m.gitScopeFor(rel)
 	cur := append([]string(nil), m.edit.lines...)
 	return func() tea.Msg {
 		msg := diffReadyMsg{gen: gen, rel: rel, base: base}
@@ -114,7 +115,7 @@ func (m Model) computeDiffCmd() tea.Cmd {
 		}
 		var old []string
 		if !msg.newFile {
-			out, err := gitcmd.Out(root, "show", rev+":"+rel)
+			out, err := gitcmd.Out(root, "show", rev+":"+repoRel)
 			switch {
 			case err != nil:
 				msg.newFile = true // path absent in that revision: new file

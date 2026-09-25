@@ -157,3 +157,60 @@ func TestGitDirtySetIntegration(t *testing.T) {
 		t.Fatal("non-repo must report ok=false")
 	}
 }
+
+func TestMergeRepoDirtyPrefixesPaths(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	root := t.TempDir()
+	initRepo := func(rel string) {
+		t.Helper()
+		dir := filepath.Join(root, rel)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		git := func(args ...string) {
+			t.Helper()
+			cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+			cmd.Env = append(os.Environ(),
+				"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+				"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
+			)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("git %v: %v\n%s", args, err, out)
+			}
+		}
+		git("init", "-q")
+		if err := os.WriteFile(filepath.Join(dir, "tracked.go"), []byte("v1\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		git("add", "-A")
+		git("commit", "-q", "-m", "init")
+	}
+	initRepo("apps/web")
+	initRepo("libs/core")
+	if err := os.WriteFile(filepath.Join(root, "apps", "web", "tracked.go"), []byte("v2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dirty, ok := MergeRepoDirty(root, []string{"apps/web", "libs/core"})
+	if !ok {
+		t.Fatal("MergeRepoDirty must succeed")
+	}
+	for _, want := range []string{"apps", "apps/web", "apps/web/tracked.go"} {
+		if !dirty[want] {
+			t.Errorf("workspace dirty set missing %q: %v", want, dirty)
+		}
+	}
+	if dirty["libs/core"] || dirty["libs/core/tracked.go"] {
+		t.Errorf("clean repo must not be marked: %v", dirty)
+	}
+
+	only, ok := MergeRepoDirty(root, []string{"libs/core"})
+	if !ok {
+		t.Fatal("clean repo must still report ok")
+	}
+	if len(only) != 0 {
+		t.Fatalf("selecting the clean repo must highlight nothing, got %v", only)
+	}
+}

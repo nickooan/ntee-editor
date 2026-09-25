@@ -24,16 +24,41 @@ func (m Model) queryInputSuggestions(entries []filetree.FileTreeEntry) []filetre
 		return nil
 	}
 	f := m.frames
-	if f != nil && f.sugOk && f.sugSeq == f.seq && f.sugKey == m.command {
+	sugKey := m.activeRepo + "\x00" + m.command
+	if f != nil && f.sugOk && f.sugSeq == f.seq && f.sugKey == sugKey {
 		return f.suggestions
 	}
 	// Reads the cached corpus and its precomputed fuzzy data (populated by
 	// ensureCorpus in the key handler); never walks or re-prepares here.
-	suggestions := filetree.BuildInputSuggestions(entries, m.corpus, m.dirCorpus, m.queryPrepared, m.command, filetree.MaxInputSuggestions)
+	// A selected git repo limits the popup to that repo; Ctrl+P and Ctrl+G
+	// keep using the full workspace corpus.
+	files, dirs, prepared := m.corpus, m.dirCorpus, m.queryPrepared
+	visible := entries
+	if m.activeRepo != "" && !m.gitRepo {
+		files, dirs, prepared = m.scopedFiles, m.scopedDirs, m.scopedPrepared
+		visible = entriesUnderRepo(entries, m.activeRepo)
+	}
+	suggestions := filetree.BuildInputSuggestions(visible, files, dirs, prepared, m.command, filetree.MaxInputSuggestions)
 	if f != nil {
-		f.sugOk, f.sugSeq, f.sugKey, f.suggestions = true, f.seq, m.command, suggestions
+		f.sugOk, f.sugSeq, f.sugKey, f.suggestions = true, f.seq, sugKey, suggestions
 	}
 	return suggestions
+}
+
+// entriesUnderRepo keeps sidebar rows that sit at or inside repo so the query
+// popup's exact/prefix stage cannot offer another repo's files. The tree
+// itself is unfiltered — this slice is only for suggestions.
+func entriesUnderRepo(entries []filetree.FileTreeEntry, repo string) []filetree.FileTreeEntry {
+	if repo == "" {
+		return entries
+	}
+	out := make([]filetree.FileTreeEntry, 0, len(entries))
+	for _, entry := range entries {
+		if pathUnderRepo(entry.RelativePath, repo) {
+			out = append(out, entry)
+		}
+	}
+	return out
 }
 
 // handleQueryKey is the home-mode handler: the bottom input bar drives the
@@ -107,9 +132,26 @@ func (m Model) dispatchQueryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case "tab":
 		if m.openFile != nil {
+			if m.isReadOnlyPath(m.openRel) {
+				m.errText = "read-only: outside repo " + m.activeRepo
+				break
+			}
 			m = m.beginEditSession(m.openFile.Content)
 			m.mode = modeEdit
 		}
+
+	case "ctrl+f":
+		// In-file search over the viewed file. Works in the read-only pane too
+		// (replace is refused there, in the search handler).
+		if m.openFile != nil {
+			m = m.flushBurst()
+			return m.enterSearch(modeQuery, m.openFile.Content), nil
+		}
+
+	case "ctrl+o":
+		// Walk back along the jump trail even when the last jump landed in a
+		// read-only file (the trail survives view-pane navigation).
+		return m.jumpBack()
 
 	case "backspace":
 		m = m.adoptPreview()
@@ -354,19 +396,35 @@ func (m Model) moveInputSuggestion(suggestions []filetree.InputSuggestion, direc
 }
 
 // moveSidebarSelection walks the sidebar highlight row-by-row (Shift+↑/↓ with
-// the popup closed). Highlight + preview only — never expands.
+// the popup closed). Highlight + preview only — never expands. When a repo is
+// selected the walk stops at its edge; a highlight that already drifted outside
+// (mouse click, Ctrl+P open) snaps back to the repo root on the first press.
 func (m Model) moveSidebarSelection(entries []filetree.FileTreeEntry, direction int) Model {
 	current := m.highlightedEntryIndex(entries)
-	next := filetree.ResolveNextFileTreeSelectionIndex(entries, current, direction)
-	if next >= 0 {
-		m.keyboardSelectedCommand = entries[next].CommandValue
-		m.commandPreview = entries[next].CommandValue
+	if current >= 0 && m.isReadOnlyPath(entries[current].RelativePath) {
+		if root := findEntryIndex(entries, m.activeRepo); root >= 0 {
+			m.keyboardSelectedCommand = entries[root].CommandValue
+			m.commandPreview = entries[root].CommandValue
+			return m
+		}
 	}
+	next := filetree.ResolveNextFileTreeSelectionIndex(entries, current, direction)
+	if next < 0 {
+		return m
+	}
+	if m.isReadOnlyPath(entries[next].RelativePath) {
+		m.errText = "cannot select outside repo " + m.activeRepo
+		return m
+	}
+	m.keyboardSelectedCommand = entries[next].CommandValue
+	m.commandPreview = entries[next].CommandValue
 	return m
 }
 
 // moveQueryToParentDirectory (Esc) drops the last path segment and confirms
-// the parent, collapsing the tree accordingly.
+// the parent, collapsing the tree accordingly. At the top edge of a selected
+// repo it stops rather than stepping outside; from a highlight that already
+// drifted outside it returns to the repo root.
 func (m Model) moveQueryToParentDirectory() Model {
 	source := m.command
 	if strings.TrimSpace(source) == "" {
@@ -374,6 +432,22 @@ func (m Model) moveQueryToParentDirectory() Model {
 	}
 	parent, ok := filetree.ResolveParentDirectoryCommand(source)
 	if !ok {
+		return m
+	}
+	if m.isReadOnlyPath(parent) {
+		if !m.isReadOnlyPath(source) {
+			// At the repo's top edge: stop rather than step outside.
+			m.errText = "cannot go outside repo " + m.activeRepo
+			return m
+		}
+		// The highlight had drifted outside the repo: come back to its root.
+		root := m.repoRootCommand()
+		m.keyboardSelectedCommand = ""
+		m.commandPreview = ""
+		m.selectedCommand = root
+		m.command = root
+		m.qCursor = len([]rune(root))
+		m.suppressQuerySuggestions = false
 		return m
 	}
 	m.keyboardSelectedCommand = ""
@@ -398,6 +472,10 @@ func (m Model) submitQuery(entries []filetree.FileTreeEntry, suggestions []filet
 	// the generic ":" branch so a root-level ":mkdir x" doesn't land in
 	// executeCommand.
 	if verb, rel, ok := parseInlineFs(trimmed); ok {
+		if m.activeRepo != "" && !m.gitRepo && !pathUnderRepo(rel, m.activeRepo) {
+			m.errText = "path is outside the current repo"
+			return m, nil
+		}
 		if verb == "rm" {
 			return m.armRemoveConfirm(rel)
 		}
@@ -422,6 +500,10 @@ func (m Model) submitQuery(entries []filetree.FileTreeEntry, suggestions []filet
 		}
 	}
 	if target == nil {
+		return m, nil
+	}
+	if m.activeRepo != "" && !m.gitRepo && trimmed != "" && !pathUnderRepo(target.RelativePath, m.activeRepo) {
+		m.errText = "path is outside the current repo"
 		return m, nil
 	}
 

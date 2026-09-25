@@ -470,7 +470,7 @@ func TestExecGitDiffGuards(t *testing.T) {
 	m = key(m, ctrlKey('e'))
 	m = runes(m, "git diff")
 	m = key(m, keyPress(tea.KeyEnter))
-	if m.errText != "not a git repository" {
+	if m.errText != "file is not in a git repository" {
 		t.Fatalf("errText = %q", m.errText)
 	}
 	if m.mode != modeExec {

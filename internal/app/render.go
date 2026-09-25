@@ -34,7 +34,7 @@ func (m Model) render() string {
 		return m.renderSplash()
 	}
 
-	header := headerStyle.Width(m.width).Render("ntee-editor " + versionTag() + "  ·  " + m.root)
+	header := m.renderHeader()
 	status := m.padStatusRows(m.renderStatusLine())
 	bodyHeight := m.bodyHeight()
 
@@ -119,8 +119,11 @@ func (m Model) renderStatusLine() string {
 		} else {
 			line += renderInputLine(m.command, m.qCursor)
 		}
-		return withNotice(m, line) + "\n" +
-			hintStyle.Render("Enter open+edit · Shift+↑/↓ tree · Esc parent · :mkdir/:touch/:rm · Ctrl + P goto / Q quit")
+		hint := "Enter open+edit · Shift+↑/↓ tree · Esc parent · :mkdir/:touch/:rm · Ctrl+P goto · Ctrl+F find · Ctrl+W repo · Q quit"
+		if m.openFile != nil && m.isReadOnlyPath(m.openRel) {
+			hint = "read-only (outside repo " + m.activeRepo + ") · " + hint
+		}
+		return withNotice(m, line) + "\n" + hintStyle.Render(hint)
 	case modeEdit:
 		return m.renderEditStatus()
 	case modeExec:
@@ -1013,6 +1016,42 @@ func truncateRunes(s string, width int) string {
 	return s
 }
 
+// renderHeader builds the top chrome row: the version/root title plus, when a
+// workspace repo is selected with Ctrl+W, a "working repo: x" label in the
+// same bold yellow the sidebar uses for uncommitted changes. Styling the label
+// apart from the title means Width() can no longer fill the row, so the plain
+// widths are measured and padded by hand; a row too wide for the terminal is
+// cut from the title first so the repo name survives.
+func (m Model) renderHeader() string {
+	const sep = "  ·  "
+	title := "ntee-editor " + versionTag() + sep + m.root
+	repo := ""
+	if m.activeRepo != "" && !m.gitRepo {
+		repo = "working repo: " + m.activeRepo
+	}
+
+	if repo == "" {
+		return headerStyle.Width(m.width).Render(truncateRunes(title, m.width))
+	}
+
+	repoWidth := len([]rune(repo))
+	titleBudget := m.width - len(sep) - repoWidth
+	if titleBudget < 0 {
+		// Not even the label fits: drop the title and cut the label itself.
+		repo = truncateRunes(repo, max(0, m.width))
+		repoWidth = len([]rune(repo))
+		return headerRepoStyle.Render(repo) +
+			headerStyle.Render(strings.Repeat(" ", max(0, m.width-repoWidth)))
+	}
+	line := headerStyle.Render(padTo(truncateRunes(title, titleBudget), titleBudget)) +
+		headerStyle.Render(sep) +
+		headerRepoStyle.Render(repo)
+	if pad := m.width - lipgloss.Width(line); pad > 0 {
+		line += headerStyle.Render(strings.Repeat(" ", pad))
+	}
+	return line
+}
+
 func pad(s string, width int) string {
 	if n := width - len([]rune(s)); n > 0 {
 		return strings.Repeat(" ", n) + s
@@ -1139,9 +1178,10 @@ var (
 )
 
 var (
-	baseStyle   = lipgloss.NewStyle().Foreground(colFg).Background(colBg)
-	headerStyle = lipgloss.NewStyle().Bold(true).Foreground(colAqua).Background(colBgChrome)
-	paneStyle   = lipgloss.NewStyle().Background(colBg).BorderBackground(colBg).
+	baseStyle       = lipgloss.NewStyle().Foreground(colFg).Background(colBg)
+	headerStyle     = lipgloss.NewStyle().Bold(true).Foreground(colAqua).Background(colBgChrome)
+	headerRepoStyle = lipgloss.NewStyle().Bold(true).Foreground(colYellow).Background(colBgChrome)
+	paneStyle       = lipgloss.NewStyle().Background(colBg).BorderBackground(colBg).
 			BorderForeground(colBorder).Border(lipgloss.RoundedBorder())
 	cursorStyle = lipgloss.NewStyle().Foreground(colBg).Background(colFg)
 	gutterStyle = lipgloss.NewStyle().Foreground(colGutter).Background(colBg) // line numbers

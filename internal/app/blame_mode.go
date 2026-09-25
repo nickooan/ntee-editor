@@ -50,8 +50,8 @@ func (m Model) enterBlame() (tea.Model, tea.Cmd) {
 		m.errText = "no file open"
 		return m, nil
 	}
-	if !m.gitRepo {
-		m.errText = "not a git repository"
+	if _, _, ok, loading := m.gitScopeFor(m.openRel); !ok {
+		m.errText = gitScopeError(loading)
 		return m, nil
 	}
 	m = m.clearBlameState()
@@ -81,7 +81,8 @@ func (m Model) clearBlameState() Model {
 // the worktree file, so unsaved edits surface as uncommitted lines — the same
 // "the buffer is the truth" rule diff mode follows.
 func (m Model) computeBlameCmd() tea.Cmd {
-	gen, rel, root := m.blameGen, m.openRel, m.root
+	gen, rel := m.blameGen, m.openRel
+	root, repoRel, _, _ := m.gitScopeFor(rel)
 	cur := append([]string(nil), m.edit.lines...)
 	return func() tea.Msg {
 		msg := blameReadyMsg{gen: gen, rel: rel}
@@ -92,7 +93,7 @@ func (m Model) computeBlameCmd() tea.Cmd {
 		var rows []blameRow
 		if !msg.newFile {
 			out, err := gitcmd.OutIn(root, []byte(strings.Join(cur, "\n")),
-				"blame", "--porcelain", "--contents=-", "--", rel)
+				"blame", "--porcelain", "--contents=-", "--", repoRel)
 			switch {
 			case err != nil && strings.Contains(firstStderrLine(err), "no such path"):
 				msg.newFile = true // path absent in HEAD: new file

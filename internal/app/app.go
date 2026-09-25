@@ -82,11 +82,22 @@ type Model struct {
 	// path plus its ancestor dirs (rendered yellow, folded dirs included). It is
 	// refreshed by a background poll (gitStatusTickMsg) so changes made by
 	// external processes — another terminal, an agent, a build — surface without
-	// any editor input. gitRepo gates the whole feature at startup.
-	gitRepo          bool
-	gitDirty         map[string]bool
-	gitStatusRunning bool
-	gitStatusFailed  bool // latch: notice fires once per healthy→failed transition
+	// any editor input. gitRepo is true when the opened directory is itself a
+	// repository. A workspace (opened directory is not a repo, but contains
+	// nested ones) lists those roots in workspaceRepos; workspaceReposScanned
+	// flips once that list has been calculated, so a not-yet-scanned workspace
+	// can say "still loading" rather than "not a repository". activeRepo ""
+	// highlights every nested repo, and a non-empty root-relative path
+	// highlights only that repo. gitPollArmed keeps the 3s loop from being
+	// started twice.
+	gitRepo               bool
+	workspaceRepos        []string
+	workspaceReposScanned bool
+	activeRepo            string
+	gitPollArmed          bool
+	gitDirty              map[string]bool
+	gitStatusRunning      bool
+	gitStatusFailed       bool // latch: notice fires once per healthy→failed transition
 
 	// Idle/focus tracking for the status poll: no input for gitIdleThreshold
 	// (or a blurred terminal) pauses the 3s git status loop.
@@ -262,9 +273,12 @@ type Model struct {
 	fuzzyOpen    bool
 	fuzzyQuery   string
 	fuzzyIndex   int
-	fuzzyPrompt  string           // overlay title: "goto " (Ctrl+P) or "uncommitted " (Ctrl+U)
+	fuzzyPrompt  string           // overlay title: "goto " (Ctrl+P), "uncommitted " (Ctrl+U), or "Repo: " (Ctrl+W)
 	fuzzyCorpus  []fuzzy.Prepared // candidates with matching data precomputed once per open
 	fuzzyMatches []fuzzy.Match
+	// repoRels aligns with the Ctrl+W corpus: "" is the workspace itself,
+	// otherwise the root-relative git repo the row selects.
+	repoRels []string
 
 	// Search corpus: the full project file walk (BuildAllEntries), shared by the
 	// query bar, the Ctrl+P finder, and Ctrl+G grep. Built once and reused —
@@ -277,8 +291,14 @@ type Model struct {
 	// two points those slices are assigned, so the query bar's fuzzy stage
 	// doesn't re-prepare up to 50k candidates per keystroke (the Ctrl+P finder
 	// caches the same way in fuzzyCorpus). Unlike fuzzyCorpus it stays
-	// resident: the query bar is the home mode.
+	// resident: the query bar is the home mode. scoped* is that corpus limited
+	// to activeRepo, rebuilt when the repo or the corpus changes; nil when the
+	// whole workspace is selected.
 	queryPrepared    []fuzzy.Prepared
+	scopedRepo       string
+	scopedFiles      []string
+	scopedDirs       []string
+	scopedPrepared   []fuzzy.Prepared
 	corpusBuiltAt    time.Time
 	corpusRebuilding bool
 	corpusTruncated  bool               // the walk hit Tree.MaxIndexFiles — index is partial
@@ -391,9 +411,14 @@ func New(cfg config.Config, db store.Backend, root, notice string, reg lsp.Regis
 		termFocused:   true,
 	}
 	lastFile := ""
+	savedCommand := ""
 	if sess, ok := db.LoadSession(); ok {
 		m.selectedCommand = sess.Command
+		savedCommand = sess.Command
 		lastFile = sess.LastFile
+		if !m.gitRepo {
+			m.activeRepo = strings.Trim(filepath.ToSlash(sess.WorkspaceRepo), "/")
+		}
 	}
 	if t, ok := db.LoadTabs(); ok && len(t.Paths) > 0 {
 		// Tabs win over the legacy single LastFile. Activating the tab opens it
@@ -413,6 +438,11 @@ func New(cfg config.Config, db store.Backend, root, notice string, reg lsp.Regis
 		m = m.openFileAt(lastFile)
 		m.mode = modeQuery
 	}
+	// Opening the file points the tree at that file. Put back the directory
+	// the user had confirmed so both the file and the tree position return.
+	if savedCommand != "" {
+		m.selectedCommand = savedCommand
+	}
 
 	// Warm start: adopt the persisted corpus optimistically — no stat sweep on
 	// the startup path, so the first frame paints immediately even on a huge
@@ -425,6 +455,7 @@ func New(cfg config.Config, db store.Backend, root, notice string, reg lsp.Regis
 		m.corpusTruncated = idx.Truncated
 		m.corpusBuiltAt = time.Now()
 		m.pendingValidate = &idx
+		m = m.rebuildQueryScope()
 	}
 	if m.corpusBuiltAt.IsZero() {
 		// Cold cache: Init fires the background walk; the splash covers it.
@@ -450,8 +481,19 @@ func (m Model) Init() tea.Cmd {
 	}
 	if m.gitRepo {
 		cmds = append(cmds, m.refreshGitStatusCmd(), gitStatusTick())
+	} else if !m.corpusBuiltAt.IsZero() {
+		// Warm start already has a corpus, but nested repo roots are not part
+		// of that cache — scan them now. A cold start discovers them inside
+		// the corpus rebuild instead.
+		cmds = append(cmds, m.scanWorkspaceReposCmd())
 	}
 	return tea.Batch(cmds...)
+}
+
+// gitStatusEnabled is true when the sidebar should track uncommitted paths:
+// the opened directory is a repo, or it is a workspace with nested repos.
+func (m Model) gitStatusEnabled() bool {
+	return m.gitRepo || len(m.workspaceRepos) > 0
 }
 
 // gitStatusInterval paces the background `git status` poll. Polling (rather
@@ -466,6 +508,16 @@ type gitStatusTickMsg struct{}
 type gitStatusMsg struct {
 	dirty map[string]bool
 	ok    bool
+	// scope is the activeRepo the scan was started for. A result whose scope
+	// no longer matches (the user switched repos while git was running) is
+	// dropped so a workspace-wide scan cannot overwrite a single-repo set.
+	scope string
+}
+
+// workspaceReposMsg delivers nested git repo roots found under a non-repo
+// workspace directory.
+type workspaceReposMsg struct {
+	repos []string
 }
 
 func gitStatusTick() tea.Cmd {
@@ -491,9 +543,30 @@ func splashTick() tea.Cmd {
 // call, no daemon.
 func (m Model) refreshGitStatusCmd() tea.Cmd {
 	root := m.root
+	if m.gitRepo {
+		return func() tea.Msg {
+			dirty, ok := filetree.GitDirtySet(root)
+			return gitStatusMsg{dirty: dirty, ok: ok}
+		}
+	}
+	scope := m.activeRepo
+	repos := append([]string(nil), m.workspaceRepos...)
 	return func() tea.Msg {
-		dirty, ok := filetree.GitDirtySet(root)
-		return gitStatusMsg{dirty: dirty, ok: ok}
+		targets := repos
+		if scope != "" {
+			targets = []string{scope}
+		}
+		dirty, ok := filetree.MergeRepoDirty(root, targets)
+		return gitStatusMsg{dirty: dirty, ok: ok, scope: scope}
+	}
+}
+
+// scanWorkspaceReposCmd finds nested git repositories off the UI goroutine.
+func (m Model) scanWorkspaceReposCmd() tea.Cmd {
+	root := m.root
+	ignore := append([]string(nil), m.cfg.Tree.Ignore...)
+	return func() tea.Msg {
+		return workspaceReposMsg{repos: filetree.FindNestedGitRepos(root, ignore)}
 	}
 }
 
@@ -502,7 +575,7 @@ func (m Model) refreshGitStatusCmd() tea.Cmd {
 // :refresh, and Ctrl+U bypassed the in-flight guard and could stack spawns
 // against the poller).
 func (m Model) maybeGitRefresh() (Model, tea.Cmd) {
-	if !m.gitRepo || m.gitStatusRunning {
+	if !m.gitStatusEnabled() || m.gitStatusRunning {
 		return m, nil
 	}
 	m.gitStatusRunning = true
@@ -569,13 +642,15 @@ const corpusTTL = 2 * time.Second
 // corpusMsg delivers a freshly walked corpus (reloaded .gitignore, directory
 // signature, and truncation flag) from the background rebuild goroutine.
 type corpusMsg struct {
-	files     []string
-	dirs      []string         // DirsFromMtimes(dirMtimes), computed off the UI goroutine
-	prepared  []fuzzy.Prepared // PrepareCorpus(files, dirs), likewise
-	gi        *filetree.Gitignore
-	dirMtimes map[string]int64
-	truncated bool
-	builtAt   time.Time
+	files        []string
+	dirs         []string         // DirsFromMtimes(dirMtimes), computed off the UI goroutine
+	prepared     []fuzzy.Prepared // PrepareCorpus(files, dirs), likewise
+	gi           *filetree.Gitignore
+	dirMtimes    map[string]int64
+	repos        []string
+	scannedRepos bool
+	truncated    bool
+	builtAt      time.Time
 }
 
 // ensureCorpus keeps m.corpus fresh without ever walking on the UI goroutine.
@@ -607,18 +682,27 @@ func (m Model) rebuildCorpusCmd() tea.Cmd {
 	root := m.root
 	ignore := m.cfg.Tree.Ignore
 	maxFiles := m.cfg.Tree.MaxIndexFiles
+	scanRepos := !m.gitRepo
 	return func() tea.Msg {
 		gi := filetree.LoadGitignore(root)
 		files, dirMtimes, truncated := filetree.BuildAllEntries(root, ignore, gi, maxFiles)
 		dirs := filetree.DirsFromMtimes(dirMtimes)
+		var repos []string
+		if scanRepos {
+			// The walk above warmed the directory cache, so this is a second
+			// pass over cached listings, not a second disk walk.
+			repos = filetree.FindNestedGitRepos(root, ignore)
+		}
 		return corpusMsg{
-			files:     files,
-			dirs:      dirs,
-			prepared:  filetree.PrepareCorpus(files, dirs),
-			gi:        gi,
-			dirMtimes: dirMtimes,
-			truncated: truncated,
-			builtAt:   time.Now(),
+			files:        files,
+			dirs:         dirs,
+			prepared:     filetree.PrepareCorpus(files, dirs),
+			gi:           gi,
+			dirMtimes:    dirMtimes,
+			repos:        repos,
+			scannedRepos: scanRepos,
+			truncated:    truncated,
+			builtAt:      time.Now(),
 		}
 	}
 }
@@ -698,6 +782,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.truncated {
 			m.notice = truncatedNotice(m.cfg.Tree.MaxIndexFiles)
 		}
+		if msg.scannedRepos {
+			var repoCmd tea.Cmd
+			m, repoCmd = m.applyWorkspaceRepos(msg.repos)
+			return m, repoCmd
+		}
+		m = m.rebuildQueryScope()
 		return m, nil
 
 	case splashTickMsg:
@@ -736,7 +826,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.termFocused = false
 		return m, nil
 
+	case workspaceReposMsg:
+		return m.applyWorkspaceRepos(msg.repos)
+
 	case gitStatusMsg:
+		if !m.gitRepo && msg.scope != m.activeRepo {
+			return m, nil
+		}
 		m.gitStatusRunning = false
 		if msg.ok {
 			changed := dirtySetChanged(m.gitDirty, msg.dirty)
@@ -851,6 +947,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.grepOpen {
 			return m.handleGrepKey(msg)
+		}
+		if k == "ctrl+w" && !m.inBarMode() {
+			return m.openRepoPicker()
 		}
 		if k == "ctrl+p" && !m.inBarMode() {
 			return m.openFuzzy()
@@ -977,10 +1076,192 @@ func (m Model) quit() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) saveSession() {
+	repo := ""
+	if !m.gitRepo {
+		repo = m.activeRepo
+	}
 	_ = m.db.SaveSession(store.Session{
-		LastFile: m.openRel,
-		Command:  m.selectedCommand,
+		LastFile:      m.openRel,
+		Command:       m.selectedCommand,
+		WorkspaceRepo: repo,
 	})
+}
+
+// applyWorkspaceRepos stores a freshly scanned nested-repo list, drops a
+// remembered selection that no longer exists, and starts the git-status poll
+// the first time any repo is found.
+func (m Model) applyWorkspaceRepos(repos []string) (Model, tea.Cmd) {
+	if m.gitRepo {
+		return m, nil
+	}
+	m.workspaceRepos = repos
+	m.workspaceReposScanned = true
+	if m.activeRepo != "" && !slices.Contains(repos, m.activeRepo) {
+		m.activeRepo = ""
+		m.saveSession()
+	}
+	m = m.rebuildQueryScope()
+	m = m.refreshFuzzyCandidates()
+	if len(repos) == 0 {
+		return m, nil
+	}
+	var cmds []tea.Cmd
+	if !m.gitPollArmed {
+		m.gitPollArmed = true
+		cmds = append(cmds, gitStatusTick())
+	}
+	if !m.gitStatusRunning {
+		var refresh tea.Cmd
+		m, refresh = m.maybeGitRefresh()
+		cmds = append(cmds, refresh)
+	}
+	return m, tea.Batch(cmds...)
+}
+
+// rebuildQueryScope refreshes the query-bar corpus limited to activeRepo.
+// An empty selection searches the whole workspace, so the scoped slices are
+// dropped and the full corpus is used.
+func (m Model) rebuildQueryScope() Model {
+	repo := m.activeRepo
+	if m.gitRepo || repo == "" {
+		m.scopedRepo = ""
+		m.scopedFiles, m.scopedDirs, m.scopedPrepared = nil, nil, nil
+		return m
+	}
+	prefix := repo + "/"
+	files := make([]string, 0)
+	for _, path := range m.corpus {
+		if strings.HasPrefix(path, prefix) {
+			files = append(files, path)
+		}
+	}
+	dirs := make([]string, 0)
+	for _, path := range m.dirCorpus {
+		if strings.HasPrefix(path, prefix) {
+			dirs = append(dirs, path)
+		}
+	}
+	m.scopedRepo = repo
+	m.scopedFiles = files
+	m.scopedDirs = dirs
+	m.scopedPrepared = filetree.PrepareCorpus(files, dirs)
+	return m
+}
+
+// pathUnderRepo reports whether a root-relative path (file or directory,
+// optional trailing slash) sits at or inside repo. An empty repo matches
+// everything.
+func pathUnderRepo(path, repo string) bool {
+	if repo == "" {
+		return true
+	}
+	path = strings.TrimSuffix(strings.Trim(filepath.ToSlash(path), "/"), "/")
+	return path == repo || strings.HasPrefix(path, repo+"/")
+}
+
+// isReadOnlyPath reports whether rel lies outside the selected workspace repo,
+// which makes it read-only: it can be viewed (or opened read-only) but never
+// edited. False when the opened directory is itself a repo, when the whole
+// workspace is selected, or when no file is open.
+func (m Model) isReadOnlyPath(rel string) bool {
+	if m.gitRepo || m.activeRepo == "" || rel == "" {
+		return false
+	}
+	return !pathUnderRepo(rel, m.activeRepo)
+}
+
+// repoRootCommand is the confirmed-directory value ("libs/core/") for the
+// selected repo, used to move the sidebar and query bar onto its root.
+func (m Model) repoRootCommand() string {
+	if m.activeRepo == "" {
+		return ""
+	}
+	return m.activeRepo + "/"
+}
+
+// leaveEditForReadOnly drops a now-outside buffer out of edit mode when the
+// Ctrl+W selection changes under it. Unsaved edits are stashed rather than
+// discarded (unlike Esc), and every review/preview state on the old buffer is
+// cleared so the view pane shows the on-disk file.
+func (m Model) leaveEditForReadOnly() Model {
+	m = m.recordCursor()
+	m = m.flushBurst()
+	m = m.stashDraftIfDirty()
+	m = m.closeCompletion()
+	m = m.sigUnpin()
+	m.jumpStack = nil
+	m = m.clearDiffState()
+	m = m.clearBlameState()
+	m = m.clearConflictState()
+	m = m.clearPreviewState()
+	m.mode = modeQuery
+	m.notice = "read-only: outside repo " + m.activeRepo
+	return m.refreshFileHighlights()
+}
+
+// findEntryIndex returns the index of the tree entry with the given
+// root-relative path, or -1. Used to snap the sidebar highlight back to the
+// selected repo root.
+func findEntryIndex(entries []filetree.FileTreeEntry, rel string) int {
+	rel = strings.Trim(rel, "/")
+	for i, entry := range entries {
+		if strings.Trim(entry.RelativePath, "/") == rel {
+			return i
+		}
+	}
+	return -1
+}
+
+// gitScopeFor resolves where to run a git command for a workspace-relative
+// path. When the opened directory is itself a repo that is the root and the
+// path is unchanged. In a workspace it picks the deepest nested repo that
+// contains the path (so libs/core/nested beats libs/core) and returns that
+// repo's folder plus the path relative to it — git resolves `show rev:path`
+// and `blame -- path` against the repo it runs in, not the workspace.
+//
+// ok is false when no known repo contains the path. loading is true when the
+// nested-repo scan has not finished, so callers can say "still loading"
+// instead of "not a git repository". The lookup reads only the in-memory repo
+// list, never the disk, so it is safe on the UI goroutine.
+func (m Model) gitScopeFor(rel string) (root, repoRel string, ok, loading bool) {
+	rel = strings.Trim(filepath.ToSlash(rel), "/")
+	if m.gitRepo {
+		return m.root, rel, true, false
+	}
+	if rel == "" {
+		return "", "", false, false
+	}
+	if !m.workspaceReposScanned {
+		return "", "", false, true
+	}
+	best := ""
+	for _, repo := range m.workspaceRepos {
+		if len(repo) > len(best) && pathUnderRepo(rel, repo) {
+			best = repo
+		}
+	}
+	if best == "" {
+		return "", "", false, false
+	}
+	return filepath.Join(m.root, filepath.FromSlash(best)), strings.TrimPrefix(rel, best+"/"), true, false
+}
+
+// gitScopeError is the status message for a path gitScopeFor could not place.
+func gitScopeError(loading bool) string {
+	if loading {
+		return "git repos still loading"
+	}
+	return "file is not in a git repository"
+}
+
+// repoRelativePath maps a workspace-relative path to the path git would use in
+// its repo, falling back to rel when the file is not in any known repo.
+func (m Model) repoRelativePath(rel string) string {
+	rel = strings.Trim(filepath.ToSlash(rel), "/")
+	if _, repoRel, ok, _ := m.gitScopeFor(rel); ok {
+		return repoRel
+	}
+	return rel
 }
 
 // frameCache memoizes per-message derived state. Update bumps seq once per
@@ -1107,8 +1388,11 @@ func (m Model) openFileAt(rel string) Model {
 		client.DidOpen(f.Path, f.Content)
 	}
 	m = m.beginEditSession(f.Content)
-	if d, ok := m.db.LoadDraft(rel); ok {
-		m = m.restoreDraft(d)
+	readOnly := m.isReadOnlyPath(rel)
+	if !readOnly {
+		if d, ok := m.db.LoadDraft(rel); ok {
+			m = m.restoreDraft(d)
+		}
 	}
 	m = m.addTab(rel)
 	// Restore the remembered cursor and anchor its line ~30% from the top.
@@ -1117,6 +1401,14 @@ func (m Model) openFileAt(rel string) Model {
 		m.edit.cx = p.Cx
 		m.edit.clampCursor()
 		m = m.anchorCursorLine()
+	}
+	if readOnly {
+		// Outside the selected repo: show it in the view pane. A stored draft
+		// is deliberately not restored — it stays saved and returns when the
+		// scope changes back.
+		m.mode = modeQuery
+		m.notice = "read-only: outside repo " + m.activeRepo
+		return m
 	}
 	m.mode = modeEdit
 	return m

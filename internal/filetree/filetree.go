@@ -221,6 +221,56 @@ func IsGitRepo(dir string) bool {
 	return err == nil
 }
 
+// FindNestedGitRepos returns the root-relative paths of every directory under
+// root that contains a .git entry, excluding root itself. The walk uses the
+// same cached directory listings as the file tree, skips hard- and
+// soft-ignored names (.git is seen so a repo is recorded, then not descended),
+// and does not apply gitignore — a workspace of repos has no single ignore
+// file covering them. Call it off the UI goroutine.
+func FindNestedGitRepos(root string, ignore []string) []string {
+	if root == "" {
+		return nil
+	}
+	resolvedRoot, err := filepath.Abs(root)
+	if err != nil {
+		return nil
+	}
+	var repos []string
+	var walk func(dirPath string, depth int)
+	walk = func(dirPath string, depth int) {
+		if depth > maxScanDepth {
+			return
+		}
+		resolvedDir := filepath.Join(resolvedRoot, dirPath)
+		if !isInsideRoot(resolvedRoot, resolvedDir) {
+			return
+		}
+		children, _, err := readDirectorySorted(resolvedDir)
+		if err != nil {
+			return
+		}
+		for _, child := range children {
+			if child.name == ".git" && dirPath != "" {
+				repos = append(repos, dirPath)
+				break
+			}
+		}
+		for _, child := range children {
+			if !child.isDir || hardIgnored(child.name, ignore) || softIgnored(child.name) {
+				continue
+			}
+			rel := child.name
+			if dirPath != "" {
+				rel = dirPath + "/" + child.name
+			}
+			walk(rel, depth+1)
+		}
+	}
+	walk("", 0)
+	sort.Strings(repos)
+	return repos
+}
+
 // FindRepoRoot returns the nearest ancestor of filePath — walking up to and
 // including editorRoot — that IsGitRepo. If none is found, or filePath lies
 // outside editorRoot, it returns the absolute editorRoot. Used to scope a

@@ -10,14 +10,14 @@ One more key constraint: snapshot history is capped per file. The undo timeline 
 
 **Architecture**
 
-The main types are the records themselves: `OpenedFile` (recents, with cursor/scroll position), `Snapshot` (one undo checkpoint — path, sequence number, `"edit"`/`"save"` kind, full content plus its `Hash`), `Session` (what to restore on relaunch), `Draft` (unsaved edit state with its undo `Steps` carried inline so it is self-contained), `Tabs` (open-tab paths, active index, per-tab cursors), and `CorpusIndex` (cached search corpus plus a directory-mtime signature; `CorpusVersion` guards against format drift). `DBInfo` reports disk usage for the maintenance UI, and `ErrNoStats` marks a backend that has nothing on disk to inspect.
+The main types are the records themselves: `OpenedFile` (recents, with cursor/scroll position), `Snapshot` (one undo checkpoint — path, sequence number, `"edit"`/`"save"` kind, full content plus its `Hash`), `Session` (what to restore on relaunch, including the Ctrl+W workspace repo), `Draft` (unsaved edit state with its undo `Steps` carried inline so it is self-contained), `Tabs` (open-tab paths, active index, per-tab cursors), and `CorpusIndex` (cached search corpus plus a directory-mtime signature; `CorpusVersion` guards against format drift). `DBInfo` reports disk usage for the maintenance UI, and `ErrNoStats` marks a backend that has nothing on disk to inspect.
 
 The key layout is a flat namespace with prefixes:
 
 - `opened:<relpath>` — one record per opened file
 - `versions:<seq>` — snapshots; `versionKey` zero-pads the sequence to 16 digits so keys sort in write order. These are the only *indexed* records: each `PutIndexed` tags the snapshot with its file path on the `file` index, and that index's `MaxPerValue` (set from config's `max_snapshots` at `Open`) evicts the oldest snapshots per file.
 - `draft:<relpath>` — drafts deliberately use plain, non-indexed keys so index eviction can never delete a stashed draft.
-- `session:current`, `tabs:current`, `corpus:current` — singletons; each save overwrites the last, so they self-cap at one record.
+- `session:current`, `tabs:current`, `corpus:current` — singletons; each save overwrites the last, so they self-cap at one record. `Session.WorkspaceRepo` is the Ctrl+W choice (`""` = the whole opened directory).
 
 **Functions**
 

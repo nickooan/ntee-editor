@@ -55,6 +55,10 @@ type Session struct {
 	Command   string   `json:"command"`
 	Expanded  []string `json:"expanded,omitempty"`
 	TreeIndex int      `json:"treeIndex,omitempty"`
+	// WorkspaceRepo is the Ctrl+W selection: "" is the whole workspace (every
+	// nested repo's changes), otherwise the root-relative git repo directory.
+	// Ignored when the opened directory is itself a git repository.
+	WorkspaceRepo string `json:"workspaceRepo,omitempty"`
 }
 
 // DraftStep is one undo checkpoint carried inside a Draft.

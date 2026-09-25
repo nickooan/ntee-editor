@@ -85,6 +85,7 @@ Five things to know in your first five minutes:
 |---|---|
 | `Ctrl+P` | **Goto file** — fuzzy finder; empty query lists recent files |
 | `Ctrl+U` | Goto **uncommitted** file — same finder, limited to git-dirty paths |
+| `Ctrl+W` | **Workspace repo** — pick a nested git repo under the opened directory (or the directory itself). Query-bar search and change highlights then follow that repo; the file tree stays rooted at the opened directory. The sidebar and query bar move onto the repo root, arrow navigation stops at its edge, and files outside it open read-only (`Ctrl+P`/`Ctrl+G`/`Ctrl+F` still work; `Ctrl+O` returns along a jump). The selected repo is named in yellow in the title bar. Pick the top row to go back to the whole workspace. Refused when the opened directory is already a git repo |
 | `Ctrl+G` | **Grep the repo** — colored preview on top, results below; `↑/↓` + `Enter` jumps |
 | `Ctrl+T` | **Inspection dashboard** — store stats + LSP control ([below](#inspection-mode-ctrlt)) |
 | `Shift+Tab` | Cycle the focused tab (wraps) |
@@ -131,6 +132,11 @@ Type to search — matches highlight live (case-insensitive; regex supported,
 falling back to literal). `↑/↓` cycles the focused match (orange), `Enter`
 jumps the cursor to it, `Esc` backs out.
 
+In the read-only view of a file outside the selected Ctrl+W repo, `Ctrl+F`
+still searches and `Enter` scrolls to the match, but `Ctrl+E` refuses ("replace
+disabled") because there is no edit session. `Ctrl+O` likewise works from that
+view, so a jump that landed outside the repo can be walked back.
+
 Press **`Ctrl+E` while matches are highlighted** to enter the replace bar:
 
 | Command | Action |
@@ -150,11 +156,11 @@ Editor commands with Tab-completed suggestions:
 
 | Command | Action |
 |---|---|
-| `copy` (`cp`) `[a-b\|all\|fpath]` | copy the selection, a line range, the whole buffer, or the file's path |
+| `copy` (`cp`) `[a-b\|all\|fpath]` | copy the selection, a line range, the whole buffer, or the file's path (relative to its git repo when it is in one) |
 | `jump` (`jp`) `<line\|top\|end>` | go to a line (lands ~30% from the top) |
 | `git scf` | **s**olve **c**on**f**lict: review the buffer's conflicts interactively — ours tinted green, theirs blue, markers yellow. `↑/↓` move line by line, `Shift+↑/↓` jump between conflict blocks; on a marker line a picker pops up: `←/→` choose **Use HEAD / Use \<branch\> / Use both**, `Enter` applies (each apply is one `Ctrl+Z` step), `Esc` back to editing at the cursor — applied resolutions stay, untouched conflicts remain |
-| `git diff [rev]` | review the file's uncommitted changes (or its diff against `rev`) in a read-only GitHub-style view: added lines green with a `+` gutter marker, removed lines red with `-` (no number). `↑/↓`/`PgUp`/`PgDn` review, `Shift+↑/↓` jump between change hunks, `Ctrl+J` jump to definition (`Ctrl+O` returns to the review), `Esc` back to editing at the reviewed line |
-| `git blame` | annotate every line with its author and commit date in a read-only view — the gutter shows `author date │` instead of line numbers; unsaved or uncommitted lines show a dimmed `uncommitted` placeholder. `↑/↓`/`PgUp`/`PgDn` move, `Shift+↑/↓` jump between commit groups, `Ctrl+J` jump to definition (`Ctrl+O` returns to the blame), `Esc` back to editing at the cursor line |
+| `git diff [rev]` | review the file's uncommitted changes (or its diff against `rev`) in a read-only GitHub-style view: added lines green with a `+` gutter marker, removed lines red with `-` (no number). `↑/↓`/`PgUp`/`PgDn` review, `Shift+↑/↓` jump between change hunks, `Ctrl+J` jump to definition (`Ctrl+O` returns to the review), `Esc` back to editing at the reviewed line. In a workspace the file's own repo is used |
+| `git blame` | annotate every line with its author and commit date in a read-only view — the gutter shows `author date │` instead of line numbers; unsaved or uncommitted lines show a dimmed `uncommitted` placeholder. `↑/↓`/`PgUp`/`PgDn` move, `Shift+↑/↓` jump between commit groups, `Ctrl+J` jump to definition (`Ctrl+O` returns to the blame), `Esc` back to editing at the cursor line. In a workspace the file's own repo is used |
 | `tab <name\|cl\|cr>` | switch tab / close-left / close-right |
 
 ### Command bar (`:`)

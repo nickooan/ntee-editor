@@ -123,7 +123,11 @@ func (m Model) renderStatusLine() string {
 		if m.openFile != nil && m.isReadOnlyPath(m.openRel) {
 			hint = "read-only (outside repo " + m.activeRepo + ") · " + hint
 		}
-		return withNotice(m, line) + "\n" + hintStyle.Render(hint)
+		line = withNotice(m, line)
+		if warning := m.outsideRepoWarning(); warning != "" {
+			line += statusTextStyle.Render("   ") + warnStyle.Render(warning)
+		}
+		return line + "\n" + hintStyle.Render(hint)
 	case modeEdit:
 		return m.renderEditStatus()
 	case modeExec:
@@ -1180,7 +1184,7 @@ var (
 var (
 	baseStyle       = lipgloss.NewStyle().Foreground(colFg).Background(colBg)
 	headerStyle     = lipgloss.NewStyle().Bold(true).Foreground(colAqua).Background(colBgChrome)
-	headerRepoStyle = lipgloss.NewStyle().Bold(true).Foreground(colYellow).Background(colBgChrome)
+	headerRepoStyle = lipgloss.NewStyle().Bold(true).Foreground(colOrange).Background(colBgChrome)
 	paneStyle       = lipgloss.NewStyle().Background(colBg).BorderBackground(colBg).
 			BorderForeground(colBorder).Border(lipgloss.RoundedBorder())
 	cursorStyle = lipgloss.NewStyle().Foreground(colBg).Background(colFg)
@@ -1272,4 +1276,5 @@ var (
 	editingStyle = lipgloss.NewStyle().Foreground(colYellow).Bold(true).Background(colBgChrome) // unsaved edits
 	savedStyle   = lipgloss.NewStyle().Foreground(colGreen).Bold(true).Background(colBgChrome)  // in sync with disk
 	errStyle     = lipgloss.NewStyle().Foreground(colRed).Bold(true).Background(colBgChrome)
+	warnStyle    = lipgloss.NewStyle().Foreground(colOrange).Bold(true).Background(colBgChrome) // outside the working repo
 )

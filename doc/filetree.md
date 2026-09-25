@@ -45,7 +45,7 @@ The files divide the work cleanly:
 
 `FindRepoRoot` walks up from a file to the nearest `.git` (bounded by the editor root); `FindProjectRoot` does the same for language-project markers (`go.mod`, `package.json`, `Cargo.toml`, …) so a language server in a monorepo scopes to the sub-project, not the whole repo. `FindNestedGitRepos` lists every directory under a workspace root that contains a `.git` entry (the root itself excluded), using the same cached listings as the tree — this is what Ctrl+W offers.
 
-`BuildExpandedDirectoryPaths` turns a typed command path into the set of directories to expand — every ancestor, plus the last segment when the path ends in `/`. `FindFileTreeMatchIndex` picks the entry a typed input refers to (exact beats prefix beats substring), and `ResolveHighlightedEntry` falls back to the nearest expanded ancestor directory when nothing matches.
+`BuildExpandedDirectoryPaths` turns a typed command path into the set of directories to expand — every ancestor, plus the last segment when the path ends in `/`. `FindFileTreeMatchIndex` picks the entry a typed input refers to (exact full path beats exact name beats prefix beats substring — so a root-level `main.go` is not shadowed by an earlier nested `web/main.go`), and `ResolveHighlightedEntry` falls back to the nearest expanded ancestor directory when nothing matches.
 
 `BuildFileTreeViewport` windows the entry list to the visible height, centering the highlighted row.
 

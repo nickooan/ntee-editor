@@ -166,56 +166,172 @@ func repoEntries() []filetree.FileTreeEntry {
 	}
 }
 
-func TestRepoEdgeStopsSidebarNavigation(t *testing.T) {
+func TestShiftWalkLeavesRepoFreely(t *testing.T) {
 	m, _ := newTestModel(t, nil)
 	m.activeRepo = "apps/web"
 	m.workspaceRepos = []string{"apps/web", "libs/core"}
 	entries := repoEntries()
 
-	// At the repo root, moving up would land on the ancestor "apps" directory:
-	// the walk stops and says so.
+	// From the repo root, up moves up onto the ancestor — no block, no error.
 	m.keyboardSelectedCommand = "apps/web/"
 	m = m.moveSidebarSelection(entries, -1)
-	if m.keyboardSelectedCommand != "apps/web/" {
-		t.Fatalf("walk escaped the repo: %q", m.keyboardSelectedCommand)
+	if m.keyboardSelectedCommand != "apps/" || m.errText != "" {
+		t.Fatalf("up from repo root: highlight=%q err=%q", m.keyboardSelectedCommand, m.errText)
 	}
-	if m.errText != "cannot select outside repo apps/web" {
-		t.Fatalf("errText = %q", m.errText)
-	}
-
-	// Moving down stays inside the repo.
-	m.errText = ""
+	// And down comes straight back in.
 	m = m.moveSidebarSelection(entries, 1)
-	if m.keyboardSelectedCommand != "apps/web/main.go" {
-		t.Fatalf("inside walk blocked: %q", m.keyboardSelectedCommand)
+	if m.keyboardSelectedCommand != "apps/web/" {
+		t.Fatalf("down back into repo: %q", m.keyboardSelectedCommand)
 	}
 }
 
-func TestRepoEdgeSnapsDriftedHighlightToRoot(t *testing.T) {
+func TestShiftWalkFollowsDirectionOutsideRepo(t *testing.T) {
 	m, _ := newTestModel(t, nil)
 	m.activeRepo = "apps/web"
 	entries := repoEntries()
 
-	// A highlight parked outside the repo (mouse click, Ctrl+P open) snaps to
-	// the repo root rather than walking out.
-	m.keyboardSelectedCommand = "libs/core/lib.go"
+	// Parked outside the repo, the walk moves in the pressed direction — the
+	// old behavior snapped to the repo root, which could move against it.
+	m.keyboardSelectedCommand = "libs/"
 	m = m.moveSidebarSelection(entries, 1)
-	if m.keyboardSelectedCommand != "apps/web/" {
-		t.Fatalf("drifted highlight not snapped: %q", m.keyboardSelectedCommand)
+	if m.keyboardSelectedCommand != "libs/core/" {
+		t.Fatalf("down from libs/: %q", m.keyboardSelectedCommand)
+	}
+	m.keyboardSelectedCommand = "libs/"
+	m = m.moveSidebarSelection(entries, -1)
+	if m.keyboardSelectedCommand != "apps/web/main.go" {
+		t.Fatalf("up from libs/: %q", m.keyboardSelectedCommand)
 	}
 }
 
-func TestRepoEdgeStopsEscAtRoot(t *testing.T) {
+func TestEscClimbsAboveRepo(t *testing.T) {
 	m, _ := newTestModel(t, nil)
 	m.activeRepo = "apps/web"
 
 	m.selectedCommand = "apps/web/"
 	m = m.moveQueryToParentDirectory()
-	if m.selectedCommand != "apps/web/" {
-		t.Fatalf("Esc escaped the repo: %q", m.selectedCommand)
+	if m.selectedCommand != "apps/" || m.errText != "" {
+		t.Fatalf("Esc from repo root: selected=%q err=%q", m.selectedCommand, m.errText)
 	}
-	if m.errText != "cannot go outside repo apps/web" {
-		t.Fatalf("errText = %q", m.errText)
+}
+
+// workspaceTreeFixture writes two nested repos (with .git markers so the
+// corpus scan finds them) next to newTestModel's root-level main.go.
+func workspaceTreeFixture(t *testing.T, root string) {
+	t.Helper()
+	for _, rel := range []string{"apps/web/.git", "libs/core/.git"} {
+		must(t, os.MkdirAll(filepath.Join(root, filepath.FromSlash(rel)), 0o755))
+	}
+	must(t, os.WriteFile(filepath.Join(root, "apps", "web", "main.go"), []byte("package main\n"), 0o644))
+	must(t, os.WriteFile(filepath.Join(root, "libs", "core", "lib.go"), []byte("package core\n"), 0o644))
+}
+
+// highlightedPath is the sidebar row the highlight currently sits on.
+func highlightedPath(m Model) string {
+	entries := m.treeEntries()
+	if index := m.highlightedEntryIndex(entries); index >= 0 {
+		return entries[index].RelativePath
+	}
+	return ""
+}
+
+func TestRelaunchShiftDownMovesDownWithWarning(t *testing.T) {
+	db := store.NewMemory()
+	m, root := newTestModel(t, db)
+	workspaceTreeFixture(t, root)
+	m = rebuildCorpusNow(m)
+	m.activeRepo = "apps/web"
+	m.selectedCommand = "libs/core/lib.go" // the tree was left outside the repo
+	m.saveSession()
+
+	restored := New(config.Default(), db, root, "", nil)
+	restored.width, restored.height, restored.ready = 100, 30, true
+	restored.splash = false
+	restored = rebuildCorpusNow(restored)
+	if restored.activeRepo != "apps/web" {
+		t.Fatalf("working repo not restored: %q", restored.activeRepo)
+	}
+	if restored.outsideRepoWarning() == "" {
+		t.Fatal("a highlight outside the repo must warn")
+	}
+
+	entries := restored.treeEntries()
+	before := restored.highlightedEntryIndex(entries)
+	restored = key(restored, shiftKey(tea.KeyDown))
+	after := restored.highlightedEntryIndex(restored.treeEntries())
+	if after != before+1 {
+		t.Fatalf("Shift+↓ moved from row %d to %d, want %d", before, after, before+1)
+	}
+	if restored.errText != "" {
+		t.Fatalf("Shift+↓ must not error: %q", restored.errText)
+	}
+
+	// Walking back into the repo clears the warning on its own.
+	restored.keyboardSelectedCommand, restored.commandPreview = "apps/web/main.go", "apps/web/main.go"
+	if warning := restored.outsideRepoWarning(); warning != "" {
+		t.Fatalf("inside the repo the warning must clear: %q", warning)
+	}
+}
+
+func TestOutsideRepoWarningRendersInStatusLine(t *testing.T) {
+	m, root := newTestModel(t, nil)
+	workspaceTreeFixture(t, root)
+	m = rebuildCorpusNow(m)
+	m.activeRepo = "apps/web"
+	m.keyboardSelectedCommand = "main.go"
+
+	status := ansi.Strip(m.renderStatusLine())
+	if !strings.Contains(status, "outside repo apps/web · read-only") {
+		t.Fatalf("status line missing the warning: %q", status)
+	}
+}
+
+func TestTypingHighlightsInsideRepo(t *testing.T) {
+	m, root := newTestModel(t, nil)
+	workspaceTreeFixture(t, root)
+	m = rebuildCorpusNow(m)
+	m.activeRepo = "apps/web"
+
+	// Walk outside first, then type: the highlight must come back to the
+	// repo's matching file, not the same-named file at the workspace root.
+	m.keyboardSelectedCommand = "libs/core/lib.go"
+	for _, typed := range []string{"main", "main.go"} {
+		m.command, m.qCursor = "", 0
+		m = runes(m, typed)
+		if got := highlightedPath(m); got != "apps/web/main.go" {
+			t.Fatalf("typed %q highlights %q, want apps/web/main.go", typed, got)
+		}
+		if warning := m.outsideRepoWarning(); warning != "" {
+			t.Fatalf("typed %q still warns: %q", typed, warning)
+		}
+	}
+
+	// An explicit full path outside the repo is still honored (with a warning).
+	m.command, m.qCursor = "", 0
+	m = runes(m, "libs/core/lib.go")
+	if got := highlightedPath(m); got != "libs/core/lib.go" {
+		t.Fatalf("explicit outside path highlights %q", got)
+	}
+	if m.outsideRepoWarning() == "" {
+		t.Fatal("an explicit outside path must warn")
+	}
+}
+
+func TestWorkingRepoStaysExpanded(t *testing.T) {
+	m, root := newTestModel(t, nil)
+	workspaceTreeFixture(t, root)
+	m = rebuildCorpusNow(m)
+	m.activeRepo = "apps/web"
+	m.selectedCommand, m.command = "", ""
+
+	found := false
+	for _, entry := range m.treeEntries() {
+		if entry.RelativePath == "apps/web/main.go" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("the working repo's files must stay visible with nothing typed")
 	}
 }
 

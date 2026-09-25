@@ -40,6 +40,23 @@ func TestFindFileTreeMatchIndexRanking(t *testing.T) {
 	}
 }
 
+func TestFindFileTreeMatchIndexFullPathBeatsName(t *testing.T) {
+	// A nested file listed first shares its name with a root-level file: the
+	// root file's exact full path must win over the earlier name match.
+	entries := []FileTreeEntry{
+		{Name: "web", RelativePath: "web", CommandValue: "web/", Type: "directory"},
+		{Name: "main.go", RelativePath: "web/main.go", CommandValue: "web/main.go", Type: "file"},
+		{Name: "main.go", RelativePath: "main.go", CommandValue: "main.go", Type: "file"},
+	}
+	if got := FindFileTreeMatchIndex(entries, "main.go"); got != 2 {
+		t.Fatalf("full path should beat an earlier name match: got %d", got)
+	}
+	// With no full-path match, the first exact name still wins.
+	if got := FindFileTreeMatchIndex(entries[:2], "main.go"); got != 1 {
+		t.Fatalf("exact name: got %d", got)
+	}
+}
+
 func TestResolveHighlightedEntryAncestorFallback(t *testing.T) {
 	entries := entriesFixture()
 	// No entry matches "app/zzz.go", but the expanded ancestor app/ does.

@@ -1296,18 +1296,38 @@ func (m Model) invalidateTreeEntries() {
 }
 
 // treeEntries builds the sidebar: expansion is a pure function of the path
-// driving the sidebar (typed input, else the confirmed selection). The walk
-// (a stat per expanded directory plus gitignore matching per child) is
-// memoized per message via frameCache.
+// driving the sidebar (typed input, else the confirmed selection), plus the
+// Ctrl+W working repo, which always stays unfolded. The walk (a stat per
+// expanded directory plus gitignore matching per child) is memoized per
+// message via frameCache.
 func (m Model) treeEntries() []filetree.FileTreeEntry {
-	key := m.sidebarCommand()
+	command := m.sidebarCommand()
+	repoRoot := ""
+	if !m.gitRepo {
+		repoRoot = m.repoRootCommand()
+	}
+	// The repo is part of the memo key: selectWorkspaceRepo can change it
+	// between two treeEntries calls inside one message.
+	key := command
+	if repoRoot != "" {
+		key = command + "\x00" + repoRoot
+	}
 	f := m.frames
 	if f != nil && f.treeOk && f.treeSeq == f.seq && f.treeKey == key {
 		return f.entries
 	}
+	expanded := filetree.BuildExpandedDirectoryPaths(command)
+	if repoRoot != "" {
+		// Typing a fragment folds the tree back to the root. Keeping the
+		// working repo open is what gives the typed highlight (see
+		// highlightedEntryIndex) rows inside the repo to land on.
+		for dir := range filetree.BuildExpandedDirectoryPaths(repoRoot) {
+			expanded[dir] = true
+		}
+	}
 	entries := filetree.BuildFileTreeEntries(
 		m.root,
-		filetree.BuildExpandedDirectoryPaths(key),
+		expanded,
 		m.cfg.Tree.Ignore,
 		m.gitignore,
 		m.gitDirty,
@@ -1347,7 +1367,101 @@ func (m Model) highlightedSidebarCommand() string {
 }
 
 func (m Model) highlightedEntryIndex(entries []filetree.FileTreeEntry) int {
-	return filetree.ResolveHighlightedEntry(entries, m.highlightedSidebarCommand())
+	command := m.highlightedSidebarCommand()
+	// Finder and keyboard navigation pick an exact row, and a confirmed
+	// selection (empty bar) is a path the editor set itself — all honored
+	// as-is; the Shift+arrow walk may leave the repo and the status line
+	// warns. Only text typed into the bar is matched repo-first.
+	typed := strings.TrimSpace(m.command)
+	if m.gitRepo || m.activeRepo == "" || m.fuzzySelectedPath() != "" || m.keyboardSelectedCommand != "" ||
+		typed == "" || strings.HasPrefix(typed, ":") {
+		return filetree.ResolveHighlightedEntry(entries, command)
+	}
+	return m.repoScopedHighlight(entries, command)
+}
+
+// repoScopedHighlight resolves typed query-bar text the way
+// ResolveHighlightedEntry does, but inside the working repo first: an exact
+// path or name inside the repo, then an exact full path anywhere (typed
+// explicitly, or set by Esc / a folder click — honored even outside, with the
+// status-line warning), then prefix and substring matches inside the repo.
+// So typing "main.go" highlights the repo's file rather than a same-named one
+// at the workspace root. With no match it falls back to the nearest expanded
+// ancestor inside the repo, then to the repo root row.
+func (m Model) repoScopedHighlight(entries []filetree.FileTreeEntry, command string) int {
+	normalized := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(command), "\\", "/"))
+	if normalized == "" {
+		return filetree.ResolveHighlightedEntry(entries, command)
+	}
+	insideExact, outsidePath, startsWith, includes := -1, -1, -1, -1
+	for index, entry := range entries {
+		commandValue := strings.ToLower(entry.CommandValue)
+		if !pathUnderRepo(entry.RelativePath, m.activeRepo) {
+			if commandValue == normalized && outsidePath == -1 {
+				outsidePath = index
+			}
+			continue
+		}
+		name := strings.ToLower(entry.Name)
+		switch {
+		case commandValue == normalized:
+			return index
+		case name == normalized:
+			if insideExact == -1 {
+				insideExact = index
+			}
+		case strings.HasPrefix(commandValue, normalized) || strings.HasPrefix(name, normalized):
+			if startsWith == -1 {
+				startsWith = index
+			}
+		case strings.Contains(commandValue, normalized) || strings.Contains(name, normalized):
+			if includes == -1 {
+				includes = index
+			}
+		}
+	}
+	if insideExact != -1 {
+		return insideExact
+	}
+	if outsidePath != -1 {
+		return outsidePath
+	}
+	if startsWith != -1 {
+		return startsWith
+	}
+	if includes != -1 {
+		return includes
+	}
+	parts := strings.Split(strings.Trim(strings.ReplaceAll(strings.TrimSpace(command), "\\", "/"), "/"), "/")
+	for depth := len(parts) - 1; depth > 0; depth-- {
+		parent := strings.Join(parts[:depth], "/")
+		if !pathUnderRepo(parent, m.activeRepo) {
+			break
+		}
+		if index := findEntryIndex(entries, parent); index >= 0 && entries[index].Type == "directory" {
+			return index
+		}
+	}
+	if index := findEntryIndex(entries, m.activeRepo); index >= 0 {
+		return index
+	}
+	return filetree.ResolveHighlightedEntry(entries, command)
+}
+
+// outsideRepoWarning is the persistent status-line warning shown while the
+// sidebar highlight sits outside the working repo. It is derived from the
+// current state every frame, so it stays while the highlight is outside and
+// clears by itself once it comes back in.
+func (m Model) outsideRepoWarning() string {
+	if m.gitRepo || m.activeRepo == "" || m.fuzzyOpen {
+		return ""
+	}
+	entries := m.treeEntries()
+	index := m.highlightedEntryIndex(entries)
+	if index < 0 || !m.isReadOnlyPath(entries[index].RelativePath) {
+		return ""
+	}
+	return "outside repo " + m.activeRepo + " · read-only"
 }
 
 // openFileAt loads a root-relative path straight into an edit session.

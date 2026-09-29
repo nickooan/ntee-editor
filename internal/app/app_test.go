@@ -253,13 +253,60 @@ func TestQueryShiftArrowsWalkTree(t *testing.T) {
 func TestQueryEscGoesToParent(t *testing.T) {
 	m, _ := newTestModel(t, nil)
 	m = runes(m, "lib/util.ts")
+	if sugs := m.queryInputSuggestions(m.treeEntries()); len(sugs) == 0 {
+		t.Fatal("typing should open the suggestion popup")
+	}
+	// The first Esc only dismisses the open popup.
+	m = key(m, keyPress(tea.KeyEsc))
+	if m.command != "lib/util.ts" {
+		t.Fatalf("esc with the popup open must keep the typed text: %q", m.command)
+	}
+	if sugs := m.queryInputSuggestions(m.treeEntries()); len(sugs) != 0 {
+		t.Fatalf("esc should dismiss the popup, still %d rows", len(sugs))
+	}
 	m = key(m, keyPress(tea.KeyEsc))
 	if m.command != "lib/" || m.selectedCommand != "lib/" {
 		t.Fatalf("esc should go to parent dir: cmd=%q sel=%q", m.command, m.selectedCommand)
 	}
+	if sugs := m.queryInputSuggestions(m.treeEntries()); len(sugs) != 0 {
+		t.Fatal("climbing must keep the popup hidden so the next esc climbs again")
+	}
 	m = key(m, keyPress(tea.KeyEsc))
 	if m.command != "" {
-		t.Fatalf("second esc should reach root: %q", m.command)
+		t.Fatalf("next esc should reach root: %q", m.command)
+	}
+}
+
+func TestQueryEscDismissDropsPopupNavigation(t *testing.T) {
+	m, _ := newTestModel(t, nil)
+	m = runes(m, "lib/")
+	m = key(m, shiftKey(tea.KeyDown))
+	if m.commandPreview == "" || m.keyboardSelectedCommand == "" {
+		t.Fatalf("shift+down should preview a suggestion: %q %q", m.commandPreview, m.keyboardSelectedCommand)
+	}
+	m = key(m, keyPress(tea.KeyEsc))
+	if m.command != "lib/" || m.commandPreview != "" || m.keyboardSelectedCommand != "" || m.inputSuggestIndex != 0 {
+		t.Fatalf("esc should drop popup navigation and keep the text: cmd=%q preview=%q kb=%q idx=%d",
+			m.command, m.commandPreview, m.keyboardSelectedCommand, m.inputSuggestIndex)
+	}
+	if !m.suppressQuerySuggestions {
+		t.Fatal("esc should hide the popup")
+	}
+}
+
+func TestQueryTypingAfterEscDismissReopensPopup(t *testing.T) {
+	m, _ := newTestModel(t, nil)
+	m = runes(m, "lib/")
+	m = key(m, keyPress(tea.KeyEsc))
+	if sugs := m.queryInputSuggestions(m.treeEntries()); len(sugs) != 0 {
+		t.Fatal("esc should dismiss the popup")
+	}
+	m = key(m, typeRune('u'))
+	if m.command != "lib/u" || m.suppressQuerySuggestions {
+		t.Fatalf("typing should continue the text and lift suppression: %q %v", m.command, m.suppressQuerySuggestions)
+	}
+	if sugs := m.queryInputSuggestions(m.treeEntries()); len(sugs) == 0 {
+		t.Fatal("typing after esc should reopen the popup")
 	}
 }
 

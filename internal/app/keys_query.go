@@ -17,8 +17,8 @@ import (
 // frameCache (like treeEntries) so the key handler and View share one filter
 // pass over the corpus.
 func (m Model) queryInputSuggestions(entries []filetree.FileTreeEntry) []filetree.InputSuggestion {
-	// The single choke point for the popup: while a mouse click owns the bar
-	// text every consumer (render, navigation, Enter) sees "no suggestions",
+	// The single choke point for the popup: while it is suppressed (mouse
+	// click or Esc) every consumer (render, navigation, Enter) sees "no suggestions",
 	// and nothing is memoized so lifting the flag recomputes cleanly.
 	if m.suppressQuerySuggestions {
 		return nil
@@ -103,6 +103,9 @@ func (m Model) dispatchQueryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.submitQuery(entries, suggest())
 
 	case "esc":
+		if suggestions := suggest(); len(suggestions) > 0 {
+			return m.dismissQuerySuggestions(), nil
+		}
 		return m.moveQueryToParentDirectory(), nil
 
 	case "tab":
@@ -365,8 +368,19 @@ func (m Model) moveSidebarSelection(entries []filetree.FileTreeEntry, direction 
 	return m
 }
 
-// moveQueryToParentDirectory (Esc) drops the last path segment and confirms
-// the parent, collapsing the tree accordingly.
+// dismissQuerySuggestions (Esc with the popup open) hides the popup and drops
+// any popup navigation, leaving the typed text untouched.
+func (m Model) dismissQuerySuggestions() Model {
+	m.keyboardSelectedCommand = ""
+	m.commandPreview = ""
+	m.inputSuggestIndex = 0
+	m.suppressQuerySuggestions = true
+	return m
+}
+
+// moveQueryToParentDirectory (Esc with the popup closed) drops the last path
+// segment and confirms the parent, collapsing the tree accordingly. The popup
+// stays hidden so repeated Esc keeps climbing one level per press.
 func (m Model) moveQueryToParentDirectory() Model {
 	source := m.command
 	if strings.TrimSpace(source) == "" {
@@ -381,7 +395,7 @@ func (m Model) moveQueryToParentDirectory() Model {
 	m.selectedCommand = parent
 	m.command = parent
 	m.qCursor = len([]rune(parent))
-	m.suppressQuerySuggestions = false
+	m.suppressQuerySuggestions = true
 	return m
 }
 

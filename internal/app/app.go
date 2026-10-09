@@ -1391,6 +1391,7 @@ func (m Model) sidebarCommand() string {
 	if base, ok := inlineFsPathPrefix(strings.TrimSpace(typed)); ok {
 		typed = base
 	}
+	typed, _ = splitLineAnchor(typed)
 	return filetree.ResolveSidebarCommand(typed, m.selectedCommand)
 }
 

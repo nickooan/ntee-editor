@@ -15,7 +15,7 @@ func TestExecSuggestionsTable(t *testing.T) {
 		input string
 		want  []string
 	}{
-		{"", []string{"copy", "cp", "cpfp", "cpafp", "jump", "jp", "tab", "git", "openapi", "opapi", "graphql", "gql"}},
+		{"", []string{"copy", "cp", "cpfp", "cpfpl", "cpafp", "jump", "jp", "tab", "git", "openapi", "opapi", "graphql", "gql"}},
 		{"g", []string{"git", "graphql", "gql"}},
 		{"gr", []string{"graphql"}},
 		{"gq", []string{"gql"}},
@@ -24,6 +24,7 @@ func TestExecSuggestionsTable(t *testing.T) {
 		{"ju", []string{"jump"}}, // jp does not start with "ju"
 		{"copy ", []string{"all", "fpath"}},
 		{"cp f", []string{"fpath"}},
+		{"cpf", []string{"cpfp", "cpfpl"}},
 		{"jump ", []string{"top", "end"}},
 		{"tab ", []string{"cl", "cr", "util.ts", "main.go"}},
 		{"tab m", []string{"main.go"}},
@@ -68,17 +69,18 @@ func TestExecTabCompletionChain(t *testing.T) {
 func TestExecSuggestionCycle(t *testing.T) {
 	m := execLineFixture(t, 3) // Ctrl+E is bound in edit mode
 	m = key(m, ctrlKey('e'))
-	if len(m.execSugs) != 12 {
+	if len(m.execSugs) != 13 {
 		t.Fatalf("empty bar must offer all verbs, got %v", m.execSugs)
 	}
 
 	m = key(m, keyPress(tea.KeyDown)) // copy → cp
 	m = key(m, keyPress(tea.KeyDown)) // cp → cpfp
-	m = key(m, keyPress(tea.KeyDown)) // cpfp → cpafp
+	m = key(m, keyPress(tea.KeyDown)) // cpfp → cpfpl
+	m = key(m, keyPress(tea.KeyDown)) // cpfpl → cpafp
 	m = key(m, keyPress(tea.KeyDown)) // cpafp → jump
 	m = key(m, keyPress(tea.KeyTab))
 	if m.execInput != "jump " {
-		t.Fatalf("Tab after two Downs should accept jump, got %q", m.execInput)
+		t.Fatalf("Tab after five Downs should accept jump, got %q", m.execInput)
 	}
 
 	m = key(m, keyPress(tea.KeyUp)) // wrap: top → end (last candidate)

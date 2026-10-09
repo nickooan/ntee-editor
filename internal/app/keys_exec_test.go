@@ -245,6 +245,25 @@ func TestExecCpfp(t *testing.T) {
 	}
 }
 
+func TestExecCpfpl(t *testing.T) {
+	m := execLineFixture(t, 20)
+	m.edit.cy = 7
+	var captured string
+	m.copyClipboard = func(s string) error { captured = s; return nil }
+	m = key(m, ctrlKey('e'))
+	m = runes(m, "cpfpl")
+	m = key(m, keyPress(tea.KeyEnter))
+	if captured != "big.go#L8" {
+		t.Fatalf("cpfpl = %q, want %q", captured, "big.go#L8")
+	}
+	if m.notice != "copied big.go#L8" {
+		t.Fatalf("notice = %q", m.notice)
+	}
+	if m.mode != modeEdit {
+		t.Fatalf("cpfpl should return to edit mode, got %v", m.mode)
+	}
+}
+
 func TestExecCpafp(t *testing.T) {
 	m := execLineFixture(t, 3)
 	var captured string
@@ -266,7 +285,7 @@ func TestExecCopyPathNoFile(t *testing.T) {
 	called := false
 	m.copyClipboard = func(string) error { called = true; return nil }
 
-	for _, cmd := range []string{"cpfp", "cpafp"} {
+	for _, cmd := range []string{"cpfp", "cpfpl", "cpafp"} {
 		res, _ := m.runExecCommand(cmd)
 		got := res.(Model)
 		if called {

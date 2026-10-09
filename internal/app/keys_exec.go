@@ -108,6 +108,12 @@ func (m Model) runExecCommand(cmd string) (tea.Model, tea.Cmd) {
 		return m.enterPreview(&graphqlKind)
 	case "cpfp":
 		m = m.execCopyPath(m.repoRelativePath(m.openRel))
+	case "cpfpl":
+		path := m.repoRelativePath(m.openRel)
+		if path != "" {
+			path += "#L" + strconv.Itoa(m.edit.cy+1)
+		}
+		m = m.execCopyPath(path)
 	case "cpafp":
 		var abs string
 		if m.openFile != nil {
@@ -229,11 +235,7 @@ func (m Model) execJump(arg string) Model {
 		m.errText = "jump needs a line number, top, or end"
 		return m
 	}
-	m.edit.clearSelection()
-	m.edit.cy = idx
-	m.edit.cx = 0
-	m.edit.clampCursor()
-	m = m.anchorCursorLine()
+	m = m.jumpCursorToLine(idx + 1)
 	m.mode = m.execPrevMode
 	return m
 }

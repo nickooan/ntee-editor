@@ -100,12 +100,13 @@ func (m Model) renderFuzzyOverlay(width, height int) string {
 	if selected >= visible {
 		start = selected - visible + 1
 	}
+	searchText := m.fuzzySearchText()
 	for i := start; i < start+visible && i < len(m.fuzzyMatches); i++ {
 		match := m.fuzzyMatches[i]
 		cand := m.fuzzyCorpus[match.Index]
 		// Matched positions are computed here, only for the visible rows, rather
 		// than for every match during Filter.
-		positions := fuzzy.Positions(m.fuzzyQuery, cand)
+		positions := fuzzy.Positions(searchText, cand)
 		row := renderFuzzyRow(cand.Text, positions, rowWidth, i == selected)
 		b.WriteString("\n" + row)
 	}

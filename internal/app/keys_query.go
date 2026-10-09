@@ -29,7 +29,8 @@ func (m Model) queryInputSuggestions(entries []filetree.FileTreeEntry) []filetre
 	}
 	// Reads the cached corpus and its precomputed fuzzy data (populated by
 	// ensureCorpus in the key handler); never walks or re-prepares here.
-	suggestions := filetree.BuildInputSuggestions(entries, m.corpus, m.dirCorpus, m.queryPrepared, m.command, filetree.MaxInputSuggestions)
+	pathText, _ := splitLineAnchor(m.command)
+	suggestions := filetree.BuildInputSuggestions(entries, m.corpus, m.dirCorpus, m.queryPrepared, pathText, filetree.MaxInputSuggestions)
 	if f != nil {
 		f.sugOk, f.sugSeq, f.sugKey, f.suggestions = true, f.seq, m.command, suggestions
 	}
@@ -400,7 +401,8 @@ func (m Model) moveQueryToParentDirectory() Model {
 }
 
 // submitQuery acts on Enter: ":" runs an editor command, a directory is
-// entered (confirming expansion), a file opens straight into edit mode. The
+// entered (confirming expansion), a file opens straight into edit mode (on the
+// line of an optional "#L<n>" anchor). The
 // target resolves from the selected suggestion when the popup is open, else
 // from the sidebar highlight.
 func (m Model) submitQuery(entries []filetree.FileTreeEntry, suggestions []filetree.InputSuggestion) (tea.Model, tea.Cmd) {
@@ -424,12 +426,15 @@ func (m Model) submitQuery(entries []filetree.FileTreeEntry, suggestions []filet
 		return m.executeCommand(strings.TrimSpace(strings.TrimPrefix(trimmed, ":")))
 	}
 
+	pathText, line := splitLineAnchor(trimmed)
+	pathText = strings.TrimSpace(pathText)
+
 	var target *filetree.FileTreeEntry
 	if len(suggestions) > 0 {
 		s := suggestions[input.Clamp(m.inputSuggestIndex, 0, len(suggestions)-1)]
 		entry := s.Entry
 		target = &entry
-	} else if trimmed != "" || m.keyboardSelectedCommand != "" || m.selectedCommand != "" {
+	} else if pathText != "" || m.keyboardSelectedCommand != "" || m.selectedCommand != "" {
 		if idx := m.highlightedEntryIndex(entries); idx >= 0 {
 			entry := entries[idx]
 			target = &entry
@@ -451,5 +456,5 @@ func (m Model) submitQuery(entries []filetree.FileTreeEntry, suggestions []filet
 	}
 
 	m.command, m.qCursor = "", 0
-	return m.openFileAt(target.RelativePath), nil
+	return m.openFileAtLine(target.RelativePath, line), nil
 }

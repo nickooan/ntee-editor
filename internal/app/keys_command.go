@@ -342,11 +342,12 @@ func (m Model) handleFuzzyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m = m.refreshFuzzy()
 			break
 		}
+		_, line := splitLineAnchor(m.fuzzyQuery) // read before closeFuzzy clears the query
 		m = m.closeFuzzy()
 		if m.mode == modeEdit {
 			m = m.flushBurst() // keep the abandoned buffer reachable in history
 		}
-		m = m.openFileAt(rel)
+		m = m.openFileAtLine(rel, line)
 	case "up", "shift+up":
 		m.fuzzyIndex = max(0, m.fuzzyIndex-1)
 	case "down", "shift+down":
@@ -380,14 +381,23 @@ func (m Model) fuzzySelectedPath() string {
 		return m.fuzzyCorpus[m.fuzzyMatches[idx].Index].Text
 	}
 	// No matches: keep the tree anchored to the query's directory part.
-	if i := strings.LastIndex(m.fuzzyQuery, "/"); i >= 0 {
-		return m.fuzzyQuery[:i+1]
+	searchText := m.fuzzySearchText()
+	if i := strings.LastIndex(searchText, "/"); i >= 0 {
+		return searchText[:i+1]
 	}
 	return ""
 }
 
+// fuzzySearchText is the finder query without its optional "#L<n>" line
+// anchor: the anchor only matters on Enter, never for matching.
+func (m Model) fuzzySearchText() string {
+	searchText, _ := splitLineAnchor(m.fuzzyQuery)
+	return searchText
+}
+
 func (m Model) refreshFuzzy() Model {
-	m.fuzzyMatches = fuzzy.Filter(m.fuzzyQuery, m.fuzzyCorpus)
+	searchText := m.fuzzySearchText()
+	m.fuzzyMatches = fuzzy.Filter(searchText, m.fuzzyCorpus)
 	// Repo rows are directories the user selects, not drills into, so an
 	// exact "repo/" query must stay in the list. The goto finder drops that
 	// row: Enter-on-a-directory sets the query to the dir, and leaving it
@@ -396,7 +406,7 @@ func (m Model) refreshFuzzy() Model {
 		m.fuzzyIndex = 0
 		return m
 	}
-	if q := strings.ToLower(m.fuzzyQuery); strings.HasSuffix(q, "/") {
+	if q := strings.ToLower(searchText); strings.HasSuffix(q, "/") {
 		kept := m.fuzzyMatches[:0]
 		for _, match := range m.fuzzyMatches {
 			if strings.ToLower(m.fuzzyCorpus[match.Index].Text) == q {

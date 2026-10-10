@@ -29,6 +29,9 @@ undo history, and session all survive relaunch.
   are stored per-project in ntee-db and restored on relaunch.
 - **Built-in inspection dashboard** — see store disk usage and language-server
   status, compact the database, and start/stop LSPs without leaving the editor.
+- **Op-commands** — save shell command templates once (`terraform plan
+  -var-file={$1}`, `go test {$fpath}`) and run them on the open file with
+  `Ctrl+R`, output streaming live.
 
 ## Install
 
@@ -87,7 +90,8 @@ Five things to know in your first five minutes:
 | `Ctrl+U` | Goto **uncommitted** file — same finder, limited to git-dirty paths |
 | `Ctrl+W` | **Workspace repo** — re-root the editor at a nested git repo under the opened directory (pick the top `name/` row to go back to the whole workspace). The file tree, query bar, `Ctrl+P`/`Ctrl+U`/`Ctrl+G`, change highlights, and git views then cover that repo only, as if you had opened it directly; the title bar shows `working repo: …` in orange next to the path. Each repo remembers its own tabs, open file, and tree position (also across relaunch), and switching stashes unsaved edits as a draft. Refused when the opened directory is already a git repo |
 | `Ctrl+G` | **Grep the repo** — colored preview on top, results below; `↑/↓` + `Enter` jumps |
-| `Ctrl+T` | **Inspection dashboard** — store stats + LSP control ([below](#inspection-mode-ctrlt)) |
+| `Ctrl+T` | **Inspection dashboard** — store stats + LSP control + op-commands ([below](#inspection-mode-ctrlt)) |
+| `Ctrl+R` | **Run an op-command** on the open file — pick a saved command, fill its `{$1}` `{$2}` args, watch the output stream ([below](#op-commands-ctrlr)) |
 | `Shift+Tab` | Cycle the focused tab (wraps) |
 | `Ctrl+Q` / `Ctrl+C` | Quit (session saved) |
 
@@ -176,6 +180,11 @@ A dashboard for the editor's own machinery. `Shift+↑/↓` switches the left me
 - **lsp** — every configured language server with its live status:
   **running** (green) · **stopped** (yellow — starts on demand) ·
   **disabled** (gray, with the reason).
+- **op-commands** — your saved shell command templates as a key/value table.
+  Press `→` to move into the table; there `↑/↓` picks a row, `Enter` edits it
+  (or adds a new one on `+ new command`), `Tab` switches between key and value,
+  `Ctrl+S` saves, `Esc` reverts the edit, and `d` deletes after a `y/n`
+  confirmation. `←`/`Esc` goes back to the menu.
 
 The `@inspection >` bar takes:
 
@@ -189,6 +198,30 @@ The `@inspection >` bar takes:
 LSP commands act live *and* write `~/.config/ntee-editor/config.yaml` (previous
 file backed up to `config.yaml.bak`), so the change sticks across restarts. If a
 server fails to start (e.g. binary missing), the error shows right in the bar.
+
+### Op-commands (`Ctrl+R`)
+
+An op-command is a named shell command template saved in the inspection
+dashboard's **op-commands** table. It can use these placeholders:
+
+| Placeholder | Replaced with |
+|---|---|
+| `{$1}`, `{$2}`, … | the 1st, 2nd, … argument you type when running it |
+| `{$fpath}` | the absolute path of the open file |
+
+With a file open, press `Ctrl+R`, type to fuzzy-find a command, and press
+`Enter`. If the template takes arguments, type them (`"a b"` groups words into
+one argument). A live preview shows the exact command line before `Enter` runs
+it. Commands without arguments run straight away. Values are shell-quoted only
+when they need it, so `master` is passed as `master` and `my file.tf` as
+`'my file.tf'`. The program gets the same arguments either way.
+
+The command runs with `sh -c` in the project root, and its output (stdout and
+stderr) streams into the overlay as it arrives. When the process exits, the
+footer turns green (`✓ finished`), or red with the exit status if it failed.
+Press `Esc` to close. `Esc` while the command is still running kills it.
+
+Op-commands are stored in `~/.ntee-editor/global/` and shared by every project.
 
 ---
 

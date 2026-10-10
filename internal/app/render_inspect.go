@@ -16,6 +16,8 @@ func (m Model) renderInspectMain(width, height int) string {
 		return m.renderInspectLSP(width)
 	case inspectMenuSystem:
 		return m.renderInspectSystem(width)
+	case inspectMenuOpCommands:
+		return m.renderInspectOpCommands(width, height)
 	default:
 		return m.renderInspectDB(width)
 	}

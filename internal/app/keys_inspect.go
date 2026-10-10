@@ -16,12 +16,13 @@ import (
 
 // inspectMenuItems are the left-pane rows of the inspection dashboard, in
 // display order. inspectMenu indexes into this list.
-var inspectMenuItems = []string{"ntee-db", "lsp", "system"}
+var inspectMenuItems = []string{"ntee-db", "lsp", "system", "op-commands"}
 
 const (
 	inspectMenuDB = iota
 	inspectMenuLSP
 	inspectMenuSystem
+	inspectMenuOpCommands
 )
 
 // syntaxStyles is the curated set of chroma styles offered by `syscolor`.
@@ -72,14 +73,20 @@ func (m Model) enterInspect() (tea.Model, tea.Cmd) {
 	m.inspectMenu = inspectMenuDB
 	m.inspectInput, m.inspectCursor = "", 0
 	m.inspectLoading = true
-	return m, m.fetchDBInfoCmd()
+	m.opTable = opTableState{}
+	m, loadOpCommands := m.loadOpCommandsCmd()
+	return m, tea.Batch(m.fetchDBInfoCmd(), loadOpCommands)
 }
 
 // handleInspectKey drives the inspection dashboard: Shift+↑/↓ move the left
 // menu (mirroring the sidebar selection), the rest is the standard command-bar
-// input (exec-bar pattern). Esc returns to the previous mode; a busy
-// maintenance op keeps running and lands as a notice.
+// input (exec-bar pattern). On op-commands, → at the end of the bar input
+// focuses the table, which then owns the keys. Esc returns to the previous
+// mode; a busy maintenance op keeps running and lands as a notice.
 func (m Model) handleInspectKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.opTable.focused {
+		return m.handleOpTableKey(msg)
+	}
 	switch msg.String() {
 	case "esc":
 		m.mode = m.inspectPrevMode
@@ -92,6 +99,11 @@ func (m Model) handleInspectKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "left":
 		m.inspectCursor = input.MoveCursor(m.inspectInput, m.inspectCursor, -1)
 	case "right":
+		if m.inspectMenu == inspectMenuOpCommands && m.inspectCursor >= len([]rune(m.inspectInput)) {
+			m.opTable.focused = true
+			m.opTable.index = input.Clamp(m.opTable.index, 0, len(m.opCommands))
+			break
+		}
 		m.inspectCursor = input.MoveCursor(m.inspectInput, m.inspectCursor, 1)
 	case "backspace":
 		m.inspectInput, m.inspectCursor, _ = input.RemoveBeforeCursor(m.inspectInput, m.inspectCursor)
@@ -103,6 +115,21 @@ func (m Model) handleInspectKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// inspectHint is the status-bar key hint for the inspect dashboard's focus.
+func (m Model) inspectHint() string {
+	switch {
+	case m.opTable.confirmDelete != "":
+		return "y delete · n cancel"
+	case m.opTable.editing:
+		return "Tab key/value · Ctrl+S save · Esc revert"
+	case m.opTable.focused:
+		return "↑/↓ row · Enter edit · d delete · ←/Esc back"
+	case m.inspectMenu == inspectMenuOpCommands:
+		return "→ edit op-commands · Shift+↑/↓ pane · Esc back"
+	}
+	return "db compact|relieve · lsp enable|disable <lang|all> · syscolor <style> · Shift+↑/↓ pane · Esc back"
 }
 
 // runInspectCommand dispatches "db compact|relieve",

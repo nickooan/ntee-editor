@@ -47,6 +47,16 @@ The key layout is a flat namespace with prefixes:
 
 *Plus map-backed mirrors of the rest of the interface: `Close`, `TouchOpened`, `RecentFiles`, `DeleteOpenedUnder`, `SnapshotPut`, `SnapshotGet`, `SnapshotDelete`, `SaveSession`/`LoadSession`, `SaveDraft`/`LoadDraft`/`DeleteDraft`, `SaveTabs`/`LoadTabs`, `SaveCorpus`/`LoadCorpus` and their `*For` scoped variants (tabs and corpus kept per scope) — same semantics as the real store, minus persistence.*
 
+### opcommands.go
+
+Op-commands (the Ctrl+R shell command templates) are the one *global* record: they live in their own ntee-db at `~/.ntee-editor/global/`, shared by every project, outside the `Backend` interface. They sit behind a separate `OpCommandStore` interface, which `GlobalOpCommands` (on disk) and `MemoryOpCommands` (tests and fallback) both implement. Records are `OpCommand` (name, command template, updated-at) under plain `opcmd:<name>` keys.
+
+- `GlobalOpCommands` — every editor instance shares this store, and ntee-db allows one writer process. So instead of holding the store open, it opens it per call (`withDB`) and closes it right away. On `ErrLocked` (another instance is mid-read or mid-write) it retries a few times with a short backoff, then returns the error to the status bar. Callers run it on `tea.Cmd` goroutines.
+- `LoadOpCommands` — prefix-scans `opcmd:` and returns the commands sorted by name, for a predictable table and picker order.
+- `PutOpCommand(previousName, command)` — saves one command. A rename (`previousName` differs from the new name) deletes the old key in the same open.
+
+*Plus: `GlobalDir` (the store path), `DeleteOpCommand`, the `MemoryOpCommands` mirror (mutex-guarded, since loads and saves run on Cmd goroutines), and `sortOpCommands`.*
+
 ### scoped.go
 
 - `Scoped` — returns the view of a store for a nested repo the editor is rooted at (`repo` "" returns the store itself). File-record methods prefix `repo/` on every path going in and strip it coming out: `TouchOpened`, `RecentFiles` (filtered to the repo, with the limit applied after filtering), `DeleteOpenedUnder`, `SnapshotPut`/`SnapshotGet`, `LastSave`, and the draft methods. Tabs and the corpus route to the repo's own keys. Session, maintenance, snapshot delete, and `Close` pass straight through: the session stays workspace-level (the app writes each root's position into it), and the view owns no resources.

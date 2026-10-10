@@ -281,6 +281,19 @@ type Model struct {
 	inspectLoading  bool   // stats fetch in flight
 	inspectBusy     string // "" | "compact" | "relieve" — blocks duplicate runs
 
+	// Op-commands: user-saved shell command templates in the global store
+	// (opStore), edited in the inspect dashboard's table and run from the
+	// Ctrl+R overlay. opCommands is the cached list both share; opRunGen tags
+	// streamed run output and is never reset, so a closed run's messages drop.
+	opStore           store.OpCommandStore
+	opCommands        []store.OpCommand
+	opCommandsGen     int
+	opCommandsLoading bool
+	opCommandsErr     error
+	opTable           opTableState
+	opMode            opModeState
+	opRunGen          int
+
 	// Fuzzy file finder overlay: Ctrl+P (whole project) and Ctrl+U (uncommitted
 	// files only) share it; fuzzyPrompt labels which source is showing.
 	fuzzyOpen    bool
@@ -412,6 +425,7 @@ func New(cfg config.Config, db store.Backend, root, notice string, reg lsp.Regis
 		previewMC:       &matchCache{},
 		frames:          &frameCache{},
 		grepPreviewRC:   &regexCache{},
+		opStore:         store.NewMemoryOpCommands(),
 		lastInputAt:     time.Now(),
 		termFocused:     true,
 	}
@@ -876,6 +890,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.inspectInfo, m.inspectInfoErr = msg.info, msg.err
 		return m, nil
 
+	case opCommandsLoadedMsg:
+		return m.handleOpCommandsLoaded(msg)
+
+	case opCommandSavedMsg:
+		return m.handleOpCommandSaved(msg)
+
+	case opRunMsg:
+		return m.handleOpRunMsg(msg)
+
 	case inspectMaintMsg:
 		// Landing after Esc is harmless: only cached fields and the transient
 		// notice are touched (same contract as lsp.NoticeMsg).
@@ -1078,6 +1101,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.grepOpen {
 			return m.handleGrepKey(msg)
 		}
+		if m.opMode.open {
+			return m.handleOpKey(msg)
+		}
 		if k == "ctrl+w" && !m.inBarMode() {
 			return m.openRepoPicker()
 		}
@@ -1092,6 +1118,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if k == "ctrl+t" && !m.inBarMode() {
 			return m.enterInspect()
+		}
+		if k == "ctrl+r" && !m.inBarMode() {
+			return m.openOpMode()
 		}
 		if k == "shift+tab" && !m.inBarMode() {
 			return m.cycleTab(), nil
@@ -1140,6 +1169,16 @@ func (m Model) handlePaste(text string) (tea.Model, tea.Cmd) {
 	if m.grepOpen {
 		return m.grepPaste(text)
 	}
+	if m.opMode.open {
+		if m.opMode.stage == opStageArgs {
+			m.opMode.args, m.opMode.argsCursor = input.InsertAtCursor(m.opMode.args, m.opMode.argsCursor, pasteLine(text))
+		} else if m.opMode.stage == opStagePick {
+			m.opMode.query += pasteLine(text)
+			m.opMode.index = 0
+			m = m.refreshOpMatches()
+		}
+		return m, nil
+	}
 	// modeDiff, modeBlame, and modeConflict have no case: all are read-only to
 	// typing (conflict mode edits only through Enter on a marker), so pastes
 	// are inert.
@@ -1162,7 +1201,12 @@ func (m Model) handlePaste(text string) (tea.Model, tea.Cmd) {
 	case modeSearchExec:
 		m.searchExecInput, m.searchExecCursor = input.InsertAtCursor(m.searchExecInput, m.searchExecCursor, pasteLine(text))
 	case modeInspect:
-		m.inspectInput, m.inspectCursor = input.InsertAtCursor(m.inspectInput, m.inspectCursor, pasteLine(text))
+		switch {
+		case m.opTable.focused && m.opTable.editing:
+			m = m.opEditPaste(text)
+		case !m.opTable.focused:
+			m.inspectInput, m.inspectCursor = input.InsertAtCursor(m.inspectInput, m.inspectCursor, pasteLine(text))
+		}
 	case modeOpenAPI, modeGraphQL:
 		if m.preview.searching {
 			m.preview.search += pasteLine(text)
@@ -1193,6 +1237,7 @@ func pasteLine(text string) string {
 }
 
 func (m Model) quit() (tea.Model, tea.Cmd) {
+	m = m.closeOpMode()       // a running op-command must not outlive the editor
 	m = m.recordCursor()      // persist the active file's cursor for next launch
 	m = m.stashDraftIfDirty() // unsaved edits survive a relaunch
 	m.saveSession()

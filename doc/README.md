@@ -19,6 +19,7 @@ This directory contains one document per internal package. Each follows the same
 | `internal/input` | Small cursor-aware text-input helpers for the command bars | [input.md](input.md) |
 | `internal/lsp` | Language-server manager: lazy per-language servers, a writer queue that can't freeze the UI, Vue↔TypeScript hybrid bridging | [lsp.md](lsp.md) |
 | `internal/lspsetup` | The `--prepare-lsp` installer: pinned per-language recipes via brew/go/npm/gem | [lspsetup.md](lspsetup.md) |
+| `internal/opcmd` | Op-command templates: parses `{$1}`/`{$fpath}` placeholders and renders a shell-quoted command line | [opcmd.md](opcmd.md) |
 | `internal/openapi` | Parses OpenAPI v3 YAML (order-preserving), resolves cross-file `$ref`s, renders the spec preview | [openapi.md](openapi.md) |
 | `internal/store` | Per-project persistence on ntee-db: recents, undo snapshots, drafts, session, corpus cache | [store.md](store.md) |
 | `internal/syntax` | Syntax highlighting: tokenizers and themes producing per-line styled segments | [syntax.md](syntax.md) |
@@ -36,4 +37,5 @@ cmd/ntee ──▶ config.Load ──▶ store.Open ──▶ lsp.NewManager ─
 - **All git access is bounded.** `gitcmd` wraps every git spawn with a 10-second deadline, so a hung `git status` (network filesystem, lock contention) degrades gracefully instead of wedging a goroutine forever.
 - **Language servers are decoupled.** `lsp` starts one server per language on first use. Document sync goes through a bounded writer queue per server — if a server stops reading its stdin, edits coalesce and the editor keeps typing. Crashes restart with a budget; repeated crash-loops disable the language for the session.
 - **Trust boundaries are explicit.** `config` merges defaults ← user config ← project config, but strips anything from the project file that could name an executable — cloning a repo can never hand it code execution. `lspsetup` installs only pinned versions.
+- **Op-commands are user-authored only.** The shell command templates run from Ctrl+R live in a global ntee-db under `~/.ntee-editor/global/` that only the editor writes, on the user's behalf — never in project config — so the config trust rule still holds. Values substituted into a template are shell-quoted (`opcmd`), and runs stream through a cancellable process group.
 - **State survives restarts.** `store` keeps recents, tabs, session, the walk corpus (for instant warm starts), undo snapshots (content-hashed for cheap dedupe), and unsaved drafts, all in a per-project ntee-db.

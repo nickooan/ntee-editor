@@ -117,10 +117,15 @@ func TestInspectMenuSelection(t *testing.T) {
 	if m.inspectMenu != inspectMenuSystem {
 		t.Fatalf("Shift+Down should select system, got %d", m.inspectMenu)
 	}
+	m = key(m, shiftKey(tea.KeyDown))
+	if m.inspectMenu != inspectMenuOpCommands {
+		t.Fatalf("Shift+Down should select op-commands, got %d", m.inspectMenu)
+	}
 	m = key(m, shiftKey(tea.KeyDown)) // clamped
-	if m.inspectMenu != inspectMenuSystem {
+	if m.inspectMenu != inspectMenuOpCommands {
 		t.Fatalf("selection should clamp at the last item, got %d", m.inspectMenu)
 	}
+	m = key(m, shiftKey(tea.KeyUp))
 	m = key(m, shiftKey(tea.KeyUp))
 	m = key(m, shiftKey(tea.KeyUp))
 	m = key(m, shiftKey(tea.KeyUp)) // clamped

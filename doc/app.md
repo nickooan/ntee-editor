@@ -24,13 +24,13 @@ Three design rules shape almost every function here:
 | `modeCommand` | the bottom `:` command bar |
 | `modeExec` | the `@exec >` editor-command bar (Ctrl+E from edit) |
 | `modeSearchExec` | the replace bar layered on search (Ctrl+E from search) |
-| `modeInspect` | the Ctrl+T inspection dashboard (store stats, LSP control, theme) |
+| `modeInspect` | the Ctrl+T inspection dashboard (store stats, LSP control, theme, op-commands table) |
 | `modeDiff` | read-only git-diff review of the buffer (`git diff` in @exec) |
 | `modeConflict` | interactive merge-conflict resolution over the live buffer (`git scf`) |
 | `modeOpenAPI` / `modeGraphQL` | read-only rendered document previews (`openapi` / `graphql`) |
 | `modeBlame` | read-only git-blame annotation (`git blame`) |
 
-**The Update/View loop.** `Update` first bumps the frame cache's sequence (per-message memos go stale), then handles non-key messages (window size, LSP diagnostics, async results, git status ticks, mouse, paste). For key presses it peels overlays in priority order — quit chords, splash, message overlay, `:rm` confirm, fuzzy finder, definition picker, grep — then global chords (Ctrl+P/U/G/T, Shift+Tab, all suppressed while a text bar has focus via `inBarMode`), and finally dispatches on `m.mode` to the per-mode handler. `View` (render.go) assembles header + sidebar pane + main pane + status rows, choosing the main body by the same overlay-then-mode priority.
+**The Update/View loop.** `Update` first bumps the frame cache's sequence (per-message memos go stale), then handles non-key messages (window size, LSP diagnostics, async results, git status ticks, mouse, paste). For key presses it peels overlays in priority order — quit chords, splash, message overlay, `:rm` confirm, fuzzy finder, definition picker, grep, the Ctrl+R op overlay — then global chords (Ctrl+P/U/G/T/R, Shift+Tab, all suppressed while a text bar has focus via `inBarMode`), and finally dispatches on `m.mode` to the per-mode handler. `View` (render.go) assembles header + sidebar pane + main pane + status rows, choosing the main body by the same overlay-then-mode priority.
 
 **How async results land.** Each worker Cmd captures everything it needs by value (including a copy of the buffer lines where relevant), does its work, and returns a message tagged with `gen` and usually `rel`. The `handleXReady` handler compares `gen` against the Model's current counter, `rel` against the open file, and often the mode too; a mismatch means the result is stale and it is silently dropped. Generations stay monotonic across state clears precisely so in-flight results remain identifiable.
 
@@ -189,7 +189,20 @@ Every opened file becomes a tab; the list, active index, and per-tab cursors per
 - `inspectLSPCommand` persists the config change *first* (nothing half-applied on a failed write) and then applies it live through the registry — `m.cfg` itself is never mutated because its Languages map is shared with server goroutines.
 - `inspectSyscolorCommand` validates against the curated style list, persists, applies via `syntax.SetStyle`, and invalidates every highlight cache so the new colors show immediately.
 
-*Plus small helpers: `handleInspectKey`, `inspectDBCommand`, `knownLanguages` — bar editing and validation.*
+- `handleInspectKey` hands every key to the op-commands table while it has focus. On the op-commands section, `→` at the end of the bar input moves focus into the table.
+
+*Plus small helpers: `inspectDBCommand`, `knownLanguages`, `inspectHint` (the status-bar hint for the current focus) — bar editing and validation.*
+
+#### keys_opcommands.go
+
+The inspect dashboard's op-commands table: a key/value list of saved shell command templates (`opTableState`) kept in the global `OpCommandStore` (`m.opStore`, swapped in by `WithOpCommandStore`). `m.opCommands` is the cached list, shared with the Ctrl+R overlay.
+
+- `loadOpCommandsCmd` reloads the list off the UI goroutine. It runs when the dashboard opens, when Ctrl+R opens, and after every save or delete. The result lands as `opCommandsLoadedMsg`, which is dropped unless its `opCommandsGen` is current. It also refreshes the picker if the overlay is open.
+- `handleOpTableKey`: ↑/↓ moves through the rows plus a trailing `+ new command` row. Enter edits the row. `d` asks `delete <name>? y/n` before deleting (asynchronously). ←/Esc returns focus to the menu.
+- `handleOpEditKey` is the inline editor. Tab switches between the key and value fields, and the rest is cursor-aware typing. Ctrl+S calls `saveOpEdit`. Esc throws the buffer away, so the row shows its stored value again.
+- `saveOpEdit` validates before writing anything. The key must be non-empty, have no spaces, and be unique. The value must be non-empty and pass `opcmd.Parse`. The `PutOpCommand` write then runs in a Cmd. If validation fails, editing stays open with the error in the bar.
+
+*Plus small helpers: `startOpEdit`, `switchOpEditField`, `opEditPaste`, `handleOpCommandsLoaded`, `handleOpCommandSaved`.*
 
 ### Git views
 
@@ -309,6 +322,27 @@ Repo-wide content search (Ctrl+G). Everything expensive is async and generation-
 
 *Plus small helpers: `handleGrepTick`, `handleGrepResults`, `handleGrepPreview`, `buildLineStarts`, `lineForOffset`, `grepPaste`, `grepInsert`, `grepLineCol`, `grepOffsetAt`, `grepMoveCursorLine` — tick/result landing, offset math, and query-cursor plumbing.*
 
+#### keys_opmode.go (Ctrl+R)
+
+The operation overlay runs a saved op-command against the open file. It only opens while a file is open, because `{$fpath}` needs one. It moves through three stages (`opModeState.stage`):
+
+- **pick**: fuzzy search over command names. This reuses `fuzzy.Prepare`/`Filter`, and rows show the template dimmed. Enter calls `selectOpCommand`. A template with no `{$n}` runs immediately; otherwise the overlay moves to the args stage.
+- **args**: the user types the arguments. `renderOpCommandLine` splits them with `opcmd.SplitArgs`, adds the system values, and renders the template every frame, so the box shows either the exact `$ command` or the error (`needs 2 args, got 1`). Enter runs it. Esc goes back to the picker with the query kept.
+- **run**: `runOpCommand` bumps `opRunGen` and starts the process (see opmode_run.go). `handleOpRunMsg` appends output and re-arms the wait until the done event arrives. A message with an older generation is dropped, which also ends its wait chain. While the run view is open, ↑/↓/PgUp/PgDn/Home/End scroll back through the output; End returns to following the tail.
+
+`closeOpMode` (Esc, or `quit`) cancels a still-running process and bumps `opRunGen`, so the cancelled run's last messages are dropped.
+
+*Plus small helpers: `openOpMode`, `refreshOpMatches`, `handleOpArgsKey`, `handleOpRunKey`, `opRunState.status` (the footer text, and whether it is green or red).*
+
+#### opmode_run.go
+
+- `opRunState.execute` runs `sh -c <command line>` in the current root. stdin is `/dev/null`, so an interactive tool can't hang. stdout and stderr are merged into one pipe. The process runs in its own process group, so cancelling SIGTERMs the shell's children too. `WaitDelay` limits how long a child that ignores the signal, or keeps the pipe open, can block.
+- A reader goroutine sends output chunks into a bounded channel, so a fast producer is slowed down rather than buffered without limit. Sends give up once the run is cancelled, because nobody drains the channel after Esc and a blocked send would leak the goroutine.
+- `next` blocks for one event, then folds whatever else is already queued into the same `opRunMsg` (up to 64 KB). A chatty process therefore costs a few frames, not one frame per write.
+- `opRunOutput` turns raw output into display lines. It strips ANSI escapes and treats CRLF as a newline, including when the CR and LF arrive in different chunks. A bare CR rewinds the current line, so progress bars redraw in place. Only the last ~5,000 lines are kept, trimmed in batches.
+
+*Plus small helpers: `newOpRun`, `startOpRunCmd`, `waitOpRunCmd`, `send`, `pushLine`, `displayLines`.*
+
 #### jump.go (definition picker)
 
 - `jumpToCandidates` handles the 0/1/many outcome shared by every lookup: zero errors, one jumps, many open the picker overlay (capped at 50) with a preview and a precompiled token-highlight regex.
@@ -402,9 +436,19 @@ The left pane is one list. File tree, inspection menu, and preview outline each 
 
 #### render_inspect.go
 
-- `renderInspectMain` routes to the selected panel: `renderInspectDB` (record counts, live/dead log bytes, blob usage, generation warnings), `renderInspectLSP` (per-language running/stopped/disabled status from the registry), `renderInspectSystem` (version and syntax style).
+- `renderInspectMain` routes to the selected panel: `renderInspectDB` (record counts, live/dead log bytes, blob usage, generation warnings), `renderInspectLSP` (per-language running/stopped/disabled status from the registry), `renderInspectSystem` (version and syntax style), `renderInspectOpCommands` (render_opmode.go).
 
 *Plus small helpers: `humanBytes`, `percent` — number formatting. The left menu is `inspectSidebarList` in sidebarlist.go.*
+
+#### render_opmode.go
+
+- `renderOpOverlay` draws the Ctrl+R overlay for its stage.
+  - **Pick:** a box like the fuzzy finder, with the template dimmed after each name.
+  - **Args:** the template, the args input, and the live `$ command` preview in green, or the error in red. The preview wraps over a few lines so long paths stay readable.
+  - **Run:** a large box with the command line, the output tail (or a scrolled-back window that never leaves empty space at the top), and a footer. The footer is yellow while running, green `✓ finished (exit 0)`, or red with the exit status.
+- `renderInspectOpCommands` draws the key/value table. Keys are padded to the longest name, capped at a third of the width. The selected row is highlighted when the table has focus. The row being edited shows inline inputs (`renderOpEditRow`). The table scrolls so the selection stays visible.
+
+*Plus: `wrapRunes` — hard wrap with a trailing `…` past the line cap.*
 
 ### Mouse
 

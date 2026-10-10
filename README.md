@@ -215,8 +215,17 @@ dashboard's **op-commands** table. It can use these placeholders:
 | Placeholder | Replaced with |
 |---|---|
 | `{$1}`, `{$2}`, … | the 1st, 2nd, … argument you type when running it |
+| `{$1 or master}` | argument 1, or `master` when you leave it out. Quote a default with spaces: `{$2 or "other word"}`. `{$3 or ""}` makes the placeholder disappear when omitted (no empty `''` argument) |
 | `{$fpath}` | the open file's path, relative to the workspace directory (e.g. `apps/web/main.go`) |
 | `{$dpath}` | the open file's directory, relative to the workspace directory (e.g. `apps/web`; `.` at the top level) |
+
+Defaults never force you to type around them. In
+`deploy {$1} {$2 or master} {$3} {$4 or ""}`, `$1` and `$3` are the required
+arguments:
+- `deploy a b` fills just those (`$1=a $3=b`) and uses the defaults for the rest.
+- `deploy a b c` fills `$1 $2 $3` in order and leaves `$4` to its default.
+
+The args box shows which value lands where before you run.
 
 With a file open, press `Ctrl+R`, type to fuzzy-find a command, and press
 `Enter`. If the template takes arguments, type them (`"a b"` groups words into

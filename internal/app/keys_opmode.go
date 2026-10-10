@@ -160,6 +160,9 @@ func (m Model) selectOpCommand() (tea.Model, tea.Cmd) {
 		m.opMode.stage = opStageArgs
 		return m, nil
 	}
+	// Only a template with no arguments at all skips the args stage: optional
+	// ones still get the chance to be filled (Enter on an empty line uses the
+	// defaults).
 	if template.MaxArg == 0 {
 		return m.runOpCommand()
 	}

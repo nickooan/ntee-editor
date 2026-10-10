@@ -464,3 +464,32 @@ func TestOpCommandsRowsHaveSeparators(t *testing.T) {
 		t.Fatal("no separator after the last row — the table's own ┴ border closes it")
 	}
 }
+
+func TestOpCommandsColorDefaultsAsOneToken(t *testing.T) {
+	m, _ := opCommandsFixture(t, store.OpCommand{Name: "co", Command: `git checkout {$1 or master} {$2 or "a b"}`})
+	frame := m.render()
+	for _, token := range []string{"{$1 or master}", `{$2 or "a b"}`} {
+		if !strings.Contains(frame, opRowNormal.arg.Render(token)) {
+			t.Fatalf("%s should be colored as one argument token", token)
+		}
+	}
+}
+
+func TestOpCommandsRejectBrokenDefault(t *testing.T) {
+	m, commandStore := opCommandsFixture(t)
+	m = key(m, keyPress(tea.KeyRight))
+	m = key(m, keyPress(tea.KeyEnter))
+	m = runes(m, "co")
+	m = key(m, keyPress(tea.KeyTab))
+	m = runes(m, "git checkout {$1 or}")
+	m = press(t, m, ctrlKey('s'))
+	if !m.opTable.editing || !strings.Contains(m.errText, "missing default value") {
+		t.Fatalf("a broken default should be rejected: editing=%v err=%q", m.opTable.editing, m.errText)
+	}
+	if !strings.Contains(m.render(), opRowInput.invalid.Render("{$1 or}")) {
+		t.Fatal("the broken placeholder should be drawn red while editing")
+	}
+	if len(loadedCommands(t, commandStore)) != 0 {
+		t.Fatal("nothing should be saved")
+	}
+}

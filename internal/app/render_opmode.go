@@ -1,12 +1,15 @@
 package app
 
 import (
+	"fmt"
+	"strconv"
 	"strings"
 
 	"charm.land/lipgloss/v2"
 
 	"github.com/nickooan/ntee-editor/internal/fuzzy"
 	"github.com/nickooan/ntee-editor/internal/input"
+	"github.com/nickooan/ntee-editor/internal/opcmd"
 )
 
 var (
@@ -47,7 +50,7 @@ func (m Model) renderOpPickBox(width int) string {
 	// With inline args ("test 10"), show exactly what Enter will run.
 	if commandLine, ok, err := m.opInlinePreview(); ok {
 		if err != nil {
-			lines = append(lines, opFailureStyle.Render(truncateRunes(err.Error(), rowWidth)))
+			lines = append(lines, renderOpError(err, rowWidth)...)
 		} else {
 			for _, line := range wrapRunes("$ "+commandLine, rowWidth, opPreviewMaxLines) {
 				lines = append(lines, opSuccessStyle.Render(line))
@@ -99,11 +102,12 @@ func (m Model) renderOpArgsBox(width int) string {
 	lines := []string{
 		modalTitleStyle.Render(truncateRunes("run "+command.Name, rowWidth)),
 		overlayHintStyle.Render(truncateRunes(command.Command, rowWidth)),
-		"",
-		promptStyle.Render("args › ") + renderInputLineStyled(m.opMode.args, m.opMode.argsCursor, opInputStyle),
 	}
+	lines = append(lines, renderOpArgLines(m.opMode.template, m.opMode.args, rowWidth)...)
+	lines = append(lines, "",
+		promptStyle.Render("args › ")+renderInputLineStyled(m.opMode.args, m.opMode.argsCursor, opInputStyle))
 	if commandLine, err := m.renderOpCommandLine(); err != nil {
-		lines = append(lines, opFailureStyle.Render(truncateRunes(err.Error(), rowWidth)))
+		lines = append(lines, renderOpError(err, rowWidth)...)
 	} else {
 		for _, line := range wrapRunes("$ "+commandLine, rowWidth, opPreviewMaxLines) {
 			lines = append(lines, opSuccessStyle.Render(line))
@@ -146,6 +150,63 @@ func (layout opRunLayout) visibleRange(lineCount, scroll int) (start, end int) {
 // are screen columns.
 func opDisplayLine(line string) string {
 	return strings.ReplaceAll(line, "\t", "    ")
+}
+
+// renderOpArgLines describes the arguments in the args stage. Once the typed
+// args bind (the same opcmd.Bind the command preview renders with), it shows
+// what each index receives: "$1 a · $2 master (default) · $3 b". Until then it
+// shows the spec ("$1 required · $2 = master") and, when required and
+// optional args mix, how many values to type.
+func renderOpArgLines(template opcmd.Template, argsLine string, width int) []string {
+	separator := overlayHintStyle.Render(" · ")
+	name := func(index int) string { return opRowNormal.arg.Render("$" + strconv.Itoa(index)) }
+	if args, err := opcmd.SplitArgs(argsLine); err == nil && (len(args) > 0 || template.MinArg == 0) {
+		if bindings, err := template.Bind(args); err == nil {
+			var parts []string
+			for _, binding := range bindings {
+				switch {
+				case !binding.FromDefault:
+					parts = append(parts, name(binding.Index)+opInputStyle.Render(" "+opcmd.ShellQuote(binding.Value)))
+				case binding.Value == "":
+					parts = append(parts, name(binding.Index)+overlayHintStyle.Render(" (omitted)"))
+				default:
+					parts = append(parts, name(binding.Index)+overlayHintStyle.Render(" "+opcmd.ShellQuote(binding.Value)+" (default)"))
+				}
+			}
+			return wrapStyled(parts, separator, width)
+		}
+	}
+
+	var parts, required []string
+	for _, spec := range template.ArgSpecs() {
+		switch {
+		case !spec.Optional:
+			parts = append(parts, name(spec.Index)+overlayHintStyle.Render(" required"))
+			required = append(required, "$"+strconv.Itoa(spec.Index))
+		case spec.Default == "":
+			parts = append(parts, name(spec.Index)+overlayHintStyle.Render(` = "" (omitted)`))
+		default:
+			parts = append(parts, name(spec.Index)+overlayHintStyle.Render(" = "+spec.Default))
+		}
+	}
+	lines := wrapStyled(parts, separator, width)
+	if template.MinArg > 0 && template.MinArg < template.MaxArg {
+		hint := fmt.Sprintf("type %s for %s, or up to %d to fill $1…$%d in order",
+			opcmd.Plural(template.MinArg, "value"), strings.Join(required, " "), template.MaxArg, template.MaxArg)
+		for _, line := range wrapWords(hint, width) {
+			lines = append(lines, overlayHintStyle.Render(line))
+		}
+	}
+	return lines
+}
+
+// renderOpError word-wraps an args/render error so it is never cut off.
+func renderOpError(err error, width int) []string {
+	var lines []string
+	for _, line := range wrapWords(err.Error(), width) {
+		lines = append(lines, opFailureStyle.Render(line))
+	}
+	return lines
 }
 
 // renderOpRunBox draws the run view: the command line, the output tail (or a

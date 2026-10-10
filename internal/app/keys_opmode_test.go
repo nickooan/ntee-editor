@@ -68,7 +68,7 @@ func TestOpModePickArgsRunFlow(t *testing.T) {
 	m = key(m, keyPress(tea.KeyEnter))
 
 	m = key(m, keyPress(tea.KeyEnter)) // no args yet
-	if m.opMode.stage != opStageArgs || m.errText != "needs 1 args, got 0" {
+	if m.opMode.stage != opStageArgs || m.errText != "needs 1 arg, got 0" {
 		t.Fatalf("missing args should keep the args stage: stage=%v err=%q", m.opMode.stage, m.errText)
 	}
 	m = runes(m, `"hello world"`)
@@ -349,6 +349,129 @@ func TestOpQueryParts(t *testing.T) {
 	for _, tc := range cases {
 		if name, args := opQueryParts(tc.query); name != tc.name || args != tc.args {
 			t.Errorf("opQueryParts(%q) = %q %q, want %q %q", tc.query, name, args, tc.name, tc.args)
+		}
+	}
+}
+
+func TestOpModeDefaultsFillOmittedArgs(t *testing.T) {
+	m, _ := opModeFixture(t, store.OpCommand{Name: "pair", Command: `printf '%s|%s\n' {$1} {$2 or "x y"}`})
+	m = press(t, m, ctrlKey('r'))
+	m = runes(m, "pair a")
+	if frame := ansi.Strip(m.render()); !strings.Contains(frame, "$ printf '%s|%s\\n' a 'x y'") {
+		t.Fatalf("the preview should fill the default:\n%s", frame)
+	}
+	m = press(t, m, keyPress(tea.KeyEnter))
+	if lines := m.opMode.run.output.displayLines(); !slices.Equal(lines, []string{"a|x y"}) {
+		t.Fatalf("output = %q", lines)
+	}
+
+	m = key(m, keyPress(tea.KeyEsc))
+	m = press(t, m, ctrlKey('r'))
+	m = runes(m, "pair a b")
+	m = press(t, m, keyPress(tea.KeyEnter))
+	if lines := m.opMode.run.output.displayLines(); !slices.Equal(lines, []string{"a|b"}) {
+		t.Fatalf("a typed arg should override the default: %q", lines)
+	}
+}
+
+func TestOpModeOptionalOnlyTemplateAsksThenUsesDefaults(t *testing.T) {
+	m, _ := opModeFixture(t, store.OpCommand{Name: "log", Command: `printf '[%s]\n' {$1 or ""} -n {$2 or 5}`})
+	m = press(t, m, ctrlKey('r'))
+	m = key(m, keyPress(tea.KeyEnter))
+	if m.opMode.stage != opStageArgs {
+		t.Fatal("optional args should still get the args stage")
+	}
+	frame := ansi.Strip(m.render())
+	if !strings.Contains(frame, `$1 (omitted) · $2 5 (default)`) || !strings.Contains(frame, "$ printf '[%s]\\n'  -n 5") {
+		t.Fatalf("args stage should show the defaults and the filled-in command:\n%s", frame)
+	}
+	m = press(t, m, keyPress(tea.KeyEnter))
+	if lines := m.opMode.run.output.displayLines(); !slices.Equal(lines, []string{"[-n]", "[5]"}) {
+		t.Fatalf("an empty default must disappear, not pass '': %q", lines)
+	}
+}
+
+func TestOpModeArgSpecsMarkRequired(t *testing.T) {
+	m, _ := opModeFixture(t, store.OpCommand{Name: "cp", Command: `cp {$1} {$2 or /tmp}`})
+	m = press(t, m, ctrlKey('r'))
+	m = key(m, keyPress(tea.KeyEnter))
+	frame := ansi.Strip(m.render())
+	if !strings.Contains(frame, "$1 required · $2 = /tmp") || !strings.Contains(frame, "needs 1 arg ($1), got 0") ||
+		!strings.Contains(frame, "type 1 value for $1, or up to 2 to fill $1…$2 in order") {
+		t.Fatalf("args stage should explain the arguments:\n%s", frame)
+	}
+}
+
+// fourArgTemplate is the case from the request: $2 and $4 have defaults.
+const fourArgTemplate = `printf '[%s]\n' {$1} {$2 or master} {$3} {$4 or ""}`
+
+func TestOpModeRequiredOnlyArgsSkipDefaults(t *testing.T) {
+	m, _ := opModeFixture(t, store.OpCommand{Name: "t4", Command: fourArgTemplate})
+	m = press(t, m, ctrlKey('r'))
+	m = runes(m, "t4 a b")
+	if frame := ansi.Strip(m.render()); !strings.Contains(frame, "$ printf '[%s]\\n' a master b ") {
+		t.Fatalf("two values should fill $1 and $3, with $2/$4 defaulted:\n%s", frame)
+	}
+	m = press(t, m, keyPress(tea.KeyEnter))
+	if lines := m.opMode.run.output.displayLines(); !slices.Equal(lines, []string{"[a]", "[master]", "[b]"}) {
+		t.Fatalf("output = %q", lines)
+	}
+}
+
+func TestOpModeArgsStageShowsBinding(t *testing.T) {
+	m, _ := opModeFixture(t, store.OpCommand{Name: "t4", Command: fourArgTemplate})
+	m.width = 180 // wide enough that each asserted line renders unwrapped
+	m = press(t, m, ctrlKey('r'))
+	m = key(m, keyPress(tea.KeyEnter))
+	frame := ansi.Strip(m.render())
+	if !strings.Contains(frame, `$1 required · $2 = master · $3 required · $4 = "" (omitted)`) ||
+		!strings.Contains(frame, "type 2 values for $1 $3, or up to 4 to fill $1…$4 in order") {
+		t.Fatalf("the args stage should explain both ways to call it:\n%s", frame)
+	}
+
+	m = runes(m, "a")
+	frame = ansi.Strip(m.render())
+	if !strings.Contains(frame, "needs 2 args ($1, $3), got 1") {
+		t.Fatalf("one value is too few:\n%s", frame)
+	}
+	m = key(m, keyPress(tea.KeyEnter))
+	if m.opMode.stage != opStageArgs {
+		t.Fatal("too few args must keep the args stage")
+	}
+
+	m = runes(m, " b")
+	if frame := ansi.Strip(m.render()); !strings.Contains(frame, "$1 a · $2 master (default) · $3 b · $4 (omitted)") {
+		t.Fatalf("required-only binding should be shown per argument:\n%s", frame)
+	}
+	m = runes(m, " c")
+	frame = ansi.Strip(m.render())
+	if !strings.Contains(frame, "$1 a · $2 b · $3 c · $4 (omitted)") || !strings.Contains(frame, "$ printf '[%s]\\n' a b c ") {
+		t.Fatalf("a third value switches to filling in order:\n%s", frame)
+	}
+}
+
+func TestOpModeUncoveredRequiredArg(t *testing.T) {
+	m, _ := opModeFixture(t, store.OpCommand{Name: "gap", Command: `echo {$1} {$2 or p} {$3 or q} {$4}`})
+	m.width = 180 // wide enough that each asserted line renders unwrapped
+	m = press(t, m, ctrlKey('r'))
+	m = runes(m, "gap a b c")
+	if frame := ansi.Strip(m.render()); !strings.Contains(frame, "$4 has no default") {
+		t.Fatalf("an uncovered required arg should be reported in the preview:\n%s", frame)
+	}
+	m = key(m, keyPress(tea.KeyEnter))
+	if m.opMode.stage != opStageArgs || m.opMode.args != "a b c" {
+		t.Fatalf("Enter should open the args stage pre-filled: stage=%v args=%q", m.opMode.stage, m.opMode.args)
+	}
+}
+
+func TestOpModeArgLinesWrapInsteadOfCutting(t *testing.T) {
+	m, _ := opModeFixture(t, store.OpCommand{Name: "t4", Command: fourArgTemplate})
+	m = press(t, m, ctrlKey('r'))
+	m = key(m, keyPress(tea.KeyEnter))
+	frame := ansi.Strip(m.render())
+	for _, want := range []string{`$4 = "" (omitted)`, "│ order ", "needs 2 args ($1, $3), got 0"} {
+		if !strings.Contains(frame, want) {
+			t.Fatalf("narrow args box should wrap, keeping %q whole:\n%s", want, frame)
 		}
 	}
 }

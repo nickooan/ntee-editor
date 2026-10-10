@@ -27,20 +27,41 @@ var SystemVarDetails = map[string]string{
 }
 
 type segment struct {
-	literal  string
-	argIndex int    // 1-based; 0 when not a positional placeholder
-	system   string // system variable name; "" when not a system placeholder
+	literal      string
+	argIndex     int    // 1-based; 0 when not a positional placeholder
+	system       string // system variable name; "" when not a system placeholder
+	defaultValue string // {$n or default}; an empty default renders as nothing
+	hasDefault   bool
 }
 
 // Template is a parsed op-command template.
 type Template struct {
 	Source   string
 	segments []segment
-	// MaxArg is the highest positional placeholder referenced ({$3} → 3); the
-	// rendered command needs exactly this many user args.
+	// MaxArg is the highest positional placeholder referenced ({$3} → 3).
 	MaxArg int
+	// MinArg is how many arguments are required: indices referenced at least
+	// once without a default. A run takes between MinArg and MaxArg args (see
+	// Bind for how they are assigned).
+	MinArg int
+	// required[i] reports whether index i+1 is required.
+	required []bool
 	// System lists the distinct system variables referenced, in first-use order.
 	System []string
+}
+
+// ArgSpec describes one positional argument for the UI.
+type ArgSpec struct {
+	Index    int
+	Default  string // the first default given for it, when Optional
+	Optional bool
+}
+
+// Binding is the value one argument index receives for a run.
+type Binding struct {
+	Index       int
+	Value       string
+	FromDefault bool
 }
 
 // Parse splits source into literal text and placeholders. "{$" always opens a
@@ -48,27 +69,17 @@ type Template struct {
 // passed through to the shell.
 func Parse(source string) (Template, error) {
 	template := Template{Source: source}
-	var literal strings.Builder
-	rest := source
+	position := 0
 	for {
-		start := strings.Index(rest, "{$")
-		if start < 0 {
-			literal.WriteString(rest)
+		found := strings.Index(source[position:], "{$")
+		if found < 0 {
 			break
 		}
-		literal.WriteString(rest[:start])
-		end := strings.IndexByte(rest[start:], '}')
-		if end < 0 {
-			return Template{}, fmt.Errorf("unclosed placeholder %q", rest[start:])
+		start := position + found
+		if start > position {
+			template.segments = append(template.segments, segment{literal: source[position:start]})
 		}
-		name := rest[start+2 : start+end]
-		rest = rest[start+end+1:]
-
-		if literal.Len() > 0 {
-			template.segments = append(template.segments, segment{literal: literal.String()})
-			literal.Reset()
-		}
-		placeholder, err := parsePlaceholder(name)
+		placeholder, end, err := scanPlaceholder(source, start)
 		if err != nil {
 			return Template{}, err
 		}
@@ -77,11 +88,117 @@ func Parse(source string) (Template, error) {
 		if placeholder.system != "" && !slices.Contains(template.System, placeholder.system) {
 			template.System = append(template.System, placeholder.system)
 		}
+		position = end
 	}
-	if literal.Len() > 0 {
-		template.segments = append(template.segments, segment{literal: literal.String()})
+	if position < len(source) {
+		template.segments = append(template.segments, segment{literal: source[position:]})
+	}
+	template.required = make([]bool, template.MaxArg)
+	for _, part := range template.segments {
+		if part.argIndex > 0 && !part.hasDefault && !template.required[part.argIndex-1] {
+			template.required[part.argIndex-1] = true
+			template.MinArg++
+		}
 	}
 	return template, nil
+}
+
+// scanPlaceholder reads the placeholder opening at start ("{$"):
+//
+//	{$NAME}  |  {$N or WORD}  |  {$N or "TEXT"}
+//
+// A quoted default may hold spaces and "}" (with \" and \\ escapes). It
+// returns the segment and the offset just past the closing "}".
+func scanPlaceholder(source string, start int) (segment, int, error) {
+	unclosed := func() (segment, int, error) {
+		return segment{}, 0, fmt.Errorf("unclosed placeholder %q", source[start:])
+	}
+	position := start + 2
+	nameEnd := position
+	for nameEnd < len(source) && isNameByte(source[nameEnd]) {
+		nameEnd++
+	}
+	name := source[position:nameEnd]
+	position = skipSpaces(source, nameEnd)
+
+	var defaultValue string
+	hasDefault := false
+	if strings.HasPrefix(source[position:], "or") &&
+		(position+2 == len(source) || source[position+2] == ' ' || source[position+2] == '\t' || source[position+2] == '}') {
+		hasDefault = true
+		position = skipSpaces(source, position+2)
+		switch {
+		case position >= len(source):
+			return unclosed()
+		case source[position] == '}':
+			return segment{}, 0, fmt.Errorf("{$%s or …}: missing default value (use \"\" for empty)", name)
+		case source[position] == '"':
+			value, end, ok := scanQuoted(source, position)
+			if !ok {
+				return segment{}, 0, fmt.Errorf("{$%s or …}: unterminated \" in default", name)
+			}
+			defaultValue, position = value, end
+		default:
+			wordEnd := position
+			for wordEnd < len(source) && !strings.ContainsRune(" \t}\"", rune(source[wordEnd])) {
+				wordEnd++
+			}
+			defaultValue, position = source[position:wordEnd], wordEnd
+		}
+		position = skipSpaces(source, position)
+	}
+	if position >= len(source) {
+		return unclosed()
+	}
+	if source[position] != '}' {
+		closing := strings.IndexByte(source[position:], '}')
+		if closing < 0 {
+			return unclosed()
+		}
+		return segment{}, 0, fmt.Errorf("unexpected %q in %s (defaults are {$n or value})",
+			strings.TrimSpace(source[position:position+closing]), source[start:position+closing+1])
+	}
+
+	placeholder, err := parsePlaceholder(name)
+	if err != nil {
+		return segment{}, 0, err
+	}
+	if hasDefault {
+		if placeholder.system != "" {
+			return segment{}, 0, fmt.Errorf("{$%s or …}: only arguments take defaults", name)
+		}
+		placeholder.defaultValue, placeholder.hasDefault = defaultValue, true
+	}
+	return placeholder, position + 1, nil
+}
+
+// scanQuoted reads a "…" default starting at the opening quote, unescaping
+// \" and \\. It returns the value and the offset past the closing quote.
+func scanQuoted(source string, start int) (string, int, bool) {
+	var value strings.Builder
+	for position := start + 1; position < len(source); position++ {
+		switch source[position] {
+		case '"':
+			return value.String(), position + 1, true
+		case '\\':
+			if position+1 < len(source) && (source[position+1] == '"' || source[position+1] == '\\') {
+				position++
+			}
+		}
+		value.WriteByte(source[position])
+	}
+	return "", 0, false
+}
+
+func isNameByte(b byte) bool {
+	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9'
+}
+
+func skipSpaces(source string, position int) int {
+	for position < len(source) && (source[position] == ' ' || source[position] == '\t') {
+		position++
+	}
+	return position
 }
 
 func parsePlaceholder(name string) (segment, error) {
@@ -101,18 +218,106 @@ func parsePlaceholder(name string) (segment, error) {
 	return segment{system: name}, nil
 }
 
-// Render substitutes args and system values into the template, shell-quoting
-// each value. The arg count must match MaxArg exactly: a missing arg would run
-// a half-built command, an extra one usually means a forgotten quote.
+// ArgSpecs lists arguments 1..MaxArg: optional ones have a default (an index
+// never referenced counts as optional with an empty default).
+func (t Template) ArgSpecs() []ArgSpec {
+	defaults := t.firstDefaults()
+	specs := make([]ArgSpec, t.MaxArg)
+	for index := range specs {
+		specs[index] = ArgSpec{Index: index + 1, Optional: !t.required[index]}
+		if specs[index].Optional {
+			specs[index].Default = defaults[index]
+		}
+	}
+	return specs
+}
+
+func (t Template) firstDefaults() []string {
+	defaults := make([]string, t.MaxArg)
+	seen := make([]bool, t.MaxArg)
+	for _, part := range t.segments {
+		if part.argIndex > 0 && part.hasDefault && !seen[part.argIndex-1] {
+			seen[part.argIndex-1] = true
+			defaults[part.argIndex-1] = part.defaultValue
+		}
+	}
+	return defaults
+}
+
+// Bind assigns typed args to argument indices:
+//   - exactly MinArg args fill only the required indices, in order, so a
+//     default in the middle ({$1} {$2 or x} {$3}) never has to be typed;
+//   - more fill indices 1..n in order, and every index past n must have a
+//     default (an uncovered required index is an error);
+//   - fewer than MinArg, or more than MaxArg, is an error.
+func (t Template) Bind(args []string) ([]Binding, error) {
+	count := len(args)
+	switch {
+	case count < t.MinArg || (count > t.MaxArg && t.MinArg == t.MaxArg):
+		return nil, t.countError(count)
+	case count > t.MaxArg:
+		return nil, fmt.Errorf("takes at most %d args, got %d", t.MaxArg, count)
+	}
+	defaults := t.firstDefaults()
+	bindings := make([]Binding, t.MaxArg)
+	next := 0
+	for index := range bindings {
+		binding := Binding{Index: index + 1}
+		switch {
+		case count == t.MinArg && t.required[index], count > t.MinArg && index < count:
+			binding.Value = args[next]
+			next++
+		case t.required[index]:
+			return nil, fmt.Errorf("with %d args, $1–$%d are filled in order; $%d has no default", count, count, index+1)
+		default:
+			binding.Value, binding.FromDefault = defaults[index], true
+		}
+		bindings[index] = binding
+	}
+	return bindings, nil
+}
+
+func (t Template) countError(count int) error {
+	if t.MinArg == t.MaxArg {
+		return fmt.Errorf("needs %s, got %d", Plural(t.MaxArg, "arg"), count)
+	}
+	var required []string
+	for index, isRequired := range t.required {
+		if isRequired {
+			required = append(required, "$"+strconv.Itoa(index+1))
+		}
+	}
+	return fmt.Errorf("needs %s (%s), got %d", Plural(t.MinArg, "arg"), strings.Join(required, ", "), count)
+}
+
+// Plural formats a count with its noun: "1 arg", "2 args".
+func Plural(count int, noun string) string {
+	if count == 1 {
+		return "1 " + noun
+	}
+	return strconv.Itoa(count) + " " + noun + "s"
+}
+
+// Render substitutes args (assigned by Bind) and system values into the
+// template, shell-quoting each value. An omitted argument uses the default
+// written at that placeholder; an empty default renders as nothing.
 func (t Template) Render(args []string, system map[string]string) (string, error) {
-	if len(args) != t.MaxArg {
-		return "", fmt.Errorf("needs %d args, got %d", t.MaxArg, len(args))
+	bindings, err := t.Bind(args)
+	if err != nil {
+		return "", err
 	}
 	var out strings.Builder
 	for _, part := range t.segments {
 		switch {
 		case part.argIndex > 0:
-			out.WriteString(ShellQuote(args[part.argIndex-1]))
+			binding := bindings[part.argIndex-1]
+			if !binding.FromDefault {
+				out.WriteString(ShellQuote(binding.Value))
+			} else if part.defaultValue != "" {
+				// A defaulted index is never required, so every occurrence
+				// carries its own default.
+				out.WriteString(ShellQuote(part.defaultValue))
+			}
 		case part.system != "":
 			value, ok := system[part.system]
 			if !ok {
@@ -124,6 +329,50 @@ func (t Template) Render(args []string, system map[string]string) (string, error
 		}
 	}
 	return out.String(), nil
+}
+
+// SpanKind classifies a placeholder in template text.
+type SpanKind uint8
+
+const (
+	SpanArg SpanKind = iota + 1
+	SpanSystem
+	SpanInvalid
+)
+
+// Span is one placeholder in a template, as byte offsets [Start, End).
+// Index is the argument number for SpanArg.
+type Span struct {
+	Start, End int
+	Kind       SpanKind
+	Index      int
+}
+
+// Spans finds every placeholder in source with the parser's own scanner, so
+// the editor's coloring always agrees with what Parse accepts. A broken
+// placeholder spans to its next "}" (or the end).
+func Spans(source string) []Span {
+	var spans []Span
+	for position := 0; ; {
+		found := strings.Index(source[position:], "{$")
+		if found < 0 {
+			return spans
+		}
+		start := position + found
+		placeholder, end, err := scanPlaceholder(source, start)
+		span := Span{Start: start, End: end, Kind: SpanSystem}
+		switch {
+		case err != nil:
+			span.Kind, span.End = SpanInvalid, len(source)
+			if closing := strings.IndexByte(source[start:], '}'); closing >= 0 {
+				span.End = start + closing + 1
+			}
+		case placeholder.argIndex > 0:
+			span.Kind, span.Index = SpanArg, placeholder.argIndex
+		}
+		spans = append(spans, span)
+		position = span.End
+	}
 }
 
 // ShellQuote returns value unchanged when sh would read it as one plain word,

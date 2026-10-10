@@ -106,7 +106,11 @@ func runEditor(absRoot string) int {
 		reg = manager
 	}
 
-	program := tea.NewProgram(app.New(cfg, db, absRoot, notice, reg))
+	model := app.New(cfg, db, absRoot, notice, reg)
+	if globalDir, err := store.GlobalDir(); err == nil {
+		model = model.WithOpCommandStore(store.NewGlobalOpCommands(globalDir))
+	}
+	program := tea.NewProgram(model)
 	if manager != nil {
 		manager.SetSink(func(msg any) { program.Send(msg) })
 		defer manager.ShutdownAll()

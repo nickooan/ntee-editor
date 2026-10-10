@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -117,10 +118,15 @@ func TestInspectMenuSelection(t *testing.T) {
 	if m.inspectMenu != inspectMenuSystem {
 		t.Fatalf("Shift+Down should select system, got %d", m.inspectMenu)
 	}
+	m = key(m, shiftKey(tea.KeyDown))
+	if m.inspectMenu != inspectMenuOpCommands {
+		t.Fatalf("Shift+Down should select op-commands, got %d", m.inspectMenu)
+	}
 	m = key(m, shiftKey(tea.KeyDown)) // clamped
-	if m.inspectMenu != inspectMenuSystem {
+	if m.inspectMenu != inspectMenuOpCommands {
 		t.Fatalf("selection should clamp at the last item, got %d", m.inspectMenu)
 	}
+	m = key(m, shiftKey(tea.KeyUp))
 	m = key(m, shiftKey(tea.KeyUp))
 	m = key(m, shiftKey(tea.KeyUp))
 	m = key(m, shiftKey(tea.KeyUp)) // clamped
@@ -166,8 +172,8 @@ func TestInspectDBCompactFlow(t *testing.T) {
 	if m.inspectInfo.Records != 7 || m.inspectLoading {
 		t.Fatalf("stats not stored: %+v loading=%v", m.inspectInfo, m.inspectLoading)
 	}
-	if out := m.render(); !strings.Contains(out, "records      7") {
-		t.Fatal("db pane should render the record count in the aligned column")
+	if !frameHasRow(ansi.Strip(m.render()), "│ records", "│ 7") {
+		t.Fatal("db pane should render the record count in the table's records row")
 	}
 
 	m = runes(m, "db compact")
@@ -331,11 +337,15 @@ func TestInspectLSPPaneRendersStatuses(t *testing.T) {
 			t.Fatalf("View missing %q", want)
 		}
 	}
-	// Names are padded to one column, so even the longest gets a gap before
-	// its state and all states start at the same offset.
-	for _, want := range []string{"go          running", "ruby        stopped", "typescript  disabled"} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("View missing aligned row %q", want)
+	// Each language is one table row: name in the key column, a status
+	// symbol and state in the value column.
+	for _, want := range [][2]string{
+		{"│ go ", "│ ● running"},
+		{"│ ruby ", "│ ○ stopped"},
+		{"│ typescript ", "│ ⊘ disabled — disabled in config"},
+	} {
+		if !frameHasRow(out, want[0], want[1]) {
+			t.Fatalf("View missing row %q … %q:\n%s", want[0], want[1], out)
 		}
 	}
 }
@@ -461,5 +471,111 @@ func TestInspectSyscolorKeepsDirtyBuffer(t *testing.T) {
 	// the on-disk snapshot the inspect mode sits over.
 	if len(m.fileLines) == 0 || !strings.Contains(m.fileLines[0], "// dirty") {
 		t.Fatalf("fileLines rebuilt from disk instead of the edit buffer: %q", m.fileLines[0])
+	}
+}
+
+// systemPanel opens the inspect dashboard on the system section.
+func systemPanel(t *testing.T) Model {
+	t.Helper()
+	m, _ := newTestModel(t, nil)
+	m = key(m, ctrlKey('t'))
+	for m.inspectMenu != inspectMenuSystem {
+		m = key(m, shiftKey(tea.KeyDown))
+	}
+	return m
+}
+
+func TestStylePickerFocus(t *testing.T) {
+	m := systemPanel(t)
+	if frame := ansi.Strip(m.render()); !strings.Contains(frame, "press → to choose a style") {
+		t.Fatalf("unfocused system panel should invite →:\n%s", frame)
+	}
+	m = key(m, keyPress(tea.KeyRight))
+	current := slices.Index(syntaxStyles, m.cfg.Theme.Syntax)
+	if !m.stylePicker.focused || m.stylePicker.index != current || len(m.stylePicker.preview) == 0 {
+		t.Fatalf("→ should focus the picker on the current style: %+v", m.stylePicker)
+	}
+	frame := ansi.Strip(m.render())
+	if !strings.Contains(frame, "▸ "+m.cfg.Theme.Syntax) || !frameHasRow(frame, "│ preview", "// greet") {
+		t.Fatalf("focused picker should mark the row and show the preview:\n%s", frame)
+	}
+	m = key(m, keyPress(tea.KeyEsc))
+	if m.stylePicker.focused || m.mode != modeInspect {
+		t.Fatal("Esc should leave the picker but stay in inspect")
+	}
+	m = key(m, keyPress(tea.KeyRight))
+	m = key(m, keyPress(tea.KeyLeft))
+	if m.stylePicker.focused {
+		t.Fatal("← should leave the picker")
+	}
+
+	m = runes(m, "ab")
+	m = key(m, keyPress(tea.KeyLeft))
+	m = key(m, keyPress(tea.KeyRight))
+	if m.stylePicker.focused || m.inspectCursor != 2 {
+		t.Fatal("→ mid-input should move the bar cursor, not focus the picker")
+	}
+
+	other, _ := newTestModel(t, nil)
+	other = key(other, ctrlKey('t'))
+	other = key(other, keyPress(tea.KeyRight))
+	if other.stylePicker.focused {
+		t.Fatal("→ on ntee-db must not focus the style picker")
+	}
+}
+
+func TestStylePickerBrowsingDoesNotApply(t *testing.T) {
+	t.Cleanup(func() { syntax.SetStyle("gruvbox") })
+	m := systemPanel(t)
+	m = m.openFileAt("main.go")
+	m = key(m, ctrlKey('t'))
+	for m.inspectMenu != inspectMenuSystem {
+		m = key(m, shiftKey(tea.KeyDown))
+	}
+	before := hlColors(syntax.HighlightLines("main.go", "func main() {}")[0])
+	m = key(m, keyPress(tea.KeyRight))
+	preview := hlColors(m.stylePicker.preview[1])
+	m = key(m, keyPress(tea.KeyDown))
+	if m.stylePicker.index != 1 || hlColors(m.stylePicker.preview[1]) == preview {
+		t.Fatalf("↓ should move to the next style and recolor the preview: index=%d", m.stylePicker.index)
+	}
+	if m.cfg.Theme.Syntax != "gruvbox" || hlColors(syntax.HighlightLines("main.go", "func main() {}")[0]) != before {
+		t.Fatal("browsing must not change the active style")
+	}
+	m = key(m, keyPress(tea.KeyUp))
+	m = key(m, keyPress(tea.KeyUp)) // clamped
+	if m.stylePicker.index != 0 {
+		t.Fatalf("index = %d", m.stylePicker.index)
+	}
+}
+
+func TestStylePickerEnterAppliesAndPersists(t *testing.T) {
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Cleanup(func() { syntax.SetStyle("gruvbox") })
+	m := systemPanel(t)
+	m = key(m, keyPress(tea.KeyRight))
+	for syntaxStyles[m.stylePicker.index] != "dracula" {
+		m = key(m, keyPress(tea.KeyDown))
+	}
+	m = key(m, keyPress(tea.KeyEnter))
+	if m.cfg.Theme.Syntax != "dracula" || !strings.Contains(m.notice, "dracula") || !m.stylePicker.focused {
+		t.Fatalf("Enter should apply and keep the picker open: syntax=%q notice=%q focused=%v", m.cfg.Theme.Syntax, m.notice, m.stylePicker.focused)
+	}
+	data, err := os.ReadFile(filepath.Join(xdg, "ntee-editor", "config.yaml"))
+	if err != nil || !strings.Contains(string(data), "dracula") {
+		t.Fatalf("style should persist to the user config: %v %q", err, data)
+	}
+	if frame := ansi.Strip(m.render()); !strings.Contains(frame, "dracula  current") {
+		t.Fatalf("the applied style should become current:\n%s", frame)
+	}
+}
+
+func TestStylePickerReleasedBySidebarClick(t *testing.T) {
+	m := systemPanel(t)
+	m = key(m, keyPress(tea.KeyRight))
+	m, _ = m.activateSidebarRow(inspectMenuDB)
+	if m.stylePicker.focused {
+		t.Fatal("switching section by click should release the picker")
 	}
 }

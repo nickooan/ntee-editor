@@ -39,7 +39,7 @@ func (m Model) sidebarInnerHeight() int {
 // overlayOpen reports whether a whole-pane overlay owns the screen — overlays
 // run their own navigation, so mouse routing and the tab strip both yield.
 func (m Model) overlayOpen() bool {
-	return m.fuzzyOpen || m.messageOverlay != "" || m.defPickOpen || m.grepOpen || m.confirmRm != ""
+	return m.fuzzyOpen || m.messageOverlay != "" || m.defPickOpen || m.grepOpen || m.confirmRm != "" || m.opMode.open
 }
 
 // tabStripVisible mirrors render()'s decision to draw the tab strip.
@@ -102,6 +102,9 @@ const wheelScrollLines = 3
 // release — is intentionally ignored so a trackpad swipe never moves the
 // cursor or types anything.
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.opMode.open {
+		return m.handleOpMouse(msg)
+	}
 	// Overlays own their own navigation.
 	if m.overlayOpen() {
 		return m, nil

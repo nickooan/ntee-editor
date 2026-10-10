@@ -40,22 +40,23 @@ func gruvboxTuned() *chroma.Style {
 	return style
 }
 
-// SetStyle selects the chroma style grammar colors are drawn from. Unknown
-// names and the legacy "terminal16" fall back to gruvbox.
-func SetStyle(name string) {
+// resolveStyle maps a style name to its chroma style. Unknown names and the
+// legacy "terminal16" fall back to gruvbox.
+func resolveStyle(name string) *chroma.Style {
 	n := strings.ToLower(strings.TrimSpace(name))
-	if n == "" || n == "terminal16" {
-		n = "gruvbox"
+	if n == "" || n == "terminal16" || n == "gruvbox" {
+		return gruvboxTuned()
 	}
-	var style *chroma.Style
-	if n == "gruvbox" {
-		style = gruvboxTuned()
-	} else {
-		style = styles.Get(n)
-		if style == nil || (style == styles.Fallback && n != "fallback") {
-			style = gruvboxTuned()
-		}
+	style := styles.Get(n)
+	if style == nil || (style == styles.Fallback && n != "fallback") {
+		return gruvboxTuned()
 	}
+	return style
+}
+
+// SetStyle selects the chroma style grammar colors are drawn from.
+func SetStyle(name string) {
+	style := resolveStyle(name)
 	styleMu.Lock()
 	activeStyle = style
 	entryCache = map[chroma.TokenType]view.HighlightSegment{}
@@ -70,7 +71,13 @@ func segmentFor(t chroma.TokenType) view.HighlightSegment {
 	if seg, ok := entryCache[t]; ok {
 		return seg
 	}
-	entry := activeStyle.Get(t)
+	seg := segmentFromStyle(activeStyle, t)
+	entryCache[t] = seg
+	return seg
+}
+
+func segmentFromStyle(style *chroma.Style, t chroma.TokenType) view.HighlightSegment {
+	entry := style.Get(t)
 	seg := view.HighlightSegment{
 		Bold:      entry.Bold == chroma.Yes,
 		Italic:    entry.Italic == chroma.Yes,
@@ -79,6 +86,5 @@ func segmentFor(t chroma.TokenType) view.HighlightSegment {
 	if entry.Colour.IsSet() {
 		seg.Color = entry.Colour.String() // "#rrggbb"
 	}
-	entryCache[t] = seg
 	return seg
 }

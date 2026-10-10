@@ -90,6 +90,25 @@ func LexerFor(filename string) chroma.Lexer {
 // line. The result always has exactly len(NormalizeLines(content)) rows; nil
 // when the file has no lexer (render plain).
 func HighlightLines(filename, content string) [][]view.HighlightSegment {
+	return highlightWith(filename, content, segmentFor)
+}
+
+// HighlightLinesWithStyle is HighlightLines in the named style, for previews.
+// It never touches the active style, so a preview can't recolor the editor.
+func HighlightLinesWithStyle(filename, content, styleName string) [][]view.HighlightSegment {
+	style := resolveStyle(styleName)
+	cache := map[chroma.TokenType]view.HighlightSegment{}
+	return highlightWith(filename, content, func(t chroma.TokenType) view.HighlightSegment {
+		seg, ok := cache[t]
+		if !ok {
+			seg = segmentFromStyle(style, t)
+			cache[t] = seg
+		}
+		return seg
+	})
+}
+
+func highlightWith(filename, content string, segment func(chroma.TokenType) view.HighlightSegment) [][]view.HighlightSegment {
 	lexer := LexerFor(filename)
 	if lexer == nil {
 		return nil
@@ -107,7 +126,7 @@ func HighlightLines(filename, content string) [][]view.HighlightSegment {
 	lines := make([][]view.HighlightSegment, 1, lineCount)
 	cur := 0
 	for _, token := range it.Tokens() {
-		seg := segmentFor(token.Type)
+		seg := segment(token.Type)
 		// The overwhelming majority of tokens hold no newline — appending
 		// directly skips a strings.Split allocation per token.
 		if strings.IndexByte(token.Value, '\n') < 0 {

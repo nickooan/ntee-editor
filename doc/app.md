@@ -24,13 +24,13 @@ Three design rules shape almost every function here:
 | `modeCommand` | the bottom `:` command bar |
 | `modeExec` | the `@exec >` editor-command bar (Ctrl+E from edit) |
 | `modeSearchExec` | the replace bar layered on search (Ctrl+E from search) |
-| `modeInspect` | the Ctrl+T inspection dashboard (store stats, LSP control, theme) |
+| `modeInspect` | the Ctrl+T inspection dashboard (store stats, LSP control, theme, op-commands table) |
 | `modeDiff` | read-only git-diff review of the buffer (`git diff` in @exec) |
 | `modeConflict` | interactive merge-conflict resolution over the live buffer (`git scf`) |
 | `modeOpenAPI` / `modeGraphQL` | read-only rendered document previews (`openapi` / `graphql`) |
 | `modeBlame` | read-only git-blame annotation (`git blame`) |
 
-**The Update/View loop.** `Update` first bumps the frame cache's sequence (per-message memos go stale), then handles non-key messages (window size, LSP diagnostics, async results, git status ticks, mouse, paste). For key presses it peels overlays in priority order — quit chords, splash, message overlay, `:rm` confirm, fuzzy finder, definition picker, grep — then global chords (Ctrl+P/U/G/T, Shift+Tab, all suppressed while a text bar has focus via `inBarMode`), and finally dispatches on `m.mode` to the per-mode handler. `View` (render.go) assembles header + sidebar pane + main pane + status rows, choosing the main body by the same overlay-then-mode priority.
+**The Update/View loop.** `Update` first bumps the frame cache's sequence (per-message memos go stale), then handles non-key messages (window size, LSP diagnostics, async results, git status ticks, mouse, paste). For key presses it peels overlays in priority order — quit chords, splash, message overlay, `:rm` confirm, fuzzy finder, definition picker, grep, the Ctrl+R op overlay — then global chords (Ctrl+P/U/G/T/R, Shift+Tab, all suppressed while a text bar has focus via `inBarMode`), and finally dispatches on `m.mode` to the per-mode handler. `View` (render.go) assembles header + sidebar pane + main pane + status rows, choosing the main body by the same overlay-then-mode priority.
 
 **How async results land.** Each worker Cmd captures everything it needs by value (including a copy of the buffer lines where relevant), does its work, and returns a message tagged with `gen` and usually `rel`. The `handleXReady` handler compares `gen` against the Model's current counter, `rel` against the open file, and often the mode too; a mismatch means the result is stale and it is silently dropped. Generations stay monotonic across state clears precisely so in-flight results remain identifiable.
 
@@ -189,7 +189,27 @@ Every opened file becomes a tab; the list, active index, and per-tab cursors per
 - `inspectLSPCommand` persists the config change *first* (nothing half-applied on a failed write) and then applies it live through the registry — `m.cfg` itself is never mutated because its Languages map is shared with server goroutines.
 - `inspectSyscolorCommand` validates against the curated style list, persists, applies via `syntax.SetStyle`, and invalidates every highlight cache so the new colors show immediately.
 
-*Plus small helpers: `handleInspectKey`, `inspectDBCommand`, `knownLanguages` — bar editing and validation.*
+- `handleInspectKey` hands every key to whichever right-hand panel has focus: the op-commands table or the style picker. `→` at the end of the bar input moves focus into the panel on the op-commands and system sections.
+- The style picker (`stylePickerState`) is the system panel's colour-style list:
+  - `focusStylePicker` starts on the current style.
+  - In `handleStylePickerKey`, ↑/↓ browse and Enter calls `applySyntaxStyle`; focus stays, so you can keep trying styles. ←/Esc go back to the menu.
+  - `refreshStylePreview` re-highlights a 4-line Go sample (`stylePreviewSample`) in the highlighted style with `syntax.HighlightLinesWithStyle`. It runs only when the selection moves, and never changes the active style.
+  - `applySyntaxStyle` is shared with `syscolor`: it persists first, then calls `syntax.SetStyle`, sets `m.cfg.Theme.Syntax` and invalidates the highlight caches.
+  - A sidebar click on another section releases the picker.
+
+*Plus small helpers: `inspectDBCommand`, `knownLanguages`, `inspectHint` (the status-bar hint for the current focus) — bar editing and validation.*
+
+#### keys_opcommands.go
+
+The inspect dashboard's op-commands table: a key/value list of saved shell command templates (`opTableState`) kept in the global `OpCommandStore` (`m.opStore`, swapped in by `WithOpCommandStore`). `m.opCommands` is the cached list, shared with the Ctrl+R overlay.
+
+- `loadOpCommandsCmd` reloads the list off the UI goroutine. It runs when the dashboard opens, when Ctrl+R opens, and after every save or delete. The result lands as `opCommandsLoadedMsg`, which is dropped unless its `opCommandsGen` is current. It also refreshes the picker if the overlay is open.
+- `handleOpTableKey`: ↑/↓ moves through the rows plus a trailing `+ new command` row. Enter edits the row. `d` asks `delete <name>? y/n` before deleting (asynchronously). ←/Esc returns focus to the menu.
+- `handleOpEditKey` is the inline editor. Tab switches between the key and value fields, and the rest is cursor-aware typing. Ctrl+S calls `saveOpEdit`. Esc throws the buffer away, so the row shows its stored value again.
+- Placeholder completion in the value field. `opSuggestions` asks `opcmd.Complete` for the fragment at the cursor (`{`, `{$`, `$`, `{$f`, …), so the menu derives from the text and cursor and needs no stored list. While it is open, ↑/↓ choose a candidate, Tab/Enter call `acceptOpSuggestion`, and Esc hides the menu (`suggestHidden`) until the next edit, so the first Esc never reverts the row. `acceptOpSuggestion` replaces the fragment with the full placeholder and absorbs a `}` already typed after the cursor.
+- `saveOpEdit` validates before writing anything, checking the key before the value. The key must be non-empty and have no spaces. It must also be unique (`opEditDuplicatesName`; keeping a row's own name is fine). A duplicate raises the editor's centred alert (`messageOverlay`), not just a status-bar line. Dismissing the alert keeps the edit open. The value must be non-empty and pass `opcmd.Parse`. Other failures keep editing open with the error in the bar. The `PutOpCommand` write then runs in a Cmd.
+
+*Plus small helpers: `startOpEdit`, `switchOpEditField`, `opEditPaste`, `handleOpCommandsLoaded`, `handleOpCommandSaved`.*
 
 ### Git views
 
@@ -309,6 +329,37 @@ Repo-wide content search (Ctrl+G). Everything expensive is async and generation-
 
 *Plus small helpers: `handleGrepTick`, `handleGrepResults`, `handleGrepPreview`, `buildLineStarts`, `lineForOffset`, `grepPaste`, `grepInsert`, `grepLineCol`, `grepOffsetAt`, `grepMoveCursorLine` — tick/result landing, offset math, and query-cursor plumbing.*
 
+#### keys_opmode.go (Ctrl+R)
+
+The operation overlay runs a saved op-command against the open file. It only opens while a file is open, because `{$fpath}` and `{$dpath}` need one. `opSystemValues` builds both from the *workspace*-relative path (`activeRepo` joined with `openRel`), not the Ctrl+W repo-relative one, because commands always run from the workspace directory. It moves through three stages (`opModeState.stage`):
+
+- **pick**: fuzzy search over command names. This reuses `fuzzy.Prepare`/`Filter`, and rows show the template dimmed. The query is `name [args…]`: `opQueryParts` splits it at the first space, and only the name part filters. `setOpQuery` re-filters and resets the selection only when the name part changes, so typing args never moves the chosen row. With inline args, the box previews the exact command line, or the error (`opInlinePreview`). Enter calls `selectOpCommand`:
+  - With inline args that fit the template (`test 10`), the command runs at once. If they don't fit, the args stage opens pre-filled with them.
+  - Without inline args, a template with no `{$n}` runs immediately; otherwise the overlay moves to the args stage.
+- **args**: the user types the arguments. `renderOpCommandLine` splits them with `opcmd.SplitArgs`, adds the system values, and renders the template every frame, so the box shows either the exact `$ command` or the error (`needs 2 args, got 1`). Enter runs it. Esc goes back to the picker with the query kept.
+- **run**: `runOpCommand` bumps `opRunGen` and starts the process (see opmode_run.go). `handleOpRunMsg` appends output and re-arms the wait until the done event arrives. A message with an older generation is dropped, which also ends its wait chain. While the run view is open, ↑/↓/PgUp/PgDn/Home/End scroll back through the output; End returns to following the tail.
+
+`closeOpMode` (Esc, or `quit`) cancels a still-running process and bumps `opRunGen`, so the cancelled run's last messages are dropped.
+
+*Plus small helpers: `openOpMode`, `refreshOpMatches`, `handleOpArgsKey`, `handleOpRunKey`, `opRunState.status` (the footer text, and whether it is green or red).*
+
+#### opmode_links.go
+
+Clickable links in the run output.
+
+- `findOutputLinks` finds `http(s)://` URLs in a display line and returns their rune spans. Sentence punctuation after a URL is trimmed. A closing `)`, `]` or `}` is trimmed only when the URL didn't open it, so `(see https://x.dev/a)` loses the `)` but `…/Go_(language)` keeps it. It runs on the *tab-expanded* line (`opDisplayLine`), so rune columns are screen columns.
+- `handleOpMouse`: while the op overlay is open it owns the mouse (`handleMouse` routes to it before the generic overlay early return). Only a left click in the run stage acts. A click on a link sets the `opening <url>` notice and opens the URL through the injectable `m.openBrowser` (`browser.Open`) on a Cmd. A failure lands as `opLinkOpenedMsg` and shows in the status bar.
+- `opRunLinkAt` maps a cell back to a link using the same `opRunLayout` the renderer draws with. The main pane starts at `(sidebarWidth+1, 2)`. The box is centred the way `lipgloss.Place` centres (floor of half the gap), then the border and padding are skipped. From there it finds the output row, the line through `visibleRange`, and the link span under the column. A link cut off at the box edge still opens its full URL.
+
+#### opmode_run.go
+
+- `opRunState.execute` runs `sh -c <command line>` in the workspace directory (`workspaceRoot`, never the Ctrl+W repo root). stdin is `/dev/null`, so an interactive tool can't hang. stdout and stderr are merged into one pipe. The process runs in its own process group, so cancelling SIGTERMs the shell's children too. `WaitDelay` limits how long a child that ignores the signal, or keeps the pipe open, can block.
+- A reader goroutine sends output chunks into a bounded channel, so a fast producer is slowed down rather than buffered without limit. Sends give up once the run is cancelled, because nobody drains the channel after Esc and a blocked send would leak the goroutine.
+- `next` blocks for one event, then folds whatever else is already queued into the same `opRunMsg` (up to 64 KB). A chatty process therefore costs a few frames, not one frame per write.
+- `opRunOutput` turns raw output into display lines. It strips ANSI escapes and treats CRLF as a newline, including when the CR and LF arrive in different chunks. A bare CR rewinds the current line, so progress bars redraw in place. Only the last ~5,000 lines are kept, trimmed in batches.
+
+*Plus small helpers: `newOpRun`, `startOpRunCmd`, `waitOpRunCmd`, `send`, `pushLine`, `displayLines`.*
+
 #### jump.go (definition picker)
 
 - `jumpToCandidates` handles the 0/1/many outcome shared by every lookup: zero errors, one jumps, many open the picker overlay (capped at 50) with a preview and a precompiled token-highlight regex.
@@ -402,9 +453,61 @@ The left pane is one list. File tree, inspection menu, and preview outline each 
 
 #### render_inspect.go
 
-- `renderInspectMain` routes to the selected panel: `renderInspectDB` (record counts, live/dead log bytes, blob usage, generation warnings), `renderInspectLSP` (per-language running/stopped/disabled status from the registry), `renderInspectSystem` (version and syntax style).
+- `renderInspectMain` routes to the selected panel. Each one is an `infoPanel` (render_panel.go) with the same layout as op-commands:
+  - `renderInspectDB`: records; main log and blobs, each as a size, a 10-cell live/dead usage bar, and the live/waste split (`usageSummary`); generations, with a red warning when relieve is needed. Loading and the in-memory fallback replace the rows with one explanatory line.
+  - `renderInspectLSP`: one row per language from the registry, showing `● running` (green), `○ stopped` (yellow) or `⊘ disabled — reason` (dim). When LSP is off globally, a single line explains why.
+  - `renderInspectSystem`: version, the current colour style, and the available styles, one per line. The current style is marked `● … current`. While the picker has focus, the highlighted style is a full-width `▸` selection bar, and a `preview` row shows the sample in that style. Unfocused, the title invites `press → to choose a style`.
+- Each `renderInspect*` gets the pane height and passes it to `infoPanel.render`, so a panel never grows past the terminal.
+  - `renderInspectOpCommands` lives in render_opcommands.go.
+- The waste share in `usageSummary` turns yellow at 30% and red at 60%, the point where `db compact` or `db relieve` is worth running.
 
-*Plus small helpers: `humanBytes`, `percent` — number formatting. The left menu is `inspectSidebarList` in sidebarlist.go.*
+*Plus small helpers: `humanBytes`, `percent`/`percentValue` — number formatting. The left menu is `inspectSidebarList` in sidebarlist.go.*
+
+#### render_panel.go
+
+The shared panel kit, so every inspect panel reads as one design:
+- **Heading**: `panelHeading`, a title and a word-wrapped subtitle.
+- **Table**: a rounded two-column table (`panelTable`) with a header row and soft `rowRule` separators between rows. A table can also have a marker column for `▸`/`✎`; only op-commands uses it.
+- **Legend**: `panelLegend` lists commands or placeholders. Descriptions wrap under themselves, so the token column stays clear.
+
+What it provides:
+- `panelTable` holds the column widths and draws the `border`, `header`, `row`, `rowRule` and `spanning` lines. `newPanelTable` gives the value column whatever width the key column and overhead leave.
+- `infoPanel.render(width, height)` builds a read-only panel from a description:
+  - Title (plus an optional yellow `titleHint`), subtitle and headers.
+  - Either `panelRow`s or a spanning `message`.
+  - Notes and a Commands legend.
+- A row's value is a list of pre-styled pieces. `wrapStyled` lays them side by side and moves them onto continuation lines when the value column is narrow. `stacked` puts one piece per line, and `selectedPiece` (1-based) pads that line in the selection colour (`panelCellFill`).
+- When the panel is taller than `height`, it drops the least useful parts in order: the legend first (the status bar shows the keys too), then the spacing, then the subtitle. Anything still over is clipped.
+- `panelCell` fits already-styled text to an exact width. It cuts with `ansi.Truncate` plus `…` and pads in the panel background, so a value can mix colours without breaking the table edge.
+- `panelIndent`/`panelInnerWidth` add a one-column left margin, kept inside the width the panel was given.
+
+*Plus small helpers: `wrapWords` (plain word wrap with hard breaks for overlong words), `wrapStyled`, `overhead`/`keySpan`/`contentWidth`.*
+
+#### render_opmode.go
+
+- `renderOpOverlay` draws the Ctrl+R overlay for its stage.
+  - **Pick:** a box like the fuzzy finder, with the template dimmed after each name.
+  - **Args:** the template, the args input, and the live `$ command` preview in green, or the error in red. The preview wraps over a few lines so long paths stay readable.
+  - **Run:** a large box with the command line, the output tail (or a scrolled-back window that never leaves empty space at the top), and a footer. Its geometry is `opRunLayout` (`newOpRunLayout`, `visibleRange`), shared with the click hit-test. Output lines draw links underlined in blue (`renderOpOutputLine`). When a visible line has a link, the divider above the footer reads `click a link to open it`. The footer is yellow while running, green `✓ finished (exit 0)`, or red with the exit status.
+*Plus: `wrapRunes` — hard wrap with a trailing `…` past the line cap.*
+
+#### render_opcommands.go
+
+The op-commands panel in the inspect dashboard.
+
+- `renderInspectOpCommands` draws the panel:
+  - A title. The `press → to edit` hint shows until the table has focus.
+  - A rounded-border table with a KEY and a COMMAND column: a `panelTable` (render_panel.go) with the marker column, sized by `newOpTableLayout`. The key column fits the longest name, capped at a third of the width.
+  - When there are no commands, the table body explains what op-commands are and shows an example.
+  - A `+ New command` button row, which becomes a solid green pill when selected.
+  - A placeholder legend.
+  - The body scrolls so the selected row, and its dropdown, stay visible.
+- Command rows are separated by `rowRule`: a quieter `├──┼──┤` drawn in the selection grey, joined to the table's own borders. A dropdown stays attached to its edit row, with no rule in between. While a typed key duplicates another command, the key turns red and a line under the table says so.
+- Each row uses one palette (`opRowStyles`): normal, selected (a solid selection bar marked `▸`), editing (dimmed, marked `✎`), or input (the active cell, drawn as a darker inset with a cursor block). Every text run carries the row's background, so a highlight is never broken by an inner style reset.
+- `renderOpCell` renders a cell at an exact width. Input cells scroll horizontally to keep the cursor visible; other cells end in `…` when cut. `opTokenClasses` colours placeholders per rune using `opcmd.Parse`: `{$n}` arguments orange, system variables blue, broken or half-typed placeholders red.
+- `renderOpSuggestionRows` draws the completion menu as a dropdown in the COMMAND column under the edit row, styled like the LSP completion popup.
+
+*Plus small helpers: `opTableBody`, `renderOpEditRow`, `opTableEmptyLines`, `opNewButton`, `opLegend`, and the `panelLegend`-based `opLegend`. The inspect bar also hides its own cursor while the table has focus (`renderInspectInput`), so only one cursor is ever visible.*
 
 ### Mouse
 

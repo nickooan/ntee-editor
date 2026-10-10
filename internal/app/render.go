@@ -67,6 +67,8 @@ func (m Model) render() string {
 		mainBody = m.renderDefPickOverlay(mainWidth-4, bodyHeight-2)
 	case m.grepOpen:
 		mainBody = m.renderGrepOverlay(mainWidth-4, bodyHeight-2)
+	case m.opMode.open:
+		mainBody = m.renderOpOverlay(mainWidth-4, bodyHeight-2)
 	case m.mode == modeInspect:
 		mainBody = m.renderInspectMain(mainWidth-4, innerH)
 	case m.mode == modeSearch || m.mode == modeSearchExec:
@@ -183,7 +185,7 @@ func (m Model) renderStatusLine() string {
 		return m.renderPreviewStatus()
 	case modeInspect:
 		bar := execPromptStyle.Render("@inspection >") +
-			renderInputLineStyled(m.inspectInput, m.inspectCursor, execTextStyle) +
+			m.renderInspectInput() +
 			execTextStyle.Render("   ")
 		if m.errText != "" {
 			bar += errStyle.Render(m.errText) + execTextStyle.Render("   ")
@@ -194,7 +196,7 @@ func (m Model) renderStatusLine() string {
 		if m.inspectBusy != "" {
 			bar += editingStyle.Render(m.inspectBusy+"…") + execTextStyle.Render("   ")
 		}
-		bar += hintStyle.Render("db compact|relieve · lsp enable|disable <lang|all> · syscolor <style> · Shift+↑/↓ pane · Esc back")
+		bar += hintStyle.Render(m.inspectHint())
 		// Pre-pad in the exec background so padStatusRows leaves the row's
 		// color intact (same trick as the @exec bar).
 		if pad := m.width - lipgloss.Width(bar); pad > 0 {

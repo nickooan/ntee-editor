@@ -9,6 +9,7 @@ This directory contains one document per internal package. Each follows the same
 | Package | Job | Doc |
 |---|---|---|
 | `internal/app` | The editor itself: the Bubble Tea Model, all modes (query, edit, search, diff, blame, conflict, previews), key/mouse handling, rendering | [app.md](app.md) |
+| `internal/browser` | Opens clicked http(s) links in the default browser (`open` / `xdg-open`, http(s) only, time-bounded) | [browser.md](browser.md) |
 | `internal/clipboard` | Writing to the system clipboard (OSC52 + platform tools) | [clipboard.md](clipboard.md) |
 | `internal/config` | YAML config loading and editing, with a trust rule: project-local config can never name executables | [config.md](config.md) |
 | `internal/diff` | Myers line diff with a bounded memory trace — feeds the diff review mode | [diff.md](diff.md) |

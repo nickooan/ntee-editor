@@ -10,13 +10,17 @@ import (
 )
 
 var (
-	opSuccessStyle = lipgloss.NewStyle().Foreground(colGreen).Bold(true).Background(colBg)
-	opFailureStyle = lipgloss.NewStyle().Foreground(colRed).Bold(true).Background(colBg)
-	opRunningStyle = lipgloss.NewStyle().Foreground(colYellow).Bold(true).Background(colBg)
-	opInputStyle   = lipgloss.NewStyle().Foreground(colFg).Background(colBg)
+	opSuccessStyle  = lipgloss.NewStyle().Foreground(colGreen).Bold(true).Background(colBg)
+	opFailureStyle  = lipgloss.NewStyle().Foreground(colRed).Bold(true).Background(colBg)
+	opRunningStyle  = lipgloss.NewStyle().Foreground(colYellow).Bold(true).Background(colBg)
+	opInputStyle    = lipgloss.NewStyle().Foreground(colFg).Background(colBg)
+	opLinkStyle     = lipgloss.NewStyle().Foreground(colBlue).Underline(true).Background(colBg)
+	opLinkHintStyle = lipgloss.NewStyle().Foreground(colBlue).Background(colBg)
 )
 
 const opPreviewMaxLines = 4
+
+const opLinkHint = " click a link to open it "
 
 // renderOpOverlay draws the Ctrl+R overlay for its current stage: the command
 // picker, the args prompt, or the streaming run output.
@@ -109,32 +113,66 @@ func (m Model) renderOpArgsBox(width int) string {
 	return modalStyle.Width(boxWidth + 2).Render(strings.Join(lines, "\n"))
 }
 
-// renderOpRunBox draws the run view: the command line, the output tail (or a
-// scrolled-back window of it), and the running / finished footer.
-func (m Model) renderOpRunBox(width, height int) string {
-	run := m.opMode.run
+// opRunLayout is the run box's geometry, shared by renderOpRunBox and the
+// link hit-test (opRunLinkAt) so click math can't drift from the drawing.
+type opRunLayout struct {
+	boxWidth, innerWidth, innerHeight int
+	header                            []string // wrapped "$ command" rows
+	outputHeight                      int
+}
+
+func newOpRunLayout(run *opRunState, width, height int) opRunLayout {
 	boxWidth := input.Clamp(width*9/10, 40, max(40, width-2))
 	innerWidth := max(1, boxWidth-2)
 	innerHeight := max(6, height-4)
 	header := wrapRunes("$ "+run.commandLine, innerWidth, opPreviewMaxLines)
-	outputHeight := max(1, innerHeight-len(header)-3) // two dividers, footer
+	return opRunLayout{
+		boxWidth:     boxWidth,
+		innerWidth:   innerWidth,
+		innerHeight:  innerHeight,
+		header:       header,
+		outputHeight: max(1, innerHeight-len(header)-3), // two dividers, footer
+	}
+}
+
+// visibleRange is the output window. Scrolling back never leaves a
+// part-empty window at the top.
+func (layout opRunLayout) visibleRange(lineCount, scroll int) (start, end int) {
+	end = max(min(lineCount, layout.outputHeight), lineCount-scroll)
+	return max(0, end-layout.outputHeight), end
+}
+
+// opDisplayLine is an output line as drawn: tabs expanded, so rune columns
+// are screen columns.
+func opDisplayLine(line string) string {
+	return strings.ReplaceAll(line, "\t", "    ")
+}
+
+// renderOpRunBox draws the run view: the command line, the output tail (or a
+// scrolled-back window of it) with clickable links, and the running /
+// finished footer.
+func (m Model) renderOpRunBox(width, height int) string {
+	run := m.opMode.run
+	layout := newOpRunLayout(run, width, height)
+	innerWidth := layout.innerWidth
 
 	divider := overlayHintStyle.Render(strings.Repeat("─", innerWidth))
-	rows := make([]string, 0, innerHeight)
-	for _, line := range header {
+	rows := make([]string, 0, layout.innerHeight)
+	for _, line := range layout.header {
 		rows = append(rows, modalTitleStyle.Render(padTo(line, innerWidth)))
 	}
 	rows = append(rows, divider)
 
 	lines := run.output.displayLines()
-	// Scrolling back never leaves a part-empty window at the top.
-	end := max(min(len(lines), outputHeight), len(lines)-run.scroll)
-	start := max(0, end-outputHeight)
+	start, end := layout.visibleRange(len(lines), run.scroll)
+	hasLinks := false
 	for _, line := range lines[start:end] {
-		line = strings.ReplaceAll(line, "\t", "    ")
-		rows = append(rows, baseStyle.Render(padTo(truncateRunes(line, innerWidth), innerWidth)))
+		line = opDisplayLine(line)
+		links := findOutputLinks(line)
+		hasLinks = hasLinks || len(links) > 0
+		rows = append(rows, renderOpOutputLine(line, links, innerWidth))
 	}
-	for len(rows) < len(header)+1+outputHeight {
+	for len(rows) < len(layout.header)+1+layout.outputHeight {
 		rows = append(rows, baseStyle.Render(strings.Repeat(" ", innerWidth)))
 	}
 
@@ -149,8 +187,40 @@ func (m Model) renderOpRunBox(width, height int) string {
 	if run.scroll > 0 {
 		text += "  ·  End follow"
 	}
-	rows = append(rows, divider, style.Render(padTo(truncateRunes(text, innerWidth), innerWidth)))
-	return modalStyle.Width(boxWidth + 2).Render(strings.Join(rows, "\n"))
+	footerDivider := divider
+	// The hint rides on the divider so it never crowds the status text.
+	if hasLinks && innerWidth > len(opLinkHint)+2 {
+		footerDivider = overlayHintStyle.Render(strings.Repeat("─", innerWidth-len(opLinkHint)-2)) +
+			opLinkHintStyle.Render(opLinkHint) + overlayHintStyle.Render("──")
+	}
+	rows = append(rows, footerDivider, style.Render(padTo(truncateRunes(text, innerWidth), innerWidth)))
+	return modalStyle.Width(layout.boxWidth + 2).Render(strings.Join(rows, "\n"))
+}
+
+// renderOpOutputLine draws one output line clipped to width, links underlined.
+func renderOpOutputLine(line string, links []opLink, width int) string {
+	runes := []rune(line)
+	visible := min(len(runes), width)
+	var b strings.Builder
+	position := 0
+	for _, link := range links {
+		if link.start >= visible {
+			break
+		}
+		if link.start > position {
+			b.WriteString(baseStyle.Render(string(runes[position:link.start])))
+		}
+		linkEnd := min(link.end, visible)
+		b.WriteString(opLinkStyle.Render(string(runes[link.start:linkEnd])))
+		position = linkEnd
+	}
+	if position < visible {
+		b.WriteString(baseStyle.Render(string(runes[position:visible])))
+	}
+	if pad := width - visible; pad > 0 {
+		b.WriteString(baseStyle.Render(strings.Repeat(" ", pad)))
+	}
+	return b.String()
 }
 
 // wrapRunes hard-wraps text into at most maxLines rows of width runes, marking

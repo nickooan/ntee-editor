@@ -102,6 +102,9 @@ const wheelScrollLines = 3
 // release — is intentionally ignored so a trackpad swipe never moves the
 // cursor or types anything.
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.opMode.open {
+		return m.handleOpMouse(msg)
+	}
 	// Overlays own their own navigation.
 	if m.overlayOpen() {
 		return m, nil

@@ -14,6 +14,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/nickooan/ntee-editor/internal/browser"
 	"github.com/nickooan/ntee-editor/internal/clipboard"
 	"github.com/nickooan/ntee-editor/internal/config"
 	"github.com/nickooan/ntee-editor/internal/filetree"
@@ -86,6 +87,9 @@ type Model struct {
 	// copyClipboard writes to the system clipboard; injectable so tests can
 	// observe copies without touching the real clipboard.
 	copyClipboard func(string) error
+	// openBrowser opens a clicked op-command output link; injectable like
+	// copyClipboard.
+	openBrowser func(string) error
 
 	// gitignore matches the project's .gitignore; matched sidebar entries render
 	// gray. nil when the project has no .gitignore.
@@ -421,6 +425,7 @@ func New(cfg config.Config, db store.Backend, root, notice string, reg lsp.Regis
 		notice:          notice,
 		mode:            modeQuery,
 		copyClipboard:   clipboard.Copy,
+		openBrowser:     browser.Open,
 		searchMC:        &matchCache{},
 		previewMC:       &matchCache{},
 		frames:          &frameCache{},
@@ -898,6 +903,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case opRunMsg:
 		return m.handleOpRunMsg(msg)
+
+	case opLinkOpenedMsg:
+		if msg.err != nil {
+			m.errText = "open link: " + msg.err.Error()
+		}
+		return m, nil
 
 	case inspectMaintMsg:
 		// Landing after Esc is harmless: only cached fields and the transient

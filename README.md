@@ -229,6 +229,8 @@ was opened on, even after `Ctrl+W` switched to a nested repo), so `{$fpath}` and
 stderr) streams into the overlay as it arrives. When the process exits, the
 footer turns green (`✓ finished`), or red with the exit status if it failed.
 Press `Esc` to close. `Esc` while the command is still running kills it.
+`http(s)://` links in the output are underlined; click one, even while the
+command is still running, to open it in your default browser.
 
 Op-commands are stored in `~/.ntee-editor/global/` and shared by every project.
 

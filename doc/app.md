@@ -337,6 +337,14 @@ The operation overlay runs a saved op-command against the open file. It only ope
 
 *Plus small helpers: `openOpMode`, `refreshOpMatches`, `handleOpArgsKey`, `handleOpRunKey`, `opRunState.status` (the footer text, and whether it is green or red).*
 
+#### opmode_links.go
+
+Clickable links in the run output.
+
+- `findOutputLinks` finds `http(s)://` URLs in a display line and returns their rune spans. Sentence punctuation after a URL is trimmed. A closing `)`, `]` or `}` is trimmed only when the URL didn't open it, so `(see https://x.dev/a)` loses the `)` but `…/Go_(language)` keeps it. It runs on the *tab-expanded* line (`opDisplayLine`), so rune columns are screen columns.
+- `handleOpMouse`: while the op overlay is open it owns the mouse (`handleMouse` routes to it before the generic overlay early return). Only a left click in the run stage acts. A click on a link sets the `opening <url>` notice and opens the URL through the injectable `m.openBrowser` (`browser.Open`) on a Cmd. A failure lands as `opLinkOpenedMsg` and shows in the status bar.
+- `opRunLinkAt` maps a cell back to a link using the same `opRunLayout` the renderer draws with. The main pane starts at `(sidebarWidth+1, 2)`. The box is centred the way `lipgloss.Place` centres (floor of half the gap), then the border and padding are skipped. From there it finds the output row, the line through `visibleRange`, and the link span under the column. A link cut off at the box edge still opens its full URL.
+
 #### opmode_run.go
 
 - `opRunState.execute` runs `sh -c <command line>` in the workspace directory (`workspaceRoot`, never the Ctrl+W repo root). stdin is `/dev/null`, so an interactive tool can't hang. stdout and stderr are merged into one pipe. The process runs in its own process group, so cancelling SIGTERMs the shell's children too. `WaitDelay` limits how long a child that ignores the signal, or keeps the pipe open, can block.
@@ -448,7 +456,7 @@ The left pane is one list. File tree, inspection menu, and preview outline each 
 - `renderOpOverlay` draws the Ctrl+R overlay for its stage.
   - **Pick:** a box like the fuzzy finder, with the template dimmed after each name.
   - **Args:** the template, the args input, and the live `$ command` preview in green, or the error in red. The preview wraps over a few lines so long paths stay readable.
-  - **Run:** a large box with the command line, the output tail (or a scrolled-back window that never leaves empty space at the top), and a footer. The footer is yellow while running, green `✓ finished (exit 0)`, or red with the exit status.
+  - **Run:** a large box with the command line, the output tail (or a scrolled-back window that never leaves empty space at the top), and a footer. Its geometry is `opRunLayout` (`newOpRunLayout`, `visibleRange`), shared with the click hit-test. Output lines draw links underlined in blue (`renderOpOutputLine`). When a visible line has a link, the divider above the footer reads `click a link to open it`. The footer is yellow while running, green `✓ finished (exit 0)`, or red with the exit status.
 *Plus: `wrapRunes` — hard wrap with a trailing `…` past the line cap.*
 
 #### render_opcommands.go

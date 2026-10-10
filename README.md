@@ -182,9 +182,13 @@ A dashboard for the editor's own machinery. `Shift+↑/↓` switches the left me
   **disabled** (gray, with the reason).
 - **op-commands** — your saved shell command templates as a key/value table.
   Press `→` to move into the table; there `↑/↓` picks a row, `Enter` edits it
-  (or adds a new one on `+ new command`), `Tab` switches between key and value,
+  (or adds a new one on `+ New command`), `Tab` switches between key and value,
   `Ctrl+S` saves, `Esc` reverts the edit, and `d` deletes after a `y/n`
-  confirmation. `←`/`Esc` goes back to the menu.
+  confirmation. `←`/`Esc` goes back to the menu. Typing `{` or `$` in a command
+  opens placeholder suggestions: the next free argument (`{$2}` when the command
+  already has `{$1}`), the existing ones, and `{$fpath}`/`{$dpath}`. `↑/↓`
+  chooses, `Tab`/`Enter` inserts, `Esc` closes the menu. Placeholders are
+  colour-coded in the table: arguments orange, built-ins blue, broken ones red.
 
 The `@inspection >` bar takes:
 
@@ -212,7 +216,9 @@ dashboard's **op-commands** table. It can use these placeholders:
 
 With a file open, press `Ctrl+R`, type to fuzzy-find a command, and press
 `Enter`. If the template takes arguments, type them (`"a b"` groups words into
-one argument). A live preview shows the exact command line before `Enter` runs
+one argument). You can also type them on the same line after the name:
+`test 10` + `Enter` runs `test` with `10` as `{$1}`, and the box shows the
+resulting command before you press `Enter`. A live preview shows the exact command line before `Enter` runs
 it. Commands without arguments run straight away. Values are shell-quoted only
 when they need it, so `master` is passed as `master` and `my file.tf` as
 `'my file.tf'`. The program gets the same arguments either way.

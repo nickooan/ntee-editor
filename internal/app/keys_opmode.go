@@ -24,20 +24,22 @@ const (
 const opRunPageLines = 10
 
 // opModeState is the Ctrl+R operation overlay: pick a saved op-command, fill
-// its {$n} args, then watch it run.
+// its {$n} args, then watch it run. The pick query is "name [args…]": the
+// first word filters the commands, the rest are inline args for the pick.
 type opModeState struct {
-	open       bool
-	stage      opStage
-	query      string
-	index      int
-	corpus     []fuzzy.Prepared // aligned with candidates
-	candidates []store.OpCommand
-	matches    []fuzzy.Match
-	selected   store.OpCommand
-	template   opcmd.Template
-	args       string
-	argsCursor int
-	run        *opRunState
+	open         bool
+	stage        opStage
+	query        string
+	filteredName string // the name part matches were last computed for
+	index        int
+	corpus       []fuzzy.Prepared // aligned with candidates
+	candidates   []store.OpCommand
+	matches      []fuzzy.Match
+	selected     store.OpCommand
+	template     opcmd.Template
+	args         string
+	argsCursor   int
+	run          *opRunState
 }
 
 // openOpMode opens the operation overlay. Commands render from the cached
@@ -64,6 +66,13 @@ func (m Model) closeOpMode() Model {
 	return m
 }
 
+// opQueryParts splits the pick query into the command name to filter on and
+// the inline args that follow the first space.
+func opQueryParts(query string) (name, inlineArgs string) {
+	name, inlineArgs, _ = strings.Cut(strings.TrimLeft(query, " "), " ")
+	return name, strings.TrimSpace(inlineArgs)
+}
+
 func (m Model) refreshOpMatches() Model {
 	m.opMode.candidates = m.opCommands
 	names := make([]string, len(m.opCommands))
@@ -71,9 +80,30 @@ func (m Model) refreshOpMatches() Model {
 		names[index] = command.Name
 	}
 	m.opMode.corpus = fuzzy.Prepare(names)
-	m.opMode.matches = fuzzy.Filter(m.opMode.query, m.opMode.corpus)
+	m.opMode.filteredName, _ = opQueryParts(m.opMode.query)
+	m.opMode.matches = fuzzy.Filter(m.opMode.filteredName, m.opMode.corpus)
 	m.opMode.index = input.Clamp(m.opMode.index, 0, max(0, len(m.opMode.matches)-1))
 	return m
+}
+
+// setOpQuery updates the pick query. Only a change to the name part
+// re-filters and resets the selection — typing args keeps the chosen row.
+func (m Model) setOpQuery(query string) Model {
+	m.opMode.query = query
+	if name, _ := opQueryParts(query); name != m.opMode.filteredName {
+		m.opMode.index = 0
+		m = m.refreshOpMatches()
+	}
+	return m
+}
+
+// opHighlighted is the command the picker's selection points at.
+func (m Model) opHighlighted() (store.OpCommand, bool) {
+	if len(m.opMode.matches) == 0 {
+		return store.OpCommand{}, false
+	}
+	index := input.Clamp(m.opMode.index, 0, len(m.opMode.matches)-1)
+	return m.opMode.candidates[m.opMode.matches[index].Index], true
 }
 
 func (m Model) handleOpKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -94,38 +124,42 @@ func (m Model) handleOpKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.selectOpCommand()
 	case "backspace":
 		if runes := []rune(m.opMode.query); len(runes) > 0 {
-			m.opMode.query = string(runes[:len(runes)-1])
-			m.opMode.index = 0
-			m = m.refreshOpMatches()
+			m = m.setOpQuery(string(runes[:len(runes)-1]))
 		}
 	case "space":
-		m.opMode.query += " "
-		m.opMode.index = 0
-		m = m.refreshOpMatches()
+		m = m.setOpQuery(m.opMode.query + " ")
 	default:
 		if text := keyText(msg); text != "" {
-			m.opMode.query += text
-			m.opMode.index = 0
-			m = m.refreshOpMatches()
+			m = m.setOpQuery(m.opMode.query + text)
 		}
 	}
 	return m, nil
 }
 
 // selectOpCommand takes the highlighted command to the args stage, or runs it
-// straight away when its template has no {$n} placeholders.
+// straight away when its template has no {$n} placeholders. Inline args typed
+// after the name ("test 10") run it directly; if they don't fit the template
+// the args stage opens pre-filled, showing why.
 func (m Model) selectOpCommand() (tea.Model, tea.Cmd) {
-	if len(m.opMode.matches) == 0 {
+	command, ok := m.opHighlighted()
+	if !ok {
 		return m, nil
 	}
-	command := m.opMode.candidates[m.opMode.matches[m.opMode.index].Index]
 	template, err := opcmd.Parse(command.Command)
 	if err != nil {
 		m.errText = command.Name + ": " + err.Error()
 		return m, nil
 	}
+	_, inlineArgs := opQueryParts(m.opMode.query)
 	m.opMode.selected, m.opMode.template = command, template
-	m.opMode.args, m.opMode.argsCursor = "", 0
+	m.opMode.args, m.opMode.argsCursor = inlineArgs, len([]rune(inlineArgs))
+	if inlineArgs != "" {
+		if _, err := m.renderOpCommandLine(); err == nil {
+			return m.runOpCommand()
+		}
+		m.opMode.stage = opStageArgs
+		return m, nil
+	}
 	if template.MaxArg == 0 {
 		return m.runOpCommand()
 	}
@@ -135,11 +169,31 @@ func (m Model) selectOpCommand() (tea.Model, tea.Cmd) {
 
 // renderOpCommandLine builds the executable command line from the args input.
 func (m Model) renderOpCommandLine() (string, error) {
-	args, err := opcmd.SplitArgs(m.opMode.args)
+	return m.renderOpTemplate(m.opMode.template, m.opMode.args)
+}
+
+func (m Model) renderOpTemplate(template opcmd.Template, argsLine string) (string, error) {
+	args, err := opcmd.SplitArgs(argsLine)
 	if err != nil {
 		return "", err
 	}
-	return m.opMode.template.Render(args, m.opSystemValues())
+	return template.Render(args, m.opSystemValues())
+}
+
+// opInlinePreview renders the highlighted command with the pick query's
+// inline args — exactly what Enter would run. ok is false without inline args.
+func (m Model) opInlinePreview() (commandLine string, ok bool, err error) {
+	_, inlineArgs := opQueryParts(m.opMode.query)
+	command, found := m.opHighlighted()
+	if inlineArgs == "" || !found {
+		return "", false, nil
+	}
+	template, err := opcmd.Parse(command.Command)
+	if err != nil {
+		return "", true, err
+	}
+	commandLine, err = m.renderOpTemplate(template, inlineArgs)
+	return commandLine, true, err
 }
 
 // opSystemValues resolves the system variables against the workspace

@@ -117,12 +117,24 @@ func (m Model) handleInspectKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// renderInspectInput draws the @inspection bar input; it drops its cursor while
+// the op-commands table has focus, so only the table shows where typing goes.
+func (m Model) renderInspectInput() string {
+	if m.opTable.focused {
+		return execTextStyle.Render(m.inspectInput)
+	}
+	return renderInputLineStyled(m.inspectInput, m.inspectCursor, execTextStyle)
+}
+
 // inspectHint is the status-bar key hint for the inspect dashboard's focus.
 func (m Model) inspectHint() string {
 	switch {
 	case m.opTable.confirmDelete != "":
 		return "y delete · n cancel"
 	case m.opTable.editing:
+		if _, candidates := m.opSuggestions(); len(candidates) > 0 {
+			return "↑/↓ choose · Tab/Enter insert · Esc dismiss"
+		}
 		return "Tab key/value · Ctrl+S save · Esc revert"
 	case m.opTable.focused:
 		return "↑/↓ row · Enter edit · d delete · ←/Esc back"

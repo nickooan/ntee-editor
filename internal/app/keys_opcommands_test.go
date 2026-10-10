@@ -272,3 +272,116 @@ func TestOpCommandsSidebarClickReleasesTableFocus(t *testing.T) {
 		t.Fatalf("keys should reach the bar again, got %q", m.inspectInput)
 	}
 }
+
+// editValueOf focuses the table, starts editing the first row, and moves to
+// the value field with the cursor at its end.
+func editValueOf(t *testing.T, command store.OpCommand) Model {
+	t.Helper()
+	m, _ := opCommandsFixture(t, command)
+	m = key(m, keyPress(tea.KeyRight))
+	m = key(m, keyPress(tea.KeyEnter))
+	return key(m, keyPress(tea.KeyTab))
+}
+
+func TestOpCommandsSuggestNextArgumentFirst(t *testing.T) {
+	m := editValueOf(t, store.OpCommand{Name: "cp", Command: "cp {$1}"})
+	m = runes(m, " {$")
+	_, candidates := m.opSuggestions()
+	if len(candidates) == 0 || candidates[0].Insert != "{$2}" {
+		t.Fatalf("first suggestion should be the next argument: %+v", candidates)
+	}
+	if frame := ansi.Strip(m.render()); !strings.Contains(frame, "new argument") || !strings.Contains(frame, "{$fpath}") {
+		t.Fatalf("dropdown should render under the edit row:\n%s", frame)
+	}
+	m = key(m, keyPress(tea.KeyTab))
+	if m.opTable.value != "cp {$1} {$2}" || m.opTable.field != opFieldValue || m.opTable.cursor != len([]rune(m.opTable.value)) {
+		t.Fatalf("Tab should insert the suggestion, not switch fields: value=%q field=%d cursor=%d", m.opTable.value, m.opTable.field, m.opTable.cursor)
+	}
+	if _, candidates := m.opSuggestions(); len(candidates) != 0 {
+		t.Fatal("menu should close after inserting a complete placeholder")
+	}
+}
+
+func TestOpCommandsSuggestSystemVariableByPrefix(t *testing.T) {
+	m := editValueOf(t, store.OpCommand{Name: "t", Command: "go test"})
+	m = runes(m, " $d")
+	_, candidates := m.opSuggestions()
+	if len(candidates) != 1 || candidates[0].Insert != "{$dpath}" {
+		t.Fatalf("$d should suggest {$dpath}: %+v", candidates)
+	}
+	m = key(m, keyPress(tea.KeyEnter))
+	if m.opTable.value != "go test {$dpath}" {
+		t.Fatalf("Enter should insert the suggestion: %q", m.opTable.value)
+	}
+}
+
+func TestOpCommandsSuggestionNavigationAndClosingBrace(t *testing.T) {
+	m := editValueOf(t, store.OpCommand{Name: "cat", Command: "cat {$}"})
+	m = key(m, keyPress(tea.KeyLeft)) // cursor between "{$" and "}"
+	m = key(m, keyPress(tea.KeyDown))
+	if m.opTable.suggestIndex != 1 {
+		t.Fatalf("↓ should move the menu selection, got %d", m.opTable.suggestIndex)
+	}
+	m = key(m, keyPress(tea.KeyTab))
+	if m.opTable.value != "cat {$fpath}" {
+		t.Fatalf("an existing closing brace should be absorbed: %q", m.opTable.value)
+	}
+}
+
+func TestOpCommandsEscDismissesSuggestionsBeforeReverting(t *testing.T) {
+	m := editValueOf(t, store.OpCommand{Name: "e", Command: "echo"})
+	m = runes(m, " {")
+	m = key(m, keyPress(tea.KeyEsc))
+	if !m.opTable.editing || m.opTable.value != "echo {" {
+		t.Fatalf("first Esc should only close the menu: editing=%v value=%q", m.opTable.editing, m.opTable.value)
+	}
+	if _, candidates := m.opSuggestions(); len(candidates) != 0 {
+		t.Fatal("menu should stay hidden until the text changes")
+	}
+	m = key(m, keyPress(tea.KeyTab))
+	if m.opTable.field != opFieldKey {
+		t.Fatal("with the menu hidden, Tab switches fields again")
+	}
+	m = key(m, keyPress(tea.KeyEsc))
+	if m.opTable.editing {
+		t.Fatal("second Esc should revert the edit")
+	}
+}
+
+func TestOpCommandsTableRendering(t *testing.T) {
+	m, _ := opCommandsFixture(t)
+	frame := ansi.Strip(m.render())
+	for _, want := range []string{"No op-commands yet.", "+ New command", "press → to edit", "{$fpath}", "{$dpath}", "KEY", "COMMAND"} {
+		if !strings.Contains(frame, want) {
+			t.Fatalf("empty table should show %q:\n%s", want, frame)
+		}
+	}
+	m, _ = opCommandsFixture(t, store.OpCommand{Name: "plan", Command: "terraform plan {$1}"})
+	m = key(m, keyPress(tea.KeyRight))
+	frame = ansi.Strip(m.render())
+	if !strings.Contains(frame, "▸ plan") || strings.Contains(frame, "No op-commands yet.") {
+		t.Fatalf("focused table should mark the selected row:\n%s", frame)
+	}
+	m = key(m, keyPress(tea.KeyDown))
+	if frame := ansi.Strip(m.render()); !strings.Contains(frame, "Enter to add") {
+		t.Fatalf("selected + New command should say how to use it:\n%s", frame)
+	}
+	m = key(m, keyPress(tea.KeyEnter))
+	if frame := ansi.Strip(m.render()); !strings.Contains(frame, "✎") {
+		t.Fatalf("a new row being edited should show the edit marker:\n%s", frame)
+	}
+}
+
+func TestRenderOpCellKeepsCursorVisible(t *testing.T) {
+	text := strings.Repeat("a", 30) + "{$1}"
+	cell := renderOpCell(text, 10, len([]rune(text)), true, opRowInput)
+	if width := ansi.StringWidth(cell); width != 10 {
+		t.Fatalf("cell width = %d, want 10", width)
+	}
+	if plain := ansi.Strip(cell); !strings.HasPrefix(plain, "aaaaa{$1}") {
+		t.Fatalf("view should scroll to the cursor at the end: %q", plain)
+	}
+	if plain := ansi.Strip(renderOpCell(text, 10, -1, true, opRowNormal)); plain != "aaaaaaaaa…" {
+		t.Fatalf("a non-input cell should truncate with an ellipsis: %q", plain)
+	}
+}

@@ -20,6 +20,12 @@ const (
 // SystemVars lists the system variables a template may reference.
 var SystemVars = []string{SystemFilePath, SystemDirPath}
 
+// SystemVarDetails describes each system variable for completion menus.
+var SystemVarDetails = map[string]string{
+	SystemFilePath: "open file, workspace-relative",
+	SystemDirPath:  "open file's directory",
+}
+
 type segment struct {
 	literal  string
 	argIndex int    // 1-based; 0 when not a positional placeholder

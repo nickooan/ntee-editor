@@ -31,6 +31,10 @@ type opTableState struct {
 	saving        bool
 	confirmDelete string
 	selectName    string // row to select once the next reload lands
+	// Placeholder completion in the value field: suggestIndex is the
+	// highlighted candidate; Esc hides the menu until the text changes.
+	suggestIndex  int
+	suggestHidden bool
 }
 
 type opCommandsLoadedMsg struct {
@@ -141,6 +145,7 @@ func (m Model) handleOpTableKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) startOpEdit() Model {
 	m.opTable.editing = true
+	m.opTable.suggestIndex, m.opTable.suggestHidden = 0, false
 	m.opTable.field = opFieldKey
 	m.opTable.key, m.opTable.value, m.opTable.originalName = "", "", ""
 	if m.opTable.index < len(m.opCommands) {
@@ -151,7 +156,49 @@ func (m Model) startOpEdit() Model {
 	return m
 }
 
+// opSuggestions returns the placeholder completions for the value field's
+// cursor position, and where the fragment they replace starts.
+func (m Model) opSuggestions() (int, []opcmd.Candidate) {
+	if !m.opTable.editing || m.opTable.field != opFieldValue || m.opTable.suggestHidden {
+		return 0, nil
+	}
+	return opcmd.Complete(m.opTable.value, m.opTable.cursor)
+}
+
+// acceptOpSuggestion replaces the typed fragment with the full placeholder,
+// swallowing a "}" the user already typed after the cursor.
+func (m Model) acceptOpSuggestion(start int, candidate opcmd.Candidate) Model {
+	runes := []rune(m.opTable.value)
+	rest := runes[m.opTable.cursor:]
+	if len(rest) > 0 && rest[0] == '}' {
+		rest = rest[1:]
+	}
+	m.opTable.value = string(runes[:start]) + candidate.Insert + string(rest)
+	m.opTable.cursor = start + len([]rune(candidate.Insert))
+	m.opTable.suggestIndex = 0
+	return m
+}
+
 func (m Model) handleOpEditKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if start, candidates := m.opSuggestions(); len(candidates) > 0 {
+		selected := input.Clamp(m.opTable.suggestIndex, 0, len(candidates)-1)
+		switch msg.String() {
+		case "up":
+			m.opTable.suggestIndex = input.Clamp(selected-1, 0, len(candidates)-1)
+			return m, nil
+		case "down":
+			m.opTable.suggestIndex = input.Clamp(selected+1, 0, len(candidates)-1)
+			return m, nil
+		case "tab", "enter":
+			return m.acceptOpSuggestion(start, candidates[selected]), nil
+		case "esc":
+			m.opTable.suggestHidden = true
+			return m, nil
+		}
+	}
+	// Any other key edits or moves: the menu re-derives from the new position.
+	m.opTable.suggestIndex, m.opTable.suggestHidden = 0, false
+
 	field := &m.opTable.key
 	if m.opTable.field == opFieldValue {
 		field = &m.opTable.value
@@ -204,6 +251,7 @@ func (m Model) opEditPaste(text string) Model {
 	} else {
 		m.opTable.key, m.opTable.cursor = input.InsertAtCursor(m.opTable.key, m.opTable.cursor, pasteLine(text))
 	}
+	m.opTable.suggestIndex, m.opTable.suggestHidden = 0, false
 	return m
 }
 

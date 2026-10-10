@@ -21,4 +21,8 @@ Adding a system variable means adding its name to `SystemVars` and supplying its
 - `ShellQuote` — minimal POSIX quoting: unchanged when the value is only `[A-Za-z0-9_@%+=:,./-]`, otherwise wrapped in `'…'` with embedded `'` written as `'\''`; the empty string is `''`.
 - `SplitArgs` — splits the user's arg line like sh splits words: whitespace separates, `'…'` is literal, `"…"` groups (with `\"`/`\\` escapes), a bare `\` escapes one character. Unterminated quotes are an error.
 
+### complete.go
+
+- `Complete` powers placeholder suggestions in the op-commands editor. It finds the partial placeholder that ends at the cursor (`{`, `{$`, `$`, `{$fp`, `$2`) and returns where it starts plus matching candidates, filtered by the typed name prefix. The first candidate is always the *next* unused argument, one past the highest finished `{$n}` in the template, so typing `{$` in a template that already uses `{$1}` offers `{$2}` first. The existing arguments and the system variables come next, with descriptions from `SystemVarDetails`. A bare `$` followed by a name that matches nothing (`$HOME`) returns no candidates, so ordinary shell variables don't trigger the menu.
+
 *Plus small helpers: `parsePlaceholder` (one `{$…}` body to a segment), `needsQuoting` (the safe-character test).*

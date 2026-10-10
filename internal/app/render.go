@@ -185,7 +185,7 @@ func (m Model) renderStatusLine() string {
 		return m.renderPreviewStatus()
 	case modeInspect:
 		bar := execPromptStyle.Render("@inspection >") +
-			renderInputLineStyled(m.inspectInput, m.inspectCursor, execTextStyle) +
+			m.renderInspectInput() +
 			execTextStyle.Render("   ")
 		if m.errText != "" {
 			bar += errStyle.Render(m.errText) + execTextStyle.Render("   ")

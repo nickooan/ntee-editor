@@ -200,6 +200,7 @@ The inspect dashboard's op-commands table: a key/value list of saved shell comma
 - `loadOpCommandsCmd` reloads the list off the UI goroutine. It runs when the dashboard opens, when Ctrl+R opens, and after every save or delete. The result lands as `opCommandsLoadedMsg`, which is dropped unless its `opCommandsGen` is current. It also refreshes the picker if the overlay is open.
 - `handleOpTableKey`: ↑/↓ moves through the rows plus a trailing `+ new command` row. Enter edits the row. `d` asks `delete <name>? y/n` before deleting (asynchronously). ←/Esc returns focus to the menu.
 - `handleOpEditKey` is the inline editor. Tab switches between the key and value fields, and the rest is cursor-aware typing. Ctrl+S calls `saveOpEdit`. Esc throws the buffer away, so the row shows its stored value again.
+- Placeholder completion in the value field. `opSuggestions` asks `opcmd.Complete` for the fragment at the cursor (`{`, `{$`, `$`, `{$f`, …), so the menu derives from the text and cursor and needs no stored list. While it is open, ↑/↓ choose a candidate, Tab/Enter call `acceptOpSuggestion`, and Esc hides the menu (`suggestHidden`) until the next edit, so the first Esc never reverts the row. `acceptOpSuggestion` replaces the fragment with the full placeholder and absorbs a `}` already typed after the cursor.
 - `saveOpEdit` validates before writing anything. The key must be non-empty, have no spaces, and be unique. The value must be non-empty and pass `opcmd.Parse`. The `PutOpCommand` write then runs in a Cmd. If validation fails, editing stays open with the error in the bar.
 
 *Plus small helpers: `startOpEdit`, `switchOpEditField`, `opEditPaste`, `handleOpCommandsLoaded`, `handleOpCommandSaved`.*
@@ -326,7 +327,9 @@ Repo-wide content search (Ctrl+G). Everything expensive is async and generation-
 
 The operation overlay runs a saved op-command against the open file. It only opens while a file is open, because `{$fpath}` and `{$dpath}` need one. `opSystemValues` builds both from the *workspace*-relative path (`activeRepo` joined with `openRel`), not the Ctrl+W repo-relative one, because commands always run from the workspace directory. It moves through three stages (`opModeState.stage`):
 
-- **pick**: fuzzy search over command names. This reuses `fuzzy.Prepare`/`Filter`, and rows show the template dimmed. Enter calls `selectOpCommand`. A template with no `{$n}` runs immediately; otherwise the overlay moves to the args stage.
+- **pick**: fuzzy search over command names. This reuses `fuzzy.Prepare`/`Filter`, and rows show the template dimmed. The query is `name [args…]`: `opQueryParts` splits it at the first space, and only the name part filters. `setOpQuery` re-filters and resets the selection only when the name part changes, so typing args never moves the chosen row. With inline args, the box previews the exact command line, or the error (`opInlinePreview`). Enter calls `selectOpCommand`:
+  - With inline args that fit the template (`test 10`), the command runs at once. If they don't fit, the args stage opens pre-filled with them.
+  - Without inline args, a template with no `{$n}` runs immediately; otherwise the overlay moves to the args stage.
 - **args**: the user types the arguments. `renderOpCommandLine` splits them with `opcmd.SplitArgs`, adds the system values, and renders the template every frame, so the box shows either the exact `$ command` or the error (`needs 2 args, got 1`). Enter runs it. Esc goes back to the picker with the query kept.
 - **run**: `runOpCommand` bumps `opRunGen` and starts the process (see opmode_run.go). `handleOpRunMsg` appends output and re-arms the wait until the done event arrives. A message with an older generation is dropped, which also ends its wait chain. While the run view is open, ↑/↓/PgUp/PgDn/Home/End scroll back through the output; End returns to following the tail.
 
@@ -436,7 +439,7 @@ The left pane is one list. File tree, inspection menu, and preview outline each 
 
 #### render_inspect.go
 
-- `renderInspectMain` routes to the selected panel: `renderInspectDB` (record counts, live/dead log bytes, blob usage, generation warnings), `renderInspectLSP` (per-language running/stopped/disabled status from the registry), `renderInspectSystem` (version and syntax style), `renderInspectOpCommands` (render_opmode.go).
+- `renderInspectMain` routes to the selected panel: `renderInspectDB` (record counts, live/dead log bytes, blob usage, generation warnings), `renderInspectLSP` (per-language running/stopped/disabled status from the registry), `renderInspectSystem` (version and syntax style), `renderInspectOpCommands` (render_opcommands.go).
 
 *Plus small helpers: `humanBytes`, `percent` — number formatting. The left menu is `inspectSidebarList` in sidebarlist.go.*
 
@@ -446,9 +449,24 @@ The left pane is one list. File tree, inspection menu, and preview outline each 
   - **Pick:** a box like the fuzzy finder, with the template dimmed after each name.
   - **Args:** the template, the args input, and the live `$ command` preview in green, or the error in red. The preview wraps over a few lines so long paths stay readable.
   - **Run:** a large box with the command line, the output tail (or a scrolled-back window that never leaves empty space at the top), and a footer. The footer is yellow while running, green `✓ finished (exit 0)`, or red with the exit status.
-- `renderInspectOpCommands` draws the key/value table. Keys are padded to the longest name, capped at a third of the width. The selected row is highlighted when the table has focus. The row being edited shows inline inputs (`renderOpEditRow`). The table scrolls so the selection stays visible.
-
 *Plus: `wrapRunes` — hard wrap with a trailing `…` past the line cap.*
+
+#### render_opcommands.go
+
+The op-commands panel in the inspect dashboard.
+
+- `renderInspectOpCommands` draws the panel:
+  - A title. The `press → to edit` hint shows until the table has focus.
+  - A rounded-border table with a KEY and a COMMAND column (`opTableLayout`). The key column fits the longest name, capped at a third of the width.
+  - When there are no commands, the table body explains what op-commands are and shows an example.
+  - A `+ New command` button row, which becomes a solid green pill when selected.
+  - A placeholder legend.
+  - The body scrolls so the selected row, and its dropdown, stay visible.
+- Each row uses one palette (`opRowStyles`): normal, selected (a solid selection bar marked `▸`), editing (dimmed, marked `✎`), or input (the active cell, drawn as a darker inset with a cursor block). Every text run carries the row's background, so a highlight is never broken by an inner style reset.
+- `renderOpCell` renders a cell at an exact width. Input cells scroll horizontally to keep the cursor visible; other cells end in `…` when cut. `opTokenClasses` colours placeholders per rune using `opcmd.Parse`: `{$n}` arguments orange, system variables blue, broken or half-typed placeholders red.
+- `renderOpSuggestionRows` draws the completion menu as a dropdown in the COMMAND column under the edit row, styled like the LSP completion popup.
+
+*Plus small helpers: `opTableBody`, `renderOpEditRow`, `opTableEmptyLines`, `opNewButton`, `opLegend`, and the layout's `border`/`row`/`spanning`. The inspect bar also hides its own cursor while the table has focus (`renderInspectInput`), so only one cursor is ever visible.*
 
 ### Mouse
 

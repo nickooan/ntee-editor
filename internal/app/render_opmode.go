@@ -39,16 +39,26 @@ func (m Model) renderOpPickBox(width int) string {
 	boxWidth := input.Clamp(width*8/10, 24, max(24, width-2))
 	rowWidth := max(1, boxWidth-2)
 
-	var b strings.Builder
-	b.WriteString(promptStyle.Render("run ") + renderInputLine(m.opMode.query, len([]rune(m.opMode.query))) + "\n")
+	lines := []string{promptStyle.Render("run ") + renderInputLine(m.opMode.query, len([]rune(m.opMode.query)))}
+	// With inline args ("test 10"), show exactly what Enter will run.
+	if commandLine, ok, err := m.opInlinePreview(); ok {
+		if err != nil {
+			lines = append(lines, opFailureStyle.Render(truncateRunes(err.Error(), rowWidth)))
+		} else {
+			for _, line := range wrapRunes("$ "+commandLine, rowWidth, opPreviewMaxLines) {
+				lines = append(lines, opSuccessStyle.Render(line))
+			}
+		}
+	}
+	lines = append(lines, "")
 	if len(m.opMode.matches) == 0 {
 		switch {
 		case len(m.opMode.candidates) == 0 && m.opCommandsLoading:
-			b.WriteString(overlayHintStyle.Render("(loading op-commands…)"))
+			lines = append(lines, overlayHintStyle.Render("(loading op-commands…)"))
 		case len(m.opMode.candidates) == 0:
-			b.WriteString(overlayHintStyle.Render(truncateRunes("(no op-commands — add some in Ctrl+T › op-commands)", rowWidth)))
+			lines = append(lines, overlayHintStyle.Render(truncateRunes("(no op-commands — add some in Ctrl+T › op-commands)", rowWidth)))
 		default:
-			b.WriteString(overlayHintStyle.Render("(no matches)"))
+			lines = append(lines, overlayHintStyle.Render("(no matches)"))
 		}
 	}
 
@@ -62,18 +72,19 @@ func (m Model) renderOpPickBox(width int) string {
 		match := m.opMode.matches[index]
 		command := m.opMode.candidates[match.Index]
 		if index == selected {
-			b.WriteString("\n" + selectedEntryStyle.Render(padTo(truncateRunes(" "+command.Name+"  "+command.Command, rowWidth), rowWidth)))
+			lines = append(lines, selectedEntryStyle.Render(padTo(truncateRunes(" "+command.Name+"  "+command.Command, rowWidth), rowWidth)))
 			continue
 		}
 		nameWidth := min(rowWidth, len([]rune(command.Name))+1)
-		positions := fuzzy.Positions(m.opMode.query, m.opMode.corpus[match.Index])
+		positions := fuzzy.Positions(m.opMode.filteredName, m.opMode.corpus[match.Index])
 		row := renderFuzzyRow(command.Name, positions, nameWidth, false)
 		if rest := rowWidth - nameWidth; rest > 0 {
 			row += overlayHintStyle.Render(padTo(truncateRunes("  "+command.Command, rest), rest))
 		}
-		b.WriteString("\n" + row)
+		lines = append(lines, row)
 	}
-	return modalStyle.Width(boxWidth + 2).Render(b.String())
+	lines = append(lines, "", overlayHintStyle.Render(truncateRunes("name [args…] · ↑/↓ choose · Enter run · Esc close", rowWidth)))
+	return modalStyle.Width(boxWidth + 2).Render(strings.Join(lines, "\n"))
 }
 
 func (m Model) renderOpArgsBox(width int) string {
@@ -158,76 +169,4 @@ func wrapRunes(text string, width, maxLines int) []string {
 		lines[len(lines)-1] = string(last[:len(last)-1]) + "…"
 	}
 	return lines
-}
-
-// renderInspectOpCommands draws the op-commands key/value table. The row being
-// edited shows inline inputs; the trailing row adds a new command.
-func (m Model) renderInspectOpCommands(width, height int) string {
-	title := dirStyle.Render(truncateRunes("op-commands (global · run with Ctrl+R)", width))
-	switch {
-	case m.opCommandsLoading && len(m.opCommands) == 0:
-		return title + "\n\n" + baseStyle.Render("loading op-commands…")
-	case m.opCommandsErr != nil:
-		title += "\n" + errStyle.Render(truncateRunes("load failed: "+m.opCommandsErr.Error(), width))
-	}
-
-	keyWidth := len("key")
-	for _, command := range m.opCommands {
-		keyWidth = max(keyWidth, len([]rune(command.Name)))
-	}
-	if m.opTable.editing {
-		keyWidth = max(keyWidth, len([]rune(m.opTable.key))+1)
-	}
-	keyWidth = min(keyWidth+2, max(8, width/3))
-	valueWidth := max(1, width-keyWidth)
-
-	header := hintStyle.Render(padTo("key", keyWidth) + "value")
-	rowCount := len(m.opCommands) + 1
-	tableHeight := max(1, height-6)
-	start := 0
-	if m.opTable.index >= tableHeight {
-		start = m.opTable.index - tableHeight + 1
-	}
-
-	rows := []string{title, "", header}
-	for index := start; index < rowCount && index < start+tableHeight; index++ {
-		selected := m.opTable.focused && index == m.opTable.index
-		if selected && m.opTable.editing {
-			rows = append(rows, m.renderOpEditRow(keyWidth, valueWidth))
-			continue
-		}
-		var key, value string
-		if index < len(m.opCommands) {
-			key, value = m.opCommands[index].Name, m.opCommands[index].Command
-		} else {
-			key = "+ new command"
-		}
-		text := padTo(truncateRunes(key, keyWidth-1), keyWidth) + truncateRunes(value, valueWidth)
-		switch {
-		case selected:
-			rows = append(rows, selectedEntryStyle.Render(padTo(text, width)))
-		case index == len(m.opCommands):
-			rows = append(rows, ignoredFileStyle.Render(text))
-		default:
-			rows = append(rows, fileStyle.Render(padTo(truncateRunes(key, keyWidth-1), keyWidth))+baseStyle.Render(truncateRunes(value, valueWidth)))
-		}
-	}
-	if m.opTable.confirmDelete != "" {
-		rows = append(rows, "", errStyle.Render(truncateRunes("delete "+m.opTable.confirmDelete+"? y/n", width)))
-	}
-	rows = append(rows, "", hintStyle.Render(truncateRunes("value: shell command · {$1} {$2} … user args · {$fpath} file / {$dpath} its dir (workspace-relative)", width)))
-	return strings.Join(rows, "\n")
-}
-
-func (m Model) renderOpEditRow(keyWidth, valueWidth int) string {
-	keyCell, valueCell := opInputStyle.Render(m.opTable.key), opInputStyle.Render(truncateRunes(m.opTable.value, valueWidth))
-	if m.opTable.field == opFieldKey {
-		keyCell = renderInputLineStyled(m.opTable.key, m.opTable.cursor, opInputStyle)
-	} else {
-		valueCell = renderInputLineStyled(m.opTable.value, m.opTable.cursor, opInputStyle)
-	}
-	if pad := keyWidth - lipgloss.Width(keyCell); pad > 0 {
-		keyCell += opInputStyle.Render(strings.Repeat(" ", pad))
-	}
-	return keyCell + valueCell
 }

@@ -1,8 +1,10 @@
 package app
 
 import (
+	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -258,5 +260,95 @@ func TestOpRunScrollAndFollow(t *testing.T) {
 	m = key(m, keyPress(tea.KeyEnd))
 	if m.opMode.run.scroll != 0 {
 		t.Fatal("End should follow the tail again")
+	}
+}
+
+func TestOpModeInlineArgsRunDirectly(t *testing.T) {
+	m, root := opModeFixture(t, store.OpCommand{Name: "test", Command: "cat {$fpath} | tail -n {$1}"})
+	var content strings.Builder
+	for line := 1; line <= 20; line++ {
+		content.WriteString(strconv.Itoa(line) + "\n")
+	}
+	must(t, os.WriteFile(filepath.Join(root, "lines.txt"), []byte(content.String()), 0o644))
+	m = m.openFileAt("lines.txt")
+	m = press(t, m, ctrlKey('r'))
+	m = runes(m, "test 3")
+	if len(m.opMode.matches) != 1 {
+		t.Fatalf("the name part should still match the command, got %d matches", len(m.opMode.matches))
+	}
+	if frame := ansi.Strip(m.render()); !strings.Contains(frame, "$ cat lines.txt | tail -n 3") {
+		t.Fatalf("picker should preview the command Enter will run:\n%s", frame)
+	}
+	m = press(t, m, keyPress(tea.KeyEnter))
+	run := m.opMode.run
+	if m.opMode.stage != opStageRun || run == nil || !run.finished || run.exitCode != 0 {
+		t.Fatalf("inline args should run straight away: stage=%v run=%+v", m.opMode.stage, run)
+	}
+	if lines := run.output.displayLines(); !slices.Equal(lines, []string{"18", "19", "20"}) {
+		t.Fatalf("output = %q", lines)
+	}
+}
+
+func TestOpModeInlineArgsQuoting(t *testing.T) {
+	m, _ := opModeFixture(t, store.OpCommand{Name: "echo-args", Command: "printf '%s\\n' {$1}"})
+	m = press(t, m, ctrlKey('r'))
+	m = runes(m, `echo "hello world"`)
+	m = press(t, m, keyPress(tea.KeyEnter))
+	if lines := m.opMode.run.output.displayLines(); !slices.Equal(lines, []string{"hello world"}) {
+		t.Fatalf("a quoted inline arg should stay one argument: %q", lines)
+	}
+}
+
+func TestOpModeInlineArgsWrongCountOpensArgsStage(t *testing.T) {
+	m, _ := opModeFixture(t, store.OpCommand{Name: "pair", Command: "echo {$1} {$2}"})
+	m = press(t, m, ctrlKey('r'))
+	m = runes(m, "pair one")
+	if frame := ansi.Strip(m.render()); !strings.Contains(frame, "needs 2 args, got 1") {
+		t.Fatalf("picker should show why the inline args don't fit:\n%s", frame)
+	}
+	m = key(m, keyPress(tea.KeyEnter))
+	if m.opMode.stage != opStageArgs || m.opMode.args != "one" || m.opMode.argsCursor != 3 {
+		t.Fatalf("args stage should open pre-filled: stage=%v args=%q cursor=%d", m.opMode.stage, m.opMode.args, m.opMode.argsCursor)
+	}
+	m = runes(m, " two")
+	m = press(t, m, keyPress(tea.KeyEnter))
+	if lines := m.opMode.run.output.displayLines(); !slices.Equal(lines, []string{"one two"}) {
+		t.Fatalf("output = %q", lines)
+	}
+}
+
+func TestOpModeTypingArgsKeepsSelection(t *testing.T) {
+	m, _ := opModeFixture(t,
+		store.OpCommand{Name: "build", Command: "make {$1}"},
+		store.OpCommand{Name: "bump", Command: "echo {$1}"},
+	)
+	m = press(t, m, ctrlKey('r'))
+	m = runes(m, "b")
+	m = key(m, keyPress(tea.KeyDown))
+	selected, _ := m.opHighlighted()
+	m = runes(m, " x")
+	if after, _ := m.opHighlighted(); after.Name != selected.Name || m.opMode.index != 1 {
+		t.Fatalf("typing args should keep the chosen row: before=%q after=%q index=%d", selected.Name, after.Name, m.opMode.index)
+	}
+	m = key(m, keyPress(tea.KeyBackspace))
+	m = key(m, keyPress(tea.KeyBackspace))
+	m = runes(m, "u")
+	if m.opMode.index != 0 {
+		t.Fatal("changing the name part should re-filter and reset the selection")
+	}
+}
+
+func TestOpQueryParts(t *testing.T) {
+	cases := []struct{ query, name, args string }{
+		{"test", "test", ""},
+		{"test 10", "test", "10"},
+		{"  test   a  b ", "test", "a  b"},
+		{"test ", "test", ""},
+		{"", "", ""},
+	}
+	for _, tc := range cases {
+		if name, args := opQueryParts(tc.query); name != tc.name || args != tc.args {
+			t.Errorf("opQueryParts(%q) = %q %q, want %q %q", tc.query, name, args, tc.name, tc.args)
+		}
 	}
 }

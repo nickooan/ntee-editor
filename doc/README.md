@@ -19,7 +19,7 @@ This directory contains one document per internal package. Each follows the same
 | `internal/input` | Small cursor-aware text-input helpers for the command bars | [input.md](input.md) |
 | `internal/lsp` | Language-server manager: lazy per-language servers, a writer queue that can't freeze the UI, Vue↔TypeScript hybrid bridging | [lsp.md](lsp.md) |
 | `internal/lspsetup` | The `--prepare-lsp` installer: pinned per-language recipes via brew/go/npm/gem | [lspsetup.md](lspsetup.md) |
-| `internal/opcmd` | Op-command templates: parses `{$1}`/`{$fpath}` placeholders and renders a shell-quoted command line | [opcmd.md](opcmd.md) |
+| `internal/opcmd` | Op-command templates: parses `{$1}`/`{$fpath}`/`{$dpath}` placeholders and renders a shell-quoted command line | [opcmd.md](opcmd.md) |
 | `internal/openapi` | Parses OpenAPI v3 YAML (order-preserving), resolves cross-file `$ref`s, renders the spec preview | [openapi.md](openapi.md) |
 | `internal/store` | Per-project persistence on ntee-db: recents, undo snapshots, drafts, session, corpus cache | [store.md](store.md) |
 | `internal/syntax` | Syntax highlighting: tokenizers and themes producing per-line styled segments | [syntax.md](syntax.md) |

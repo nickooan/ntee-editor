@@ -6,7 +6,7 @@ import (
 )
 
 func TestParseAndRender(t *testing.T) {
-	system := map[string]string{SystemFilePath: "/work/my project/main.tf"}
+	system := map[string]string{SystemFilePath: "my project/main.tf", SystemDirPath: "my project"}
 	cases := []struct {
 		name     string
 		source   string
@@ -20,8 +20,9 @@ func TestParseAndRender(t *testing.T) {
 		{"repeated arg", "echo {$1} {$1}", []string{"a"}, "echo a a", 1, nil},
 		{"out of order", "cp {$2} {$1}", []string{"dst", "src"}, "cp src dst", 2, nil},
 		{"spaces quoted", "echo {$1}", []string{"hello world"}, "echo 'hello world'", 1, nil},
-		{"fpath quoted", "go test {$fpath}", nil, "go test '/work/my project/main.tf'", 0, []string{"fpath"}},
-		{"fpath twice", "{$fpath}:{$fpath}", nil, "'/work/my project/main.tf':'/work/my project/main.tf'", 0, []string{"fpath"}},
+		{"fpath quoted", "go test {$fpath}", nil, "go test 'my project/main.tf'", 0, []string{"fpath"}},
+		{"fpath twice", "{$fpath}:{$fpath}", nil, "'my project/main.tf':'my project/main.tf'", 0, []string{"fpath"}},
+		{"dpath and fpath", "cd {$dpath} && wc {$fpath}", nil, "cd 'my project' && wc 'my project/main.tf'", 0, []string{"dpath", "fpath"}},
 		{"literal braces", "awk '{print $1}' {$1}", []string{"f.txt"}, "awk '{print $1}' f.txt", 1, nil},
 		{"adjacent", "{$1}{$2}", []string{"a", "b"}, "ab", 2, nil},
 	}

@@ -324,7 +324,7 @@ Repo-wide content search (Ctrl+G). Everything expensive is async and generation-
 
 #### keys_opmode.go (Ctrl+R)
 
-The operation overlay runs a saved op-command against the open file. It only opens while a file is open, because `{$fpath}` needs one. It moves through three stages (`opModeState.stage`):
+The operation overlay runs a saved op-command against the open file. It only opens while a file is open, because `{$fpath}` and `{$dpath}` need one. `opSystemValues` builds both from the *workspace*-relative path (`activeRepo` joined with `openRel`), not the Ctrl+W repo-relative one, because commands always run from the workspace directory. It moves through three stages (`opModeState.stage`):
 
 - **pick**: fuzzy search over command names. This reuses `fuzzy.Prepare`/`Filter`, and rows show the template dimmed. Enter calls `selectOpCommand`. A template with no `{$n}` runs immediately; otherwise the overlay moves to the args stage.
 - **args**: the user types the arguments. `renderOpCommandLine` splits them with `opcmd.SplitArgs`, adds the system values, and renders the template every frame, so the box shows either the exact `$ command` or the error (`needs 2 args, got 1`). Enter runs it. Esc goes back to the picker with the query kept.
@@ -336,7 +336,7 @@ The operation overlay runs a saved op-command against the open file. It only ope
 
 #### opmode_run.go
 
-- `opRunState.execute` runs `sh -c <command line>` in the current root. stdin is `/dev/null`, so an interactive tool can't hang. stdout and stderr are merged into one pipe. The process runs in its own process group, so cancelling SIGTERMs the shell's children too. `WaitDelay` limits how long a child that ignores the signal, or keeps the pipe open, can block.
+- `opRunState.execute` runs `sh -c <command line>` in the workspace directory (`workspaceRoot`, never the Ctrl+W repo root). stdin is `/dev/null`, so an interactive tool can't hang. stdout and stderr are merged into one pipe. The process runs in its own process group, so cancelling SIGTERMs the shell's children too. `WaitDelay` limits how long a child that ignores the signal, or keeps the pipe open, can block.
 - A reader goroutine sends output chunks into a bounded channel, so a fast producer is slowed down rather than buffered without limit. Sends give up once the run is cancelled, because nobody drains the channel after Esc and a blocked send would leak the goroutine.
 - `next` blocks for one event, then folds whatever else is already queued into the same `opRunMsg` (up to 64 KB). A chatty process therefore costs a few frames, not one frame per write.
 - `opRunOutput` turns raw output into display lines. It strips ANSI escapes and treats CRLF as a newline, including when the CR and LF arrive in different chunks. A bare CR rewinds the current line, so progress bars redraw in place. Only the last ~5,000 lines are kept, trimmed in batches.

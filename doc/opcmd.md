@@ -2,7 +2,7 @@
 
 **Introduction**
 
-The parser behind op-commands: shell command templates the user saves in the inspection dashboard and runs from the Ctrl+R overlay. A template is an ordinary shell command line with placeholders — `{$1}`, `{$2}`, … for the args the user types when running it, and `{$name}` system variables the editor fills in (currently just `{$fpath}`, the absolute path of the open file). This package turns template + values into the exact command line handed to `sh -c`.
+The parser behind op-commands: shell command templates the user saves in the inspection dashboard and runs from the Ctrl+R overlay. A template is an ordinary shell command line with placeholders — `{$1}`, `{$2}`, … for the args the user types when running it, and `{$name}` system variables the editor fills in: `{$fpath}`, the open file's path, and `{$dpath}`, its directory (`.` for a file at the top level). Both are relative to the workspace directory (the directory the editor was opened on), which is also where commands run, so the paths resolve from the command's working directory even after Ctrl+W has rooted the editor inside a nested repo. This package turns template + values into the exact command line handed to `sh -c`.
 
 **Architecture**
 
@@ -10,7 +10,7 @@ The parser behind op-commands: shell command templates the user saves in the ins
 
 Values are quoted at render time, not by the user: `ShellQuote` leaves a plain word alone (`master` stays `master`) and single-quotes anything else (`my file.tf` → `'my file.tf'`, `a;b` → `'a;b'`). Either way the program receives the same argv, so an arg can never split into two words or inject shell syntax by accident.
 
-Adding a system variable means adding its name to `SystemVars` and supplying its value where the app calls `Render` (`renderOpCommandLine` in `internal/app`).
+Adding a system variable means adding its name to `SystemVars` and supplying its value in `opSystemValues` (`internal/app/keys_opmode.go`).
 
 **Functions**
 

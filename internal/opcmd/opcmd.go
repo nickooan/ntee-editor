@@ -10,11 +10,15 @@ import (
 	"strings"
 )
 
-// SystemFilePath is the absolute path of the file open in the editor.
-const SystemFilePath = "fpath"
+// System variables, both relative to the workspace directory (the directory
+// the editor was opened on, where commands run).
+const (
+	SystemFilePath = "fpath" // the open file
+	SystemDirPath  = "dpath" // the open file's directory ("." at the top level)
+)
 
 // SystemVars lists the system variables a template may reference.
-var SystemVars = []string{SystemFilePath}
+var SystemVars = []string{SystemFilePath, SystemDirPath}
 
 type segment struct {
 	literal  string

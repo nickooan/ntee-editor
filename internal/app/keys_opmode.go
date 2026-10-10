@@ -1,6 +1,7 @@
 package app
 
 import (
+	"path"
 	"strconv"
 	"strings"
 
@@ -138,11 +139,21 @@ func (m Model) renderOpCommandLine() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	system := map[string]string{}
-	if m.openFile != nil {
-		system[opcmd.SystemFilePath] = m.openFile.Path
+	return m.opMode.template.Render(args, m.opSystemValues())
+}
+
+// opSystemValues resolves the system variables against the workspace
+// directory, not the Ctrl+W repo root — commands run from the workspace, so
+// the paths must be relative to it.
+func (m Model) opSystemValues() map[string]string {
+	if m.openFile == nil {
+		return map[string]string{}
 	}
-	return m.opMode.template.Render(args, system)
+	workspacePath := path.Join(m.activeRepo, m.openRel)
+	return map[string]string{
+		opcmd.SystemFilePath: workspacePath,
+		opcmd.SystemDirPath:  path.Dir(workspacePath),
+	}
 }
 
 func (m Model) handleOpArgsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -179,7 +190,7 @@ func (m Model) runOpCommand() (tea.Model, tea.Cmd) {
 	}
 	m.opRunGen++
 	m.opMode.stage = opStageRun
-	m.opMode.run = newOpRun(commandLine, m.root)
+	m.opMode.run = newOpRun(commandLine, m.workspaceRoot)
 	return m, startOpRunCmd(m.opRunGen, m.opMode.run)
 }
 

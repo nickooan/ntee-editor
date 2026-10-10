@@ -207,7 +207,8 @@ dashboard's **op-commands** table. It can use these placeholders:
 | Placeholder | Replaced with |
 |---|---|
 | `{$1}`, `{$2}`, … | the 1st, 2nd, … argument you type when running it |
-| `{$fpath}` | the absolute path of the open file |
+| `{$fpath}` | the open file's path, relative to the workspace directory (e.g. `apps/web/main.go`) |
+| `{$dpath}` | the open file's directory, relative to the workspace directory (e.g. `apps/web`; `.` at the top level) |
 
 With a file open, press `Ctrl+R`, type to fuzzy-find a command, and press
 `Enter`. If the template takes arguments, type them (`"a b"` groups words into
@@ -216,7 +217,9 @@ it. Commands without arguments run straight away. Values are shell-quoted only
 when they need it, so `master` is passed as `master` and `my file.tf` as
 `'my file.tf'`. The program gets the same arguments either way.
 
-The command runs with `sh -c` in the project root, and its output (stdout and
+The command runs with `sh -c` in the workspace directory (the one the editor
+was opened on, even after `Ctrl+W` switched to a nested repo), so `{$fpath}` and
+`{$dpath}` resolve from there, and its output (stdout and
 stderr) streams into the overlay as it arrives. When the process exits, the
 footer turns green (`✓ finished`), or red with the exit status if it failed.
 Press `Esc` to close. `Esc` while the command is still running kills it.

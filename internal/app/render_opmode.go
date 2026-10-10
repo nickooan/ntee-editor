@@ -215,7 +215,7 @@ func (m Model) renderInspectOpCommands(width, height int) string {
 	if m.opTable.confirmDelete != "" {
 		rows = append(rows, "", errStyle.Render(truncateRunes("delete "+m.opTable.confirmDelete+"? y/n", width)))
 	}
-	rows = append(rows, "", hintStyle.Render(truncateRunes("value: shell command · {$1} {$2} … user args · {$fpath} open file's path", width)))
+	rows = append(rows, "", hintStyle.Render(truncateRunes("value: shell command · {$1} {$2} … user args · {$fpath} file / {$dpath} its dir (workspace-relative)", width)))
 	return strings.Join(rows, "\n")
 }
 

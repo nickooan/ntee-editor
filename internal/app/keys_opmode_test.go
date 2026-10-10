@@ -43,7 +43,7 @@ func TestOpModeBlockedInBars(t *testing.T) {
 }
 
 func TestOpModePickArgsRunFlow(t *testing.T) {
-	m, root := opModeFixture(t,
+	m, _ := opModeFixture(t,
 		store.OpCommand{Name: "build", Command: "make"},
 		store.OpCommand{Name: "echo-args", Command: "printf '%s\\n' {$1} {$fpath}"},
 	)
@@ -70,7 +70,7 @@ func TestOpModePickArgsRunFlow(t *testing.T) {
 		t.Fatalf("missing args should keep the args stage: stage=%v err=%q", m.opMode.stage, m.errText)
 	}
 	m = runes(m, `"hello world"`)
-	filePath := filepath.Join(root, "main.go")
+	filePath := "main.go" // workspace-relative
 	if commandLine, err := m.renderOpCommandLine(); err != nil || commandLine != "printf '%s\\n' 'hello world' "+filePath {
 		t.Fatalf("rendered command = %q, %v", commandLine, err)
 	}
@@ -114,6 +114,46 @@ func TestOpModeZeroArgCommandRunsImmediately(t *testing.T) {
 	}
 	if lines[2] != root && lines[2] != resolvedRoot {
 		t.Fatalf("command should run in the project root, pwd=%q", lines[2])
+	}
+}
+
+func TestOpModeSystemPathsAreWorkspaceRelative(t *testing.T) {
+	m, root := opModeFixture(t, store.OpCommand{Name: "paths", Command: "printf '%s\\n' {$fpath} {$dpath}"})
+	m = m.openFileAt("lib/util.ts")
+	m = press(t, m, ctrlKey('r'))
+	m = press(t, m, keyPress(tea.KeyEnter))
+	if lines := m.opMode.run.output.displayLines(); !slices.Equal(lines, []string{"lib/util.ts", "lib"}) {
+		t.Fatalf("nested file: %q", lines)
+	}
+	m = key(m, keyPress(tea.KeyEsc))
+	m = m.openFileAt("main.go")
+	m = press(t, m, ctrlKey('r'))
+	m = press(t, m, keyPress(tea.KeyEnter))
+	if lines := m.opMode.run.output.displayLines(); !slices.Equal(lines, []string{"main.go", "."}) {
+		t.Fatalf("top-level file in %s: %q", root, lines)
+	}
+}
+
+func TestOpModeRunsFromWorkspaceInsideRepo(t *testing.T) {
+	commandStore := store.NewMemoryOpCommands()
+	must(t, commandStore.PutOpCommand("", store.OpCommand{Name: "where", Command: "printf '%s\\n' {$fpath} {$dpath}; pwd; test -f {$fpath} && echo found"}))
+	m, root := workspaceModel(t, nil)
+	m = enterRepo(t, m, "web")
+	if m.activeRepo != "apps/web" {
+		t.Fatalf("activeRepo = %q", m.activeRepo)
+	}
+	m = m.WithOpCommandStore(commandStore).openFileAt("main.go")
+	m = press(t, m, ctrlKey('r'))
+	m = press(t, m, keyPress(tea.KeyEnter))
+
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	must(t, err)
+	lines := m.opMode.run.output.displayLines()
+	if len(lines) != 4 || lines[0] != "apps/web/main.go" || lines[1] != "apps/web" || lines[3] != "found" {
+		t.Fatalf("paths should be workspace-relative and resolve from the cwd: %q", lines)
+	}
+	if lines[2] != root && lines[2] != resolvedRoot {
+		t.Fatalf("command should run in the workspace %q, not the repo; pwd=%q", root, lines[2])
 	}
 }
 

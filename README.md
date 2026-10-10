@@ -180,6 +180,9 @@ A dashboard for the editor's own machinery. `Shift+↑/↓` switches the left me
 - **lsp** — every configured language server with its live status:
   **running** (green) · **stopped** (yellow — starts on demand) ·
   **disabled** (gray, with the reason).
+- **system** — version and syntax color style. Press `→` to move into the
+  style list: `↑/↓` browses with a live code preview in that style, `Enter`
+  applies it (saved to your config), `←`/`Esc` goes back.
 - **op-commands** — your saved shell command templates as a key/value table.
   Press `→` to move into the table; there `↑/↓` picks a row, `Enter` edits it
   (or adds a new one on `+ New command`), `Tab` switches between key and value,

@@ -12,6 +12,7 @@ import (
 	"github.com/nickooan/ntee-editor/internal/input"
 	"github.com/nickooan/ntee-editor/internal/store"
 	"github.com/nickooan/ntee-editor/internal/syntax"
+	"github.com/nickooan/ntee-editor/internal/view"
 )
 
 // inspectMenuItems are the left-pane rows of the inspection dashboard, in
@@ -74,6 +75,7 @@ func (m Model) enterInspect() (tea.Model, tea.Cmd) {
 	m.inspectInput, m.inspectCursor = "", 0
 	m.inspectLoading = true
 	m.opTable = opTableState{}
+	m.stylePicker = stylePickerState{}
 	m, loadOpCommands := m.loadOpCommandsCmd()
 	return m, tea.Batch(m.fetchDBInfoCmd(), loadOpCommands)
 }
@@ -87,6 +89,9 @@ func (m Model) handleInspectKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.opTable.focused {
 		return m.handleOpTableKey(msg)
 	}
+	if m.stylePicker.focused {
+		return m.handleStylePickerKey(msg)
+	}
 	switch msg.String() {
 	case "esc":
 		m.mode = m.inspectPrevMode
@@ -99,9 +104,14 @@ func (m Model) handleInspectKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "left":
 		m.inspectCursor = input.MoveCursor(m.inspectInput, m.inspectCursor, -1)
 	case "right":
-		if m.inspectMenu == inspectMenuOpCommands && m.inspectCursor >= len([]rune(m.inspectInput)) {
+		atInputEnd := m.inspectCursor >= len([]rune(m.inspectInput))
+		if m.inspectMenu == inspectMenuOpCommands && atInputEnd {
 			m.opTable.focused = true
 			m.opTable.index = input.Clamp(m.opTable.index, 0, len(m.opCommands))
+			break
+		}
+		if m.inspectMenu == inspectMenuSystem && atInputEnd {
+			m = m.focusStylePicker()
 			break
 		}
 		m.inspectCursor = input.MoveCursor(m.inspectInput, m.inspectCursor, 1)
@@ -120,7 +130,7 @@ func (m Model) handleInspectKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // renderInspectInput draws the @inspection bar input; it drops its cursor while
 // the op-commands table has focus, so only the table shows where typing goes.
 func (m Model) renderInspectInput() string {
-	if m.opTable.focused {
+	if m.opTable.focused || m.stylePicker.focused {
 		return execTextStyle.Render(m.inspectInput)
 	}
 	return renderInputLineStyled(m.inspectInput, m.inspectCursor, execTextStyle)
@@ -140,6 +150,10 @@ func (m Model) inspectHint() string {
 		return "↑/↓ row · Enter edit · d delete · ←/Esc back"
 	case m.inspectMenu == inspectMenuOpCommands:
 		return "→ edit op-commands · Shift+↑/↓ pane · Esc back"
+	case m.stylePicker.focused:
+		return "↑/↓ style · Enter apply · ←/Esc back"
+	case m.inspectMenu == inspectMenuSystem:
+		return "→ choose a color style · syscolor <style> · Shift+↑/↓ pane · Esc back"
 	}
 	return "db compact|relieve · lsp enable|disable <lang|all> · syscolor <style> · Shift+↑/↓ pane · Esc back"
 }
@@ -262,17 +276,71 @@ func (m Model) inspectSyscolorCommand(name string) (tea.Model, tea.Cmd) {
 		m.errText = "usage: syscolor <" + strings.Join(syntaxStyles, "|") + ">"
 		return m, nil
 	}
+	m = m.applySyntaxStyle(name)
+	m.inspectMenu = inspectMenuSystem
+	if m.errText == "" {
+		m.inspectInput, m.inspectCursor = "", 0
+	}
+	return m, nil
+}
+
+// applySyntaxStyle persists the grammar color style first (nothing is
+// half-applied when the config write fails), then switches it live.
+func (m Model) applySyntaxStyle(name string) Model {
 	if _, err := config.SetThemeSyntax(name); err != nil {
 		m.errText = "config write failed: " + err.Error()
-		return m, nil
+		return m
 	}
 	syntax.SetStyle(name) // also resets the syntax package's entry cache
 	// Theme is an unshared value field — safe to mutate, unlike the Languages
 	// map (see inspectLSPCommand).
 	m.cfg.Theme.Syntax = name
 	m = m.invalidateHighlightCaches()
-	m.inspectMenu = inspectMenuSystem
-	m.inspectInput, m.inspectCursor = "", 0
 	m.notice = "syntax style: " + name + " (config updated)"
+	return m
+}
+
+// stylePickerState is the system panel's color-style list once → focuses it:
+// index is the highlighted style and preview its sample, highlighted in that
+// style without touching the active one.
+type stylePickerState struct {
+	focused bool
+	index   int
+	preview [][]view.HighlightSegment
+}
+
+// stylePreviewSample is the snippet the picker colors: comment, keywords, a
+// function, a type, a string, and a number.
+const stylePreviewSample = `// greet returns a friendly message.
+func greet(name string) string {
+    return fmt.Sprintf("hello, %s #%d", name, 42)
+}`
+
+func (m Model) focusStylePicker() Model {
+	m.stylePicker.focused = true
+	m.stylePicker.index = max(0, slices.Index(syntaxStyles, m.cfg.Theme.Syntax))
+	return m.refreshStylePreview()
+}
+
+// refreshStylePreview re-highlights the sample in the highlighted style. It
+// runs only when the selection moves, and the sample is a few lines.
+func (m Model) refreshStylePreview() Model {
+	m.stylePicker.preview = syntax.HighlightLinesWithStyle("sample.go", stylePreviewSample, syntaxStyles[m.stylePicker.index])
+	return m
+}
+
+func (m Model) handleStylePickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "up":
+		m.stylePicker.index = input.Clamp(m.stylePicker.index-1, 0, len(syntaxStyles)-1)
+		m = m.refreshStylePreview()
+	case "down":
+		m.stylePicker.index = input.Clamp(m.stylePicker.index+1, 0, len(syntaxStyles)-1)
+		m = m.refreshStylePreview()
+	case "enter":
+		m = m.applySyntaxStyle(syntaxStyles[m.stylePicker.index])
+	case "left", "esc":
+		m.stylePicker.focused = false
+	}
 	return m, nil
 }

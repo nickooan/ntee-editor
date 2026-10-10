@@ -11,18 +11,11 @@ import (
 	"github.com/nickooan/ntee-editor/internal/opcmd"
 )
 
-var colBlue = lipgloss.Color("#83a598")
-
 var (
-	opBorderStyle    = lipgloss.NewStyle().Foreground(colGutter).Background(colBg)
-	opTitleStyle     = lipgloss.NewStyle().Bold(true).Foreground(colAqua).Background(colBg)
-	opSubtitleStyle  = lipgloss.NewStyle().Foreground(colComment).Background(colBg)
 	opFocusHintStyle = lipgloss.NewStyle().Foreground(colYellow).Background(colBg)
-	opHeaderStyle    = lipgloss.NewStyle().Bold(true).Foreground(colComment).Background(colBg)
 	opButtonStyle    = lipgloss.NewStyle().Bold(true).Foreground(colGreen).Background(colBg)
 	opButtonSelStyle = lipgloss.NewStyle().Bold(true).Foreground(colBg).Background(colGreen)
 	opDeleteStyle    = lipgloss.NewStyle().Bold(true).Foreground(colRed).Background(colBg)
-	opRowRuleStyle   = lipgloss.NewStyle().Foreground(colSelection).Background(colBg)
 )
 
 // opRowStyles is one row's palette: every run carries the row's background,
@@ -156,14 +149,10 @@ func renderOpCell(text string, width, cursor int, asTemplate bool, styles opRowS
 	return b.String()
 }
 
-// opTableLayout holds the column widths. A row is
-// "│ m key… │ value… │": the key cell spans keyWidth+4 (marker and spacing),
-// the value cell valueWidth+2.
-type opTableLayout struct {
-	keyWidth, valueWidth int
-}
-
-func (m Model) newOpTableLayout(width int) opTableLayout {
+// newOpTableLayout sizes the op-commands table: keys fit the longest name (or
+// the key being typed), capped at a third of the width; a marker gutter shows
+// the selected (▸) or edited (✎) row.
+func (m Model) newOpTableLayout(width int) panelTable {
 	keyWidth := len("KEY")
 	for _, command := range m.opCommands {
 		keyWidth = max(keyWidth, len([]rune(command.Name)))
@@ -171,68 +160,29 @@ func (m Model) newOpTableLayout(width int) opTableLayout {
 	if m.opTable.editing {
 		keyWidth = max(keyWidth, len([]rune(m.opTable.key))+1)
 	}
-	keyWidth = min(keyWidth, max(6, width/3))
-	return opTableLayout{keyWidth: keyWidth, valueWidth: max(4, width-keyWidth-9)}
+	return newPanelTable(width, min(keyWidth, max(6, width/3)), true)
 }
-
-func (layout opTableLayout) innerWidth() int { return layout.keyWidth + layout.valueWidth + 7 }
-
-// rowRule separates two command rows: a quieter line than the table's own
-// borders, joined to them at the edges.
-func (layout opTableLayout) rowRule() string {
-	return opBorderStyle.Render("├") +
-		opRowRuleStyle.Render(strings.Repeat("─", layout.keyWidth+4)+"┼"+strings.Repeat("─", layout.valueWidth+2)) +
-		opBorderStyle.Render("┤")
-}
-
-func (layout opTableLayout) border(left, middle, right string) string {
-	line := left + strings.Repeat("─", layout.keyWidth+4)
-	if middle != "" {
-		line += middle + strings.Repeat("─", layout.valueWidth+2)
-	} else {
-		line += strings.Repeat("─", layout.valueWidth+3)
-	}
-	return opBorderStyle.Render(line + right)
-}
-
-// row joins a marker, key cell, and value cell (each already exactly sized).
-func (layout opTableLayout) row(marker, keyCell, valueCell string, styles opRowStyles) string {
-	bar := opBorderStyle.Render("│")
-	return bar + styles.text.Render(" ") + styles.marker.Render(marker) + styles.text.Render(" ") + keyCell +
-		styles.text.Render(" ") + bar + styles.text.Render(" ") + valueCell + styles.text.Render(" ") + bar
-}
-
-// spanning is a full-width row ignoring the column split; content is already
-// rendered and exactly contentWidth() wide.
-func (layout opTableLayout) spanning(content string) string {
-	bar := opBorderStyle.Render("│")
-	return bar + opRowNormal.text.Render(" ") + content + opRowNormal.text.Render(" ") + bar
-}
-
-func (layout opTableLayout) contentWidth() int { return layout.innerWidth() - 2 }
 
 // renderInspectOpCommands draws the op-commands panel: a bordered key/command
 // table with colored placeholders, an inline editor with placeholder
 // completion, a "+ New command" button row, and a placeholder legend.
 func (m Model) renderInspectOpCommands(width, height int) string {
+	width = panelInnerWidth(width)
 	layout := m.newOpTableLayout(width)
 	contentWidth := layout.contentWidth()
 
-	title := opTitleStyle.Render("op-commands")
+	title := panelTitleStyle.Render("op-commands")
 	if !m.opTable.focused {
-		title += opSubtitleStyle.Render("  ·  ") + opFocusHintStyle.Render("press → to edit")
+		title += panelSubtitleStyle.Render("  ·  ") + opFocusHintStyle.Render("press → to edit")
 	}
-	rows := []string{
-		title,
-		opSubtitleStyle.Render(truncateRunes("Shell commands shared by every project — run one on the open file with Ctrl+R.", width)),
-	}
+	rows := panelHeading("", "Shell commands shared by every project — run one on the open file with Ctrl+R.", width)
+	rows[0] = title
 	if m.opCommandsErr != nil {
 		rows = append(rows, opDeleteStyle.Render(truncateRunes("load failed: "+m.opCommandsErr.Error(), width)))
 	}
 	rows = append(rows, "",
 		layout.border("╭", "┬", "╮"),
-		layout.row(" ", opHeaderStyle.Render(padTo("KEY", layout.keyWidth)),
-			opHeaderStyle.Render(padTo("COMMAND", layout.valueWidth)), opRowNormal),
+		layout.header("KEY", "COMMAND"),
 	)
 
 	body, anchor, anchorSpan := m.opTableBody(layout)
@@ -260,21 +210,17 @@ func (m Model) renderInspectOpCommands(width, height int) string {
 			"“"+strings.TrimSpace(m.opTable.key)+"” already exists — choose a different key", width)))
 	}
 	if name := m.opTable.confirmDelete; name != "" {
-		rows = append(rows, "", opDeleteStyle.Render("Delete “"+name+"”?")+opSubtitleStyle.Render("  y delete · n keep"))
+		rows = append(rows, "", opDeleteStyle.Render("Delete “"+name+"”?")+panelSubtitleStyle.Render("  y delete · n keep"))
 	}
 	rows = append(rows, "")
 	rows = append(rows, m.opLegend(width)...)
-	margin := opRowNormal.text.Render(" ")
-	for index := range rows {
-		rows[index] = margin + rows[index]
-	}
-	return strings.Join(rows, "\n")
+	return panelIndent(rows)
 }
 
 // opTableBody renders the command rows (plus the edit row and its suggestion
 // dropdown). anchor is the body index of the selected row and anchorSpan how
 // many rows (row + dropdown) must stay visible below it.
-func (m Model) opTableBody(layout opTableLayout) (body []string, anchor, anchorSpan int) {
+func (m Model) opTableBody(layout panelTable) (body []string, anchor, anchorSpan int) {
 	anchorSpan = 1
 	editRow := func() []string {
 		rows := []string{m.renderOpEditRow(layout)}
@@ -299,7 +245,7 @@ func (m Model) opTableBody(layout opTableLayout) (body []string, anchor, anchorS
 		}
 		body = append(body, layout.row(marker,
 			renderOpCell(command.Name, layout.keyWidth, -1, false, styles),
-			renderOpCell(command.Command, layout.valueWidth, -1, true, styles), styles))
+			renderOpCell(command.Command, layout.valueWidth, -1, true, styles), styles.text, styles.marker))
 	}
 	if m.opTable.editing && m.opTable.index >= len(m.opCommands) {
 		if len(body) > 0 {
@@ -313,7 +259,7 @@ func (m Model) opTableBody(layout opTableLayout) (body []string, anchor, anchorS
 	return body, anchor, anchorSpan
 }
 
-func (m Model) renderOpEditRow(layout opTableLayout) string {
+func (m Model) renderOpEditRow(layout panelTable) string {
 	keyStyles, valueStyles := opRowInput, opRowEditing
 	keyCursor, valueCursor := m.opTable.cursor, -1
 	if m.opTable.field == opFieldValue {
@@ -323,7 +269,7 @@ func (m Model) renderOpEditRow(layout opTableLayout) string {
 	if m.opEditDuplicatesName() {
 		keyStyles.key = keyStyles.key.Foreground(colRed)
 	}
-	bar := opBorderStyle.Render("│")
+	bar := panelBorderStyle.Render("│")
 	gap := opRowEditing.text.Render(" ")
 	return bar + gap + opRowEditing.key.Foreground(colYellow).Render("✎") + gap +
 		renderOpCell(m.opTable.key, layout.keyWidth, keyCursor, false, keyStyles) + gap + bar + gap +
@@ -332,7 +278,7 @@ func (m Model) renderOpEditRow(layout opTableLayout) string {
 
 // renderOpSuggestionRows draws the placeholder completion menu as a dropdown
 // in the value column, directly under the edit row.
-func (m Model) renderOpSuggestionRows(layout opTableLayout) []string {
+func (m Model) renderOpSuggestionRows(layout panelTable) []string {
 	_, candidates := m.opSuggestions()
 	if len(candidates) == 0 {
 		return nil
@@ -355,7 +301,8 @@ func (m Model) renderOpSuggestionRows(layout opTableLayout) []string {
 			item += detailStyle.Render(padTo(truncateRunes(candidate.Detail, rest), rest))
 		}
 		valueCell := item + opRowNormal.text.Render(strings.Repeat(" ", max(0, layout.valueWidth-menuWidth)))
-		rows = append(rows, layout.row(" ", opRowNormal.text.Render(strings.Repeat(" ", layout.keyWidth)), valueCell, opRowNormal))
+		rows = append(rows, layout.row(" ", opRowNormal.text.Render(strings.Repeat(" ", layout.keyWidth)), valueCell,
+			opRowNormal.text, opRowNormal.marker))
 	}
 	return rows
 }
@@ -365,7 +312,7 @@ func (m Model) opTableEmptyLines(width int) []string {
 		return style.Render(padTo(truncateRunes(text, width), width))
 	}
 	if m.opCommandsLoading {
-		return []string{line(opSubtitleStyle, "Loading op-commands…")}
+		return []string{line(panelSubtitleStyle, "Loading op-commands…")}
 	}
 	example := opRowNormal.key.Render("deploy") + opRowNormal.text.Render("  →  kubectl apply -f ") +
 		opRowNormal.system.Render("{$fpath}") + opRowNormal.text.Render(" -n ") + opRowNormal.arg.Render("{$1}")
@@ -377,9 +324,9 @@ func (m Model) opTableEmptyLines(width int) []string {
 	}
 	return []string{
 		line(opRowNormal.text, "No op-commands yet."),
-		line(opSubtitleStyle, "Save a shell command under a short key, for example:"),
+		line(panelSubtitleStyle, "Save a shell command under a short key, for example:"),
 		example,
-		line(opSubtitleStyle, "Press → then Enter on “+ New command” below to add one."),
+		line(panelSubtitleStyle, "Press → then Enter on “+ New command” below to add one."),
 	}
 }
 
@@ -395,21 +342,17 @@ func (m Model) opNewButton(width int) string {
 		hint = "  Enter to add"
 	}
 	rest := max(0, width-len([]rune(label)))
-	return button + opSubtitleStyle.Render(padTo(truncateRunes(hint, rest), rest))
+	return button + panelSubtitleStyle.Render(padTo(truncateRunes(hint, rest), rest))
 }
 
 func (m Model) opLegend(width int) []string {
-	entry := func(token string, style lipgloss.Style, detail string) string {
-		return opRowNormal.text.Render("  ") + style.Render(padTo(token, 14)) + opSubtitleStyle.Render(truncateRunes(detail, max(0, width-16)))
-	}
-	legend := []string{
-		opHeaderStyle.Render("Placeholders"),
-		entry("{$1} {$2} …", opRowNormal.arg, "arguments you type when running the command"),
-		entry("{$fpath}", opRowNormal.system, opcmd.SystemVarDetails[opcmd.SystemFilePath]),
-		entry("{$dpath}", opRowNormal.system, opcmd.SystemVarDetails[opcmd.SystemDirPath]),
-	}
+	legend := panelLegend("Placeholders", "", []panelLegendEntry{
+		{"{$1} {$2} …", opRowNormal.arg, "arguments you type when running the command"},
+		{"{$fpath}", opRowNormal.system, opcmd.SystemVarDetails[opcmd.SystemFilePath]},
+		{"{$dpath}", opRowNormal.system, opcmd.SystemVarDetails[opcmd.SystemDirPath]},
+	}, width)
 	if m.opTable.editing {
-		legend = append(legend, opSubtitleStyle.Render(truncateRunes("  type { or $ in the command for suggestions · ↑/↓ choose · Tab insert", width)))
+		legend = append(legend, panelSubtitleStyle.Render(truncateRunes("  type { or $ in the command for suggestions · ↑/↓ choose · Tab insert", width)))
 	}
 	return legend
 }

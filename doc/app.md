@@ -189,7 +189,13 @@ Every opened file becomes a tab; the list, active index, and per-tab cursors per
 - `inspectLSPCommand` persists the config change *first* (nothing half-applied on a failed write) and then applies it live through the registry — `m.cfg` itself is never mutated because its Languages map is shared with server goroutines.
 - `inspectSyscolorCommand` validates against the curated style list, persists, applies via `syntax.SetStyle`, and invalidates every highlight cache so the new colors show immediately.
 
-- `handleInspectKey` hands every key to the op-commands table while it has focus. On the op-commands section, `→` at the end of the bar input moves focus into the table.
+- `handleInspectKey` hands every key to whichever right-hand panel has focus: the op-commands table or the style picker. `→` at the end of the bar input moves focus into the panel on the op-commands and system sections.
+- The style picker (`stylePickerState`) is the system panel's colour-style list:
+  - `focusStylePicker` starts on the current style.
+  - In `handleStylePickerKey`, ↑/↓ browse and Enter calls `applySyntaxStyle`; focus stays, so you can keep trying styles. ←/Esc go back to the menu.
+  - `refreshStylePreview` re-highlights a 4-line Go sample (`stylePreviewSample`) in the highlighted style with `syntax.HighlightLinesWithStyle`. It runs only when the selection moves, and never changes the active style.
+  - `applySyntaxStyle` is shared with `syscolor`: it persists first, then calls `syntax.SetStyle`, sets `m.cfg.Theme.Syntax` and invalidates the highlight caches.
+  - A sidebar click on another section releases the picker.
 
 *Plus small helpers: `inspectDBCommand`, `knownLanguages`, `inspectHint` (the status-bar hint for the current focus) — bar editing and validation.*
 
@@ -447,9 +453,35 @@ The left pane is one list. File tree, inspection menu, and preview outline each 
 
 #### render_inspect.go
 
-- `renderInspectMain` routes to the selected panel: `renderInspectDB` (record counts, live/dead log bytes, blob usage, generation warnings), `renderInspectLSP` (per-language running/stopped/disabled status from the registry), `renderInspectSystem` (version and syntax style), `renderInspectOpCommands` (render_opcommands.go).
+- `renderInspectMain` routes to the selected panel. Each one is an `infoPanel` (render_panel.go) with the same layout as op-commands:
+  - `renderInspectDB`: records; main log and blobs, each as a size, a 10-cell live/dead usage bar, and the live/waste split (`usageSummary`); generations, with a red warning when relieve is needed. Loading and the in-memory fallback replace the rows with one explanatory line.
+  - `renderInspectLSP`: one row per language from the registry, showing `● running` (green), `○ stopped` (yellow) or `⊘ disabled — reason` (dim). When LSP is off globally, a single line explains why.
+  - `renderInspectSystem`: version, the current colour style, and the available styles, one per line. The current style is marked `● … current`. While the picker has focus, the highlighted style is a full-width `▸` selection bar, and a `preview` row shows the sample in that style. Unfocused, the title invites `press → to choose a style`.
+- Each `renderInspect*` gets the pane height and passes it to `infoPanel.render`, so a panel never grows past the terminal.
+  - `renderInspectOpCommands` lives in render_opcommands.go.
+- The waste share in `usageSummary` turns yellow at 30% and red at 60%, the point where `db compact` or `db relieve` is worth running.
 
-*Plus small helpers: `humanBytes`, `percent` — number formatting. The left menu is `inspectSidebarList` in sidebarlist.go.*
+*Plus small helpers: `humanBytes`, `percent`/`percentValue` — number formatting. The left menu is `inspectSidebarList` in sidebarlist.go.*
+
+#### render_panel.go
+
+The shared panel kit, so every inspect panel reads as one design:
+- **Heading**: `panelHeading`, a title and a word-wrapped subtitle.
+- **Table**: a rounded two-column table (`panelTable`) with a header row and soft `rowRule` separators between rows. A table can also have a marker column for `▸`/`✎`; only op-commands uses it.
+- **Legend**: `panelLegend` lists commands or placeholders. Descriptions wrap under themselves, so the token column stays clear.
+
+What it provides:
+- `panelTable` holds the column widths and draws the `border`, `header`, `row`, `rowRule` and `spanning` lines. `newPanelTable` gives the value column whatever width the key column and overhead leave.
+- `infoPanel.render(width, height)` builds a read-only panel from a description:
+  - Title (plus an optional yellow `titleHint`), subtitle and headers.
+  - Either `panelRow`s or a spanning `message`.
+  - Notes and a Commands legend.
+- A row's value is a list of pre-styled pieces. `wrapStyled` lays them side by side and moves them onto continuation lines when the value column is narrow. `stacked` puts one piece per line, and `selectedPiece` (1-based) pads that line in the selection colour (`panelCellFill`).
+- When the panel is taller than `height`, it drops the least useful parts in order: the legend first (the status bar shows the keys too), then the spacing, then the subtitle. Anything still over is clipped.
+- `panelCell` fits already-styled text to an exact width. It cuts with `ansi.Truncate` plus `…` and pads in the panel background, so a value can mix colours without breaking the table edge.
+- `panelIndent`/`panelInnerWidth` add a one-column left margin, kept inside the width the panel was given.
+
+*Plus small helpers: `wrapWords` (plain word wrap with hard breaks for overlong words), `wrapStyled`, `overhead`/`keySpan`/`contentWidth`.*
 
 #### render_opmode.go
 
@@ -465,7 +497,7 @@ The op-commands panel in the inspect dashboard.
 
 - `renderInspectOpCommands` draws the panel:
   - A title. The `press → to edit` hint shows until the table has focus.
-  - A rounded-border table with a KEY and a COMMAND column (`opTableLayout`). The key column fits the longest name, capped at a third of the width.
+  - A rounded-border table with a KEY and a COMMAND column: a `panelTable` (render_panel.go) with the marker column, sized by `newOpTableLayout`. The key column fits the longest name, capped at a third of the width.
   - When there are no commands, the table body explains what op-commands are and shows an example.
   - A `+ New command` button row, which becomes a solid green pill when selected.
   - A placeholder legend.
@@ -475,7 +507,7 @@ The op-commands panel in the inspect dashboard.
 - `renderOpCell` renders a cell at an exact width. Input cells scroll horizontally to keep the cursor visible; other cells end in `…` when cut. `opTokenClasses` colours placeholders per rune using `opcmd.Parse`: `{$n}` arguments orange, system variables blue, broken or half-typed placeholders red.
 - `renderOpSuggestionRows` draws the completion menu as a dropdown in the COMMAND column under the edit row, styled like the LSP completion popup.
 
-*Plus small helpers: `opTableBody`, `renderOpEditRow`, `opTableEmptyLines`, `opNewButton`, `opLegend`, and the layout's `border`/`row`/`spanning`. The inspect bar also hides its own cursor while the table has focus (`renderInspectInput`), so only one cursor is ever visible.*
+*Plus small helpers: `opTableBody`, `renderOpEditRow`, `opTableEmptyLines`, `opNewButton`, `opLegend`, and the `panelLegend`-based `opLegend`. The inspect bar also hides its own cursor while the table has focus (`renderInspectInput`), so only one cursor is ever visible.*
 
 ### Mouse
 

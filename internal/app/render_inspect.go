@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	"charm.land/lipgloss/v2"
+
 	"github.com/nickooan/ntee-editor/internal/lsp"
 	"github.com/nickooan/ntee-editor/internal/store"
 )
@@ -13,111 +15,182 @@ import (
 func (m Model) renderInspectMain(width, height int) string {
 	switch m.inspectMenu {
 	case inspectMenuLSP:
-		return m.renderInspectLSP(width)
+		return m.renderInspectLSP(width, height)
 	case inspectMenuSystem:
-		return m.renderInspectSystem(width)
+		return m.renderInspectSystem(width, height)
 	case inspectMenuOpCommands:
 		return m.renderInspectOpCommands(width, height)
 	default:
-		return m.renderInspectDB(width)
+		return m.renderInspectDB(width, height)
 	}
 }
 
-func (m Model) renderInspectSystem(width int) string {
-	title := dirStyle.Render(truncateRunes("system", width))
-	const labelW = len("color style") + 2
-	row := func(label, value string) string {
-		return baseStyle.Render(padTo(label, labelW) + value)
+var (
+	panelGoodStyle    = lipgloss.NewStyle().Foreground(colGreen).Background(colBg)
+	panelWarnStyle    = lipgloss.NewStyle().Foreground(colYellow).Background(colBg)
+	panelBadStyle     = lipgloss.NewStyle().Foreground(colRed).Background(colBg)
+	panelDimStyle     = lipgloss.NewStyle().Foreground(colComment).Background(colBg)
+	panelStrongStyle  = lipgloss.NewStyle().Bold(true).Foreground(colFg).Background(colBg)
+	panelCurrentStyle = lipgloss.NewStyle().Bold(true).Foreground(colYellow).Background(colBg)
+	// The highlighted line of a focused list, on the selection bar.
+	panelPickedStyle     = lipgloss.NewStyle().Bold(true).Foreground(colFg).Background(colSelection)
+	panelPickedNoteStyle = lipgloss.NewStyle().Foreground(colYellow).Background(colSelection)
+)
+
+const usageBarCells = 10
+
+func (m Model) renderInspectSystem(width, height int) string {
+	picker := m.stylePicker
+	available := panelRow{label: "available", stacked: true}
+	for index, name := range syntaxStyles {
+		current := name == m.cfg.Theme.Syntax
+		highlighted := picker.focused && index == picker.index
+		marker, nameStyle, noteStyle := "  ", panelDimStyle, panelDimStyle
+		switch {
+		case highlighted:
+			marker, nameStyle, noteStyle = "▸ ", panelPickedStyle, panelPickedNoteStyle
+			available.selectedPiece = index + 1
+		case current:
+			nameStyle = panelCurrentStyle
+		}
+		if current && !highlighted {
+			marker = "● "
+		}
+		piece := nameStyle.Render(marker + name)
+		if current {
+			piece += noteStyle.Render("  current")
+		}
+		available.pieces = append(available.pieces, piece)
 	}
-	rows := []string{
-		title,
-		"",
-		row("version", versionTag()),
-		row("color style", m.cfg.Theme.Syntax),
-		"",
-		row("available", strings.Join(syntaxStyles, ", ")),
-		"",
-		hintStyle.Render(truncateRunes("syscolor <name> switches the grammar colors (chrome stays gruvbox)", width)),
+	panel := infoPanel{
+		title:       "system",
+		subtitle:    "Editor build and appearance.",
+		keyHeader:   "SETTING",
+		valueHeader: "VALUE",
+		rows: []panelRow{
+			{label: "version", pieces: []string{panelStrongStyle.Render(versionTag())}},
+			{label: "color style", pieces: []string{panelCurrentStyle.Render(m.cfg.Theme.Syntax)}},
+			available,
+		},
+		legend: []panelLegendEntry{
+			{"syscolor <name>", panelCommandStyle, "switch the grammar colors (chrome stays gruvbox)"},
+		},
 	}
-	return strings.Join(rows, "\n")
+	if picker.focused {
+		preview := panelRow{label: "preview", stacked: true}
+		for index, line := range strings.Split(stylePreviewSample, "\n") {
+			piece := panelLabelStyle.Render(line)
+			if index < len(picker.preview) && picker.preview[index] != nil {
+				piece = renderSegments(picker.preview[index], 0, len([]rune(line)))
+			}
+			preview.pieces = append(preview.pieces, piece)
+		}
+		panel.rows = append(panel.rows, preview)
+	} else {
+		panel.titleHint = "press → to choose a style"
+	}
+	return panel.render(width, height)
 }
 
-func (m Model) renderInspectDB(width int) string {
-	title := dirStyle.Render(truncateRunes("ntee-db store", width))
+func (m Model) renderInspectDB(width, height int) string {
+	panel := infoPanel{
+		title:       "ntee-db",
+		subtitle:    "This project's store: recent files, undo history, drafts and session.",
+		keyHeader:   "METRIC",
+		valueHeader: "VALUE",
+		legend: []panelLegendEntry{
+			{"db compact", panelCommandStyle, "drop dead records from the main log"},
+			{"db relieve", panelCommandStyle, "also rewrite blobs, releasing orphaned ones"},
+		},
+	}
 	switch {
 	case m.inspectLoading:
-		return title + "\n\n" + baseStyle.Render("gathering store statistics…")
+		panel.message = []string{"Gathering store statistics…"}
+		return panel.render(width, height)
 	case errors.Is(m.inspectInfoErr, store.ErrNoStats):
-		return title + "\n\n" + ignoredFileStyle.Render("in-memory store (persistence disabled) — no statistics")
-	}
-
-	// Labels form an aligned column: padded to the longest label plus a gap.
-	const labelW = len("generations") + 2
-	row := func(label, value string) string {
-		return baseStyle.Render(padTo(label, labelW) + value)
+		panel.message = []string{"In-memory store (persistence disabled) — no statistics."}
+		return panel.render(width, height)
 	}
 
 	info := m.inspectInfo
-	dead := info.MainBytes - info.LiveBytes
-	rows := []string{
-		title,
-		"",
-		row("records", fmt.Sprintf("%d", info.Records)),
-		row("main log", fmt.Sprintf("%s  (%s live, %s dead — %s)",
-			humanBytes(info.MainBytes), humanBytes(info.LiveBytes), humanBytes(dead),
-			percent(dead, info.MainBytes))),
-	}
+	blobs := usageSummary(info.BlobTotalBytes, info.BlobLiveBytes, "orphaned")
 	if m.inspectInfoErr != nil {
-		rows = append(rows, errStyle.Render(truncateRunes("blob scan failed: "+m.inspectInfoErr.Error(), width)))
-	} else {
-		rows = append(rows,
-			row("blobs", fmt.Sprintf("%s  (%s live, %s orphaned — %s)",
-				humanBytes(info.BlobTotalBytes), humanBytes(info.BlobLiveBytes),
-				humanBytes(info.BlobOrphaned), percent(info.BlobOrphaned, info.BlobTotalBytes))))
-		gen := row("generations", fmt.Sprintf("%d", info.Generations))
-		if info.Generations > 1 {
-			gen += errStyle.Render("  (stray file — run db relieve)")
-		}
-		rows = append(rows, gen)
+		blobs = []string{panelBadStyle.Render("blob scan failed: " + m.inspectInfoErr.Error())}
+	}
+	generations := panelStrongStyle.Render(fmt.Sprintf("%d", info.Generations))
+	if info.Generations > 1 {
+		generations += panelBadStyle.Render("  stray file — run db relieve")
+	}
+	panel.rows = []panelRow{
+		{label: "records", pieces: []string{panelStrongStyle.Render(fmt.Sprintf("%d", info.Records))}},
+		{label: "main log", pieces: usageSummary(info.MainBytes, info.LiveBytes, "dead")},
+		{label: "blobs", pieces: blobs},
+		{label: "generations", pieces: []string{generations}},
 	}
 	if m.inspectBusy != "" {
-		rows = append(rows, "", editingStyle.Render("db "+m.inspectBusy+" running…"))
+		panel.after = []string{panelWarnStyle.Render("db " + m.inspectBusy + " running…")}
 	}
-	rows = append(rows, "", hintStyle.Render("db compact drops dead records · db relieve also rewrites blobs"))
-	return strings.Join(rows, "\n")
+	return panel.render(width, height)
 }
 
-func (m Model) renderInspectLSP(width int) string {
-	title := dirStyle.Render(truncateRunes("language servers", width))
-	sts := m.lsp.Statuses()
-	if len(sts) == 0 {
-		return title + "\n\n" + ignoredFileStyle.Render(truncateRunes(
-			"lsp disabled globally (lsp.enabled: false) — `lsp enable all` writes the config; restart ntee to apply", width))
+// usageSummary is "<total>  ██████░░░░" and "<live> live · <waste>
+// <wasteLabel> (<pct>)" as two row pieces: the bar shows the live share, and
+// the waste percentage turns yellow at 30% and red at 60% — the point where
+// compacting pays off.
+func usageSummary(total, live int64, wasteLabel string) []string {
+	waste := max(0, total-live)
+	filled := 0
+	if total > 0 {
+		filled = int((live*usageBarCells + total/2) / total)
 	}
+	wasteStyle := panelDimStyle
+	switch share := percentValue(waste, total); {
+	case share >= 60:
+		wasteStyle = panelBadStyle
+	case share >= 30:
+		wasteStyle = panelWarnStyle
+	}
+	return []string{
+		panelStrongStyle.Render(padTo(humanBytes(total), 8)) +
+			panelGoodStyle.Render(strings.Repeat("█", filled)) +
+			panelDimStyle.Render(strings.Repeat("░", usageBarCells-filled)),
+		panelGoodStyle.Render(humanBytes(live)+" live") + panelDimStyle.Render(" · ") +
+			wasteStyle.Render(fmt.Sprintf("%s %s (%s)", humanBytes(waste), wasteLabel, percent(waste, total))),
+	}
+}
 
-	nameW := 0
-	for _, st := range sts {
-		nameW = max(nameW, len(st.Lang))
+func (m Model) renderInspectLSP(width, height int) string {
+	panel := infoPanel{
+		title:       "lsp",
+		subtitle:    "Language servers start on demand when a matching file opens.",
+		keyHeader:   "LANGUAGE",
+		valueHeader: "STATUS",
+		legend: []panelLegendEntry{
+			{"lsp enable <lang|all>", panelCommandStyle, "start now and persist enable: true to your config"},
+			{"lsp disable <lang|all>", panelCommandStyle, "stop and persist enable: false"},
+		},
 	}
-	rows := []string{title, ""}
-	for _, st := range sts {
-		name := fileStyle.Render(padTo(st.Lang, nameW+2))
+	statuses := m.lsp.Statuses()
+	if len(statuses) == 0 {
+		panel.message = []string{"LSP is disabled globally (lsp.enabled: false). `lsp enable all` writes the config; restart ntee to apply."}
+		return panel.render(width, height)
+	}
+	for _, status := range statuses {
 		var state string
-		switch st.State {
+		switch status.State {
 		case lsp.LangRunning:
-			state = openFileStyle.Render("running")
+			state = panelGoodStyle.Render("● running")
 		case lsp.LangStopped:
-			state = uncommittedFileStyle.Render("stopped")
+			state = panelWarnStyle.Render("○ stopped")
 		default:
-			state = ignoredFileStyle.Render("disabled")
-			if st.Reason != "" {
-				state += ignoredFileStyle.Render(truncateRunes(" — "+st.Reason, max(0, width-nameW-12)))
+			state = panelDimStyle.Render("⊘ disabled")
+			if status.Reason != "" {
+				state += panelDimStyle.Render(" — " + status.Reason)
 			}
 		}
-		rows = append(rows, name+state)
+		panel.rows = append(panel.rows, panelRow{label: status.Lang, pieces: []string{state}})
 	}
-	rows = append(rows, "", hintStyle.Render("stopped = starts on demand when a matching file opens"))
-	return strings.Join(rows, "\n")
+	return panel.render(width, height)
 }
 
 // humanBytes formats a byte count for the inspection pane (B/KB/MB/GB).
@@ -136,8 +209,12 @@ func humanBytes(n int64) string {
 
 // percent renders part/total as "N%", guarding the empty store.
 func percent(part, total int64) string {
+	return fmt.Sprintf("%d%%", percentValue(part, total))
+}
+
+func percentValue(part, total int64) int64 {
 	if total <= 0 {
-		return "0%"
+		return 0
 	}
-	return fmt.Sprintf("%d%%", part*100/total)
+	return part * 100 / total
 }

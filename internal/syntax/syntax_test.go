@@ -318,3 +318,33 @@ func TestUnknownStyleFallsBackToGruvbox(t *testing.T) {
 	}
 	SetStyle("gruvbox")
 }
+
+// keywordColor finds the color HighlightLines-style output gives "func".
+func keywordColor(t *testing.T, lines [][]view.HighlightSegment) string {
+	t.Helper()
+	for _, line := range lines {
+		for _, seg := range line {
+			if seg.Text == "func" {
+				return seg.Color
+			}
+		}
+	}
+	t.Fatal("no func keyword segment")
+	return ""
+}
+
+func TestHighlightLinesWithStyleLeavesActiveStyle(t *testing.T) {
+	SetStyle("gruvbox")
+	t.Cleanup(func() { SetStyle("gruvbox") })
+	source := "package main\n\nfunc main() {}\n"
+
+	if got := keywordColor(t, HighlightLinesWithStyle("x.go", source, "monokai")); got != "#66d9ef" {
+		t.Fatalf("monokai preview keyword = %q", got)
+	}
+	if got := keywordColor(t, HighlightLines("x.go", source)); got != "#fb4934" {
+		t.Fatalf("a preview must not change the active style: keyword = %q", got)
+	}
+	if got := keywordColor(t, HighlightLinesWithStyle("x.go", source, "no-such-style")); got != "#fb4934" {
+		t.Fatalf("unknown style should fall back to gruvbox: %q", got)
+	}
+}

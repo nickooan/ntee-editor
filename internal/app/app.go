@@ -284,6 +284,7 @@ type Model struct {
 	inspectInfoErr  error  // store.ErrNoStats → in-memory fallback text
 	inspectLoading  bool   // stats fetch in flight
 	inspectBusy     string // "" | "compact" | "relieve" — blocks duplicate runs
+	stylePicker     stylePickerState
 
 	// Op-commands: user-saved shell command templates in the global store
 	// (opStore), edited in the inspect dashboard's table and run from the

@@ -201,7 +201,7 @@ The inspect dashboard's op-commands table: a key/value list of saved shell comma
 - `handleOpTableKey`: ↑/↓ moves through the rows plus a trailing `+ new command` row. Enter edits the row. `d` asks `delete <name>? y/n` before deleting (asynchronously). ←/Esc returns focus to the menu.
 - `handleOpEditKey` is the inline editor. Tab switches between the key and value fields, and the rest is cursor-aware typing. Ctrl+S calls `saveOpEdit`. Esc throws the buffer away, so the row shows its stored value again.
 - Placeholder completion in the value field. `opSuggestions` asks `opcmd.Complete` for the fragment at the cursor (`{`, `{$`, `$`, `{$f`, …), so the menu derives from the text and cursor and needs no stored list. While it is open, ↑/↓ choose a candidate, Tab/Enter call `acceptOpSuggestion`, and Esc hides the menu (`suggestHidden`) until the next edit, so the first Esc never reverts the row. `acceptOpSuggestion` replaces the fragment with the full placeholder and absorbs a `}` already typed after the cursor.
-- `saveOpEdit` validates before writing anything. The key must be non-empty, have no spaces, and be unique. The value must be non-empty and pass `opcmd.Parse`. The `PutOpCommand` write then runs in a Cmd. If validation fails, editing stays open with the error in the bar.
+- `saveOpEdit` validates before writing anything, checking the key before the value. The key must be non-empty and have no spaces. It must also be unique (`opEditDuplicatesName`; keeping a row's own name is fine). A duplicate raises the editor's centred alert (`messageOverlay`), not just a status-bar line. Dismissing the alert keeps the edit open. The value must be non-empty and pass `opcmd.Parse`. Other failures keep editing open with the error in the bar. The `PutOpCommand` write then runs in a Cmd.
 
 *Plus small helpers: `startOpEdit`, `switchOpEditField`, `opEditPaste`, `handleOpCommandsLoaded`, `handleOpCommandSaved`.*
 
@@ -470,6 +470,7 @@ The op-commands panel in the inspect dashboard.
   - A `+ New command` button row, which becomes a solid green pill when selected.
   - A placeholder legend.
   - The body scrolls so the selected row, and its dropdown, stay visible.
+- Command rows are separated by `rowRule`: a quieter `├──┼──┤` drawn in the selection grey, joined to the table's own borders. A dropdown stays attached to its edit row, with no rule in between. While a typed key duplicates another command, the key turns red and a line under the table says so.
 - Each row uses one palette (`opRowStyles`): normal, selected (a solid selection bar marked `▸`), editing (dimmed, marked `✎`), or input (the active cell, drawn as a darker inset with a cursor block). Every text run carries the row's background, so a highlight is never broken by an inner style reset.
 - `renderOpCell` renders a cell at an exact width. Input cells scroll horizontally to keep the cursor visible; other cells end in `…` when cut. `opTokenClasses` colours placeholders per rune using `opcmd.Parse`: `{$n}` arguments orange, system variables blue, broken or half-typed placeholders red.
 - `renderOpSuggestionRows` draws the completion menu as a dropdown in the COMMAND column under the edit row, styled like the LSP completion popup.

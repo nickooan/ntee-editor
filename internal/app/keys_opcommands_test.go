@@ -175,7 +175,6 @@ func TestOpCommandsSaveValidation(t *testing.T) {
 		{"empty key", "", "make", "key is empty"},
 		{"spaced key", "my cmd", "make", "key must not contain spaces"},
 		{"empty value", "x", "", "value is empty"},
-		{"duplicate", "build", "make", `"build" already exists`},
 		{"bad template", "x", "echo {$home}", "unknown variable {$home}"},
 	}
 	for _, tc := range cases {
@@ -383,5 +382,85 @@ func TestRenderOpCellKeepsCursorVisible(t *testing.T) {
 	}
 	if plain := ansi.Strip(renderOpCell(text, 10, -1, true, opRowNormal)); plain != "aaaaaaaaa…" {
 		t.Fatalf("a non-input cell should truncate with an ellipsis: %q", plain)
+	}
+}
+
+func TestOpCommandsDuplicateNameAlerts(t *testing.T) {
+	m, commandStore := opCommandsFixture(t, store.OpCommand{Name: "build", Command: "make"})
+	m = key(m, keyPress(tea.KeyRight))
+	m = key(m, keyPress(tea.KeyDown))
+	m = key(m, keyPress(tea.KeyEnter))
+	m = runes(m, "build")
+	if frame := ansi.Strip(m.render()); !strings.Contains(frame, "“build” already exists") {
+		t.Fatalf("a duplicate key should be flagged while typing:\n%s", frame)
+	}
+	m = press(t, m, ctrlKey('s')) // the key is checked before the (still empty) value
+	want := `An op-command named "build" already exists — choose a different key.`
+	if m.messageOverlay != want {
+		t.Fatalf("saving a duplicate should raise the editor alert, got %q", m.messageOverlay)
+	}
+	if frame := ansi.Strip(m.render()); !strings.Contains(frame, "already exists") || !strings.Contains(frame, "[enter] dismiss") {
+		t.Fatalf("the alert should be on screen:\n%s", frame)
+	}
+	if commands := loadedCommands(t, commandStore); len(commands) != 1 || commands[0].Command != "make" {
+		t.Fatalf("nothing should be saved: %+v", commands)
+	}
+
+	m = key(m, keyPress(tea.KeyEsc))
+	m = key(m, keyPress(tea.KeyTab))
+	m = runes(m, "make all")
+	if m.messageOverlay != "" || !m.opTable.editing || m.opTable.value != "make all" {
+		t.Fatalf("dismissing the alert must keep the edit: overlay=%q editing=%v value=%q", m.messageOverlay, m.opTable.editing, m.opTable.value)
+	}
+	m = key(m, keyPress(tea.KeyTab))
+	m = runes(m, "2")
+	if m.opEditDuplicatesName() {
+		t.Fatal("build2 is not a duplicate")
+	}
+	m = press(t, m, ctrlKey('s'))
+	if len(loadedCommands(t, commandStore)) != 2 {
+		t.Fatal("a renamed key should save")
+	}
+}
+
+func TestOpCommandsKeepingOwnNameIsNotDuplicate(t *testing.T) {
+	m, _ := opCommandsFixture(t, store.OpCommand{Name: "build", Command: "make"})
+	m = key(m, keyPress(tea.KeyRight))
+	m = key(m, keyPress(tea.KeyEnter))
+	if m.opEditDuplicatesName() {
+		t.Fatal("editing a row without renaming it is not a duplicate")
+	}
+	m = key(m, keyPress(tea.KeyTab))
+	m = runes(m, " all")
+	m = press(t, m, ctrlKey('s'))
+	if m.messageOverlay != "" || m.notice != "saved build" {
+		t.Fatalf("overlay=%q notice=%q", m.messageOverlay, m.notice)
+	}
+}
+
+func TestOpCommandsRowsHaveSeparators(t *testing.T) {
+	m, _ := opCommandsFixture(t,
+		store.OpCommand{Name: "build", Command: "make"},
+		store.OpCommand{Name: "plan", Command: "terraform plan"},
+		store.OpCommand{Name: "test", Command: "go test ./..."},
+	)
+	lines := strings.Split(ansi.Strip(m.render()), "\n")
+	rowAt := func(text string) int {
+		for index, line := range lines {
+			if strings.Contains(line, text) {
+				return index
+			}
+		}
+		t.Fatalf("%q not found", text)
+		return -1
+	}
+	for _, pair := range [][2]string{{"build", "plan"}, {"plan", "test"}} {
+		first, second := rowAt(pair[0]), rowAt(pair[1])
+		if second != first+2 || !strings.Contains(lines[first+1], "┼") {
+			t.Fatalf("rows %q and %q should have a separator between them:\n%s\n%s\n%s", pair[0], pair[1], lines[first], lines[first+1], lines[second])
+		}
+	}
+	if strings.Contains(lines[rowAt("test")+1], "┼") {
+		t.Fatal("no separator after the last row — the table's own ┴ border closes it")
 	}
 }

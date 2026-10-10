@@ -184,7 +184,8 @@ A dashboard for the editor's own machinery. `Shift+↑/↓` switches the left me
   Press `→` to move into the table; there `↑/↓` picks a row, `Enter` edits it
   (or adds a new one on `+ New command`), `Tab` switches between key and value,
   `Ctrl+S` saves, `Esc` reverts the edit, and `d` deletes after a `y/n`
-  confirmation. `←`/`Esc` goes back to the menu. Typing `{` or `$` in a command
+  confirmation. `←`/`Esc` goes back to the menu. Keys must be unique: a key
+  that's already taken turns red as you type, and saving it pops up an alert. Typing `{` or `$` in a command
   opens placeholder suggestions: the next free argument (`{$2}` when the command
   already has `{$1}`), the existing ones, and `{$fpath}`/`{$dpath}`. `↑/↓`
   chooses, `Tab`/`Enter` inserts, `Esc` closes the menu. Placeholders are

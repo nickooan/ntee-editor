@@ -22,6 +22,7 @@ var (
 	opButtonStyle    = lipgloss.NewStyle().Bold(true).Foreground(colGreen).Background(colBg)
 	opButtonSelStyle = lipgloss.NewStyle().Bold(true).Foreground(colBg).Background(colGreen)
 	opDeleteStyle    = lipgloss.NewStyle().Bold(true).Foreground(colRed).Background(colBg)
+	opRowRuleStyle   = lipgloss.NewStyle().Foreground(colSelection).Background(colBg)
 )
 
 // opRowStyles is one row's palette: every run carries the row's background,
@@ -176,6 +177,14 @@ func (m Model) newOpTableLayout(width int) opTableLayout {
 
 func (layout opTableLayout) innerWidth() int { return layout.keyWidth + layout.valueWidth + 7 }
 
+// rowRule separates two command rows: a quieter line than the table's own
+// borders, joined to them at the edges.
+func (layout opTableLayout) rowRule() string {
+	return opBorderStyle.Render("├") +
+		opRowRuleStyle.Render(strings.Repeat("─", layout.keyWidth+4)+"┼"+strings.Repeat("─", layout.valueWidth+2)) +
+		opBorderStyle.Render("┤")
+}
+
 func (layout opTableLayout) border(left, middle, right string) string {
 	line := left + strings.Repeat("─", layout.keyWidth+4)
 	if middle != "" {
@@ -246,6 +255,10 @@ func (m Model) renderInspectOpCommands(width, height int) string {
 	}
 	rows = append(rows, layout.spanning(m.opNewButton(contentWidth)), layout.border("╰", "", "╯"))
 
+	if m.opTable.editing && m.opEditDuplicatesName() {
+		rows = append(rows, "", opDeleteStyle.Render(truncateRunes(
+			"“"+strings.TrimSpace(m.opTable.key)+"” already exists — choose a different key", width)))
+	}
 	if name := m.opTable.confirmDelete; name != "" {
 		rows = append(rows, "", opDeleteStyle.Render("Delete “"+name+"”?")+opSubtitleStyle.Render("  y delete · n keep"))
 	}
@@ -268,6 +281,9 @@ func (m Model) opTableBody(layout opTableLayout) (body []string, anchor, anchorS
 		return append(rows, m.renderOpSuggestionRows(layout)...)
 	}
 	for index, command := range m.opCommands {
+		if index > 0 {
+			body = append(body, layout.rowRule())
+		}
 		selected := m.opTable.focused && index == m.opTable.index
 		if selected && m.opTable.editing {
 			anchor = len(body)
@@ -286,6 +302,9 @@ func (m Model) opTableBody(layout opTableLayout) (body []string, anchor, anchorS
 			renderOpCell(command.Command, layout.valueWidth, -1, true, styles), styles))
 	}
 	if m.opTable.editing && m.opTable.index >= len(m.opCommands) {
+		if len(body) > 0 {
+			body = append(body, layout.rowRule())
+		}
 		anchor = len(body)
 		edit := editRow()
 		anchorSpan = len(edit)
@@ -300,6 +319,9 @@ func (m Model) renderOpEditRow(layout opTableLayout) string {
 	if m.opTable.field == opFieldValue {
 		keyStyles, valueStyles = opRowEditing, opRowInput
 		keyCursor, valueCursor = -1, m.opTable.cursor
+	}
+	if m.opEditDuplicatesName() {
+		keyStyles.key = keyStyles.key.Foreground(colRed)
 	}
 	bar := opBorderStyle.Render("│")
 	gap := opRowEditing.text.Render(" ")

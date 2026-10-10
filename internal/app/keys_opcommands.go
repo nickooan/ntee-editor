@@ -235,6 +235,21 @@ func (m Model) handleOpEditKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// opEditDuplicatesName reports whether the edited key collides with another
+// saved command (keeping a command's own name is not a collision).
+func (m Model) opEditDuplicatesName() bool {
+	name := strings.TrimSpace(m.opTable.key)
+	if name == "" || name == m.opTable.originalName {
+		return false
+	}
+	for _, existing := range m.opCommands {
+		if existing.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 func (m Model) switchOpEditField(field int) Model {
 	m.opTable.field = field
 	if field == opFieldValue {
@@ -270,15 +285,12 @@ func (m Model) saveOpEdit() (tea.Model, tea.Cmd) {
 	case strings.ContainsAny(name, " \t"):
 		m.errText = "key must not contain spaces"
 		return m, nil
+	case m.opEditDuplicatesName():
+		m.messageOverlay = fmt.Sprintf("An op-command named %q already exists — choose a different key.", name)
+		return m, nil
 	case command == "":
 		m.errText = "value is empty"
 		return m, nil
-	}
-	for _, existing := range m.opCommands {
-		if existing.Name == name && name != m.opTable.originalName {
-			m.errText = fmt.Sprintf("%q already exists", name)
-			return m, nil
-		}
 	}
 	if _, err := opcmd.Parse(command); err != nil {
 		m.errText = err.Error()

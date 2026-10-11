@@ -1,7 +1,6 @@
 package opcmd
 
 import (
-	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
@@ -16,8 +15,6 @@ type Candidate struct {
 // maxCompleteCandidates caps the completion menu; there are only a handful of
 // system variables, so this bounds the argument entries.
 const maxCompleteCandidates = 8
-
-var argPlaceholder = regexp.MustCompile(`\{\$([0-9]+)\}`)
 
 // Complete finds the partial placeholder ending at cursor (a rune index) —
 // "{", "{$", "$", "{$f", "$2" — and returns where it starts plus the matching
@@ -49,11 +46,11 @@ func Complete(value string, cursor int) (start int, candidates []Candidate) {
 	}
 
 	// The fragment itself is never a complete placeholder, so scanning the
-	// whole value counts only finished {$n} references.
+	// whole value counts only finished {$n} / {$n or …} references.
 	highest := 0
-	for _, match := range argPlaceholder.FindAllStringSubmatch(value, -1) {
-		if index, err := strconv.Atoi(match[1]); err == nil {
-			highest = max(highest, index)
+	for _, span := range Spans(value) {
+		if span.Kind == SpanArg {
+			highest = max(highest, span.Index)
 		}
 	}
 	add := func(placeholderName, detail string) {

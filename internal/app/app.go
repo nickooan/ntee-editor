@@ -1185,7 +1185,9 @@ func (m Model) handlePaste(text string) (tea.Model, tea.Cmd) {
 		if m.opMode.stage == opStageArgs {
 			m.opMode.args, m.opMode.argsCursor = input.InsertAtCursor(m.opMode.args, m.opMode.argsCursor, pasteLine(text))
 		} else if m.opMode.stage == opStagePick {
-			m = m.setOpQuery(m.opMode.query + pasteLine(text))
+			var query string
+			query, m.opMode.queryCursor = input.InsertAtCursor(m.opMode.query, m.opMode.queryCursor, pasteLine(text))
+			m = m.setOpQuery(query)
 		}
 		return m, nil
 	}

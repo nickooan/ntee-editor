@@ -192,7 +192,7 @@ A dashboard for the editor's own machinery. `Shift+↑/↓` switches the left me
   opens placeholder suggestions: the next free argument (`{$2}` when the command
   already has `{$1}`), the existing ones, and `{$fpath}`/`{$dpath}`. `↑/↓`
   chooses, `Tab`/`Enter` inserts, `Esc` closes the menu. Placeholders are
-  colour-coded in the table: arguments orange, built-ins blue, broken ones red.
+  colour-coded in the table: arguments purple, built-ins blue, broken ones red.
 
 The `@inspection >` bar takes:
 
@@ -215,8 +215,17 @@ dashboard's **op-commands** table. It can use these placeholders:
 | Placeholder | Replaced with |
 |---|---|
 | `{$1}`, `{$2}`, … | the 1st, 2nd, … argument you type when running it |
+| `{$1 or master}` | argument 1, or `master` when you leave it out. Quote a default with spaces: `{$2 or "other word"}`. `{$3 or ""}` makes the placeholder disappear when omitted (no empty `''` argument) |
 | `{$fpath}` | the open file's path, relative to the workspace directory (e.g. `apps/web/main.go`) |
 | `{$dpath}` | the open file's directory, relative to the workspace directory (e.g. `apps/web`; `.` at the top level) |
+
+Defaults never force you to type around them. In
+`deploy {$1} {$2 or master} {$3} {$4 or ""}`, `$1` and `$3` are the required
+arguments:
+- `deploy a b` fills just those (`$1=a $3=b`) and uses the defaults for the rest.
+- `deploy a b c` fills `$1 $2 $3` in order and leaves `$4` to its default.
+
+The args box shows which value lands where before you run.
 
 With a file open, press `Ctrl+R`, type to fuzzy-find a command, and press
 `Enter`. If the template takes arguments, type them (`"a b"` groups words into
@@ -225,7 +234,12 @@ one argument). You can also type them on the same line after the name:
 resulting command before you press `Enter`. A live preview shows the exact command line before `Enter` runs
 it. Commands without arguments run straight away. Values are shell-quoted only
 when they need it, so `master` is passed as `master` and `my file.tf` as
-`'my file.tf'`. The program gets the same arguments either way.
+`'my file.tf'`. The program gets the same arguments either way. Because of
+that, write placeholders bare: `git commit -m {$1}`, not `-m "{$1}"`. A
+placeholder inside quotes (or right after `\` or `$`) is rejected when you
+save, since the quoting would no longer protect it. Both inputs
+edit like a text field: `←`/`→` move the cursor and typing inserts at it, so
+you can fix a typo in the name or an argument without retyping the line.
 
 The command runs with `sh -c` in the workspace directory (the one the editor
 was opened on, even after `Ctrl+W` switched to a nested repo), so `{$fpath}` and

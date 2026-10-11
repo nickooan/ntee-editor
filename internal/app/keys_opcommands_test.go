@@ -1,6 +1,7 @@
 package app
 
 import (
+	"image/color"
 	"strings"
 	"testing"
 
@@ -462,5 +463,62 @@ func TestOpCommandsRowsHaveSeparators(t *testing.T) {
 	}
 	if strings.Contains(lines[rowAt("test")+1], "┼") {
 		t.Fatal("no separator after the last row — the table's own ┴ border closes it")
+	}
+}
+
+func TestOpCommandsColorDefaultsAsOneToken(t *testing.T) {
+	m, _ := opCommandsFixture(t, store.OpCommand{Name: "co", Command: `git checkout {$1 or master} {$2 or "a b"}`})
+	frame := m.render()
+	for _, token := range []string{"{$1 or master}", `{$2 or "a b"}`} {
+		if !strings.Contains(frame, opRowNormal.arg.Render(token)) {
+			t.Fatalf("%s should be colored as one argument token", token)
+		}
+	}
+}
+
+func TestOpCommandsRejectBrokenDefault(t *testing.T) {
+	m, commandStore := opCommandsFixture(t)
+	m = key(m, keyPress(tea.KeyRight))
+	m = key(m, keyPress(tea.KeyEnter))
+	m = runes(m, "co")
+	m = key(m, keyPress(tea.KeyTab))
+	m = runes(m, "git checkout {$1 or}")
+	m = press(t, m, ctrlKey('s'))
+	if !m.opTable.editing || !strings.Contains(m.errText, "missing default value") {
+		t.Fatalf("a broken default should be rejected: editing=%v err=%q", m.opTable.editing, m.errText)
+	}
+	if !strings.Contains(m.render(), opRowInput.invalid.Render("{$1 or}")) {
+		t.Fatal("the broken placeholder should be drawn red while editing")
+	}
+	if len(loadedCommands(t, commandStore)) != 0 {
+		t.Fatal("nothing should be saved")
+	}
+}
+
+func TestOpCommandsRejectQuotedPlaceholder(t *testing.T) {
+	m, commandStore := opCommandsFixture(t)
+	m = key(m, keyPress(tea.KeyRight))
+	m = key(m, keyPress(tea.KeyEnter))
+	m = runes(m, "ci")
+	m = key(m, keyPress(tea.KeyTab))
+	m = runes(m, `git commit -m "{$1}"`)
+	m = press(t, m, ctrlKey('s'))
+	if !m.opTable.editing || !strings.Contains(m.errText, `{$1} is inside "…" quotes`) {
+		t.Fatalf("a quoted placeholder should be rejected: editing=%v err=%q", m.opTable.editing, m.errText)
+	}
+	if !strings.Contains(m.render(), opRowInput.invalid.Render("{$1}")) {
+		t.Fatal("the quoted placeholder should be drawn red while editing")
+	}
+	if len(loadedCommands(t, commandStore)) != 0 {
+		t.Fatal("nothing should be saved")
+	}
+}
+
+func TestOpCommandsArgumentColorStandsApartFromErrors(t *testing.T) {
+	argument := opRowNormal.arg.GetForeground()
+	for _, confusable := range []color.Color{colRed, colOrange, opRowNormal.invalid.GetForeground()} {
+		if argument == confusable {
+			t.Fatalf("argument colour %v must not look like an error", argument)
+		}
 	}
 }

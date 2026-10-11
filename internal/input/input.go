@@ -42,3 +42,14 @@ func RemoveBeforeCursor(s string, cursor int) (string, int, bool) {
 	out := string(runes[:at-1]) + string(runes[at:])
 	return out, at - 1, true
 }
+
+// RemoveAtCursor deletes the rune under the cursor (forward delete). The bool
+// is false when the cursor is at the end and there is nothing to delete.
+func RemoveAtCursor(s string, cursor int) (string, int, bool) {
+	runes := []rune(s)
+	at := Clamp(cursor, 0, len(runes))
+	if at == len(runes) {
+		return s, at, false
+	}
+	return string(runes[:at]) + string(runes[at+1:]), at, true
+}

@@ -2,7 +2,6 @@ package app
 
 import (
 	"image/color"
-	"regexp"
 	"strings"
 	"unicode/utf8"
 
@@ -30,7 +29,7 @@ func newOpRowStyles(background, textColor, keyColor color.Color) opRowStyles {
 		text:    base.Foreground(textColor),
 		key:     base.Foreground(keyColor).Bold(true),
 		marker:  base.Foreground(colAqua).Bold(true),
-		arg:     base.Foreground(colOrange).Bold(true),
+		arg:     base.Foreground(colPurple).Bold(true),
 		system:  base.Foreground(colBlue).Bold(true),
 		invalid: base.Foreground(colRed).Underline(true),
 	}
@@ -54,26 +53,22 @@ const (
 	opTokenInvalid
 )
 
-// opPlaceholderToken matches a placeholder, including an unfinished one
-// (missing "}") so a half-typed reference shows as invalid.
-var opPlaceholderToken = regexp.MustCompile(`\{\$[^{}\s]*\}?`)
-
-// opTokenClasses colors a template per rune: {$n} args, system variables, and
-// anything opcmd would reject.
+// opTokenClasses colors a template per rune: {$n} / {$n or default} args,
+// system variables, and anything opcmd would reject (half-typed included).
+// Spans is the parser's own scanner, so the colors match what Parse accepts.
 func opTokenClasses(runes []rune) []opTokenClass {
 	classes := make([]opTokenClass, len(runes))
 	text := string(runes)
-	for _, location := range opPlaceholderToken.FindAllStringIndex(text, -1) {
-		token := text[location[0]:location[1]]
+	for _, span := range opcmd.Spans(text) {
 		class := opTokenInvalid
-		if template, err := opcmd.Parse(token); err == nil && strings.HasSuffix(token, "}") {
+		switch span.Kind {
+		case opcmd.SpanArg:
+			class = opTokenArg
+		case opcmd.SpanSystem:
 			class = opTokenSystem
-			if template.MaxArg > 0 {
-				class = opTokenArg
-			}
 		}
-		first := utf8.RuneCountInString(text[:location[0]])
-		for index := first; index < first+utf8.RuneCountInString(token); index++ {
+		first := utf8.RuneCountInString(text[:span.Start])
+		for index := first; index < first+utf8.RuneCountInString(text[span.Start:span.End]); index++ {
 			classes[index] = class
 		}
 	}
@@ -348,6 +343,7 @@ func (m Model) opNewButton(width int) string {
 func (m Model) opLegend(width int) []string {
 	legend := panelLegend("Placeholders", "", []panelLegendEntry{
 		{"{$1} {$2} …", opRowNormal.arg, "arguments you type when running the command"},
+		{"{$1 or x}", opRowNormal.arg, `default when the argument is left out ("x y" quoted, "" omits it)`},
 		{"{$fpath}", opRowNormal.system, opcmd.SystemVarDetails[opcmd.SystemFilePath]},
 		{"{$dpath}", opRowNormal.system, opcmd.SystemVarDetails[opcmd.SystemDirPath]},
 	}, width)

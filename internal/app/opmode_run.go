@@ -27,6 +27,8 @@ const (
 type opRunState struct {
 	commandLine string
 	dir         string
+	target      string // the open file's workspace path at launch
+	unsaved     bool   // the file had unsaved edits at launch
 	ctx         context.Context
 	cancel      context.CancelFunc
 	events      chan opRunEvent // closed after the final (done) event

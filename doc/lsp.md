@@ -48,11 +48,11 @@ File map:
 
 ### lsp.go
 
-The interfaces and message types the rest of the app depends on. `Client` is one server session: doc-sync is fire-and-forget (queued until initialize finishes), while `Definition`/`References`/`Completion` return an error when the server isn't ready so callers report it instead of guessing. `Registry` adds `UnavailableReason` (the real cause — binary missing vs crash-looped — instead of a generic hint), `Statuses` for the inspection pane, and runtime `Enable`/`Disable`.
+The interfaces and message types the rest of the app depends on. `Client` is one server session: doc-sync is fire-and-forget (queued until initialize finishes), while `Definition`/`References`/`Completion` return an error when the server isn't ready so callers report it instead of guessing. `Registry` adds `UnavailableReason` (the real cause — binary missing vs crash-looped — instead of a generic hint), `Statuses` for the inspection pane, and runtime `Enable`/`Disable`/`Stop`.
 
 - `NewNoopRegistry` — the registry used when LSP is globally off: never resolves a client, and `Enable` explains that a restart is needed.
 
-*Plus small helpers: the `noopRegistry` methods (`ClientFor`, `UnavailableReason`, `Statuses`, `Enable`, `Disable`, `ShutdownAll`) — trivial stubs returning "no".*
+*Plus small helpers: the `noopRegistry` methods (`ClientFor`, `UnavailableReason`, `Statuses`, `Enable`, `Disable`, `Stop`, `ShutdownAll`) — trivial stubs returning "no".*
 
 ### rpc.go
 
@@ -117,6 +117,7 @@ The `clientCapabilities` var declares full-content sync, plain `Location` respon
 - `Statuses` — every configured language's state (running/stopped/disabled + reason) for the inspection pane, sorted by name.
 - `Enable` — clears disabled state and the restart budget, sets a runtime override past `enable: false` in config, and eagerly starts the server so the pane turns green now; sync-detectable failures come back in `reason`, async crashes arrive later as notices.
 - `Disable` — detaches the server and marks the language disabled for the session; the shutdown handshake runs on its own goroutine so a wedged server can't stall the key handler that asked.
+- `Stop` — detaches and shuts down the running server like `Disable`, but leaves the language enabled: the next `ClientFor` starts a fresh server on demand. A deliberate stop is not a crash, so the restart budget resets. Session-level overrides (a config-disabled language started with `Enable`) are kept.
 - `ShutdownAll` — collects every client under the lock, then stops them all in parallel outside it, bounded by a shared 2s deadline (stragglers are left to their kill timers). The app calls it from a `tea.Cmd` on quit, off the UI goroutine.
 
 *Plus small helpers: `clientForLang` (explicit-language lookup used by the bridge), `fileFromArgs` (extract the tsserver command's target file), `unwrapBody` (peel the tsserver `{..., body}` envelope).*

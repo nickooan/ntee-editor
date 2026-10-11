@@ -434,6 +434,20 @@ func (m *Manager) Disable(lang string) {
 	}
 }
 
+// Stop detaches lang's running server and shuts it down, leaving the language
+// enabled: the next ClientFor starts a fresh server on demand. A deliberate
+// stop is not a crash, so the restart budget resets.
+func (m *Manager) Stop(lang string) {
+	m.mu.Lock()
+	c := m.clients[lang]
+	delete(m.clients, lang)
+	m.restarts[lang] = 0
+	m.mu.Unlock()
+	if c != nil {
+		go c.stop() // off the key handler, as in Disable
+	}
+}
+
 // shutdownAllTimeout bounds ShutdownAll as a whole: each stop() has its own
 // grace periods, but quit must return even if a handshake wedges.
 const shutdownAllTimeout = 2 * time.Second

@@ -101,6 +101,33 @@ func TestDisableMarksLanguage(t *testing.T) {
 	}
 }
 
+func TestStopKeepsLanguageEnabled(t *testing.T) {
+	m := testManager(t)
+	m.Stop("go") // nothing running: a no-op
+	m.mu.Lock()
+	m.clients["go"] = newServerClient("go", *m.cfg.Languages["go"].LSP, m.root, m.emit)
+	m.restarts["go"] = 2
+	m.mu.Unlock()
+	if st := statusFor(t, m.Statuses(), "go"); st.State != LangRunning {
+		t.Fatalf("an attached client should report running, got %+v", st)
+	}
+
+	m.Stop("go")
+	m.mu.Lock()
+	_, attached := m.clients["go"]
+	restarts := m.restarts["go"]
+	m.mu.Unlock()
+	if attached || restarts != 0 {
+		t.Fatalf("stop should detach the client and reset the budget: attached=%v restarts=%d", attached, restarts)
+	}
+	if st := statusFor(t, m.Statuses(), "go"); st.State != LangStopped || st.Reason != "" {
+		t.Fatalf("a stopped language stays enabled, got %+v", st)
+	}
+	if reason := m.UnavailableReason("/x/a.go"); reason != "" {
+		t.Fatalf("a stopped language should start again on demand, reason = %q", reason)
+	}
+}
+
 func TestNoopRegistryStubs(t *testing.T) {
 	r := NewNoopRegistry()
 	if sts := r.Statuses(); sts != nil {
@@ -111,6 +138,7 @@ func TestNoopRegistryStubs(t *testing.T) {
 		t.Fatalf("noop Enable = (%v, %q)", started, reason)
 	}
 	r.Disable("go") // must not panic
+	r.Stop("go")
 }
 
 // The sink is program.Send — an unbuffered handoff to the UI goroutine, which

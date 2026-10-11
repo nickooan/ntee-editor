@@ -13,10 +13,33 @@ import (
 )
 
 // OpCommand is one user-saved shell command template (see internal/opcmd).
+// FileTypes is the normalized TYPE spec ("go,rb", or "*" for every file);
+// records saved before the field existed load as "*".
 type OpCommand struct {
 	Name      string    `json:"name"`
+	FileTypes string    `json:"fileTypes"`
 	Command   string    `json:"command"`
 	UpdatedAt time.Time `json:"updatedAt,omitempty"`
+}
+
+// AllFileTypes is the FileTypes value matching every file (opcmd.AllFileTypes).
+const AllFileTypes = "*"
+
+// Key is the command's storage identity. One name may exist once per file-type
+// spec, so a typed command is keyed "name@types"; a "*" command keeps the bare
+// name, which is exactly the key records had before file types existed.
+func (command OpCommand) Key() string {
+	if command.FileTypes == "" || command.FileTypes == AllFileTypes {
+		return command.Name
+	}
+	return command.Name + "@" + command.FileTypes
+}
+
+func (command OpCommand) withDefaults() OpCommand {
+	if command.FileTypes == "" {
+		command.FileTypes = AllFileTypes
+	}
+	return command
 }
 
 // OpCommandStore persists op-commands globally (shared by every project).
@@ -24,10 +47,11 @@ type OpCommand struct {
 // goroutines.
 type OpCommandStore interface {
 	LoadOpCommands() ([]OpCommand, error)
-	// PutOpCommand saves command; when previousName is non-empty and differs
-	// from command.Name, the old entry is removed (a rename).
-	PutOpCommand(previousName string, command OpCommand) error
-	DeleteOpCommand(name string) error
+	// PutOpCommand saves command under command.Key(); when previousKey is
+	// non-empty and differs, the old entry is removed (a rename or a TYPE
+	// change).
+	PutOpCommand(previousKey string, command OpCommand) error
+	DeleteOpCommand(key string) error
 }
 
 const opCommandPrefix = "opcmd:"
@@ -99,7 +123,7 @@ func (g *GlobalOpCommands) LoadOpCommands() ([]OpCommand, error) {
 		for index := range keys {
 			var command OpCommand
 			if found[index] && json.Unmarshal(values[index], &command) == nil {
-				commands = append(commands, command)
+				commands = append(commands, command.withDefaults())
 			}
 		}
 		return nil
@@ -108,25 +132,27 @@ func (g *GlobalOpCommands) LoadOpCommands() ([]OpCommand, error) {
 	return commands, err
 }
 
-func (g *GlobalOpCommands) PutOpCommand(previousName string, command OpCommand) error {
+func (g *GlobalOpCommands) PutOpCommand(previousKey string, command OpCommand) error {
+	command = command.withDefaults()
 	data, err := json.Marshal(command)
 	if err != nil {
 		return err
 	}
+	key := command.Key()
 	return g.withDB(func(db *nteedb.DB) error {
-		if err := db.Put(opCommandPrefix+command.Name, data); err != nil {
+		if err := db.Put(opCommandPrefix+key, data); err != nil {
 			return err
 		}
-		if previousName != "" && previousName != command.Name {
-			return db.Delete(opCommandPrefix + previousName)
+		if previousKey != "" && previousKey != key {
+			return db.Delete(opCommandPrefix + previousKey)
 		}
 		return nil
 	})
 }
 
-func (g *GlobalOpCommands) DeleteOpCommand(name string) error {
+func (g *GlobalOpCommands) DeleteOpCommand(key string) error {
 	return g.withDB(func(db *nteedb.DB) error {
-		return db.Delete(opCommandPrefix + name)
+		return db.Delete(opCommandPrefix + key)
 	})
 }
 
@@ -152,23 +178,34 @@ func (m *MemoryOpCommands) LoadOpCommands() ([]OpCommand, error) {
 	return commands, nil
 }
 
-func (m *MemoryOpCommands) PutOpCommand(previousName string, command OpCommand) error {
+func (m *MemoryOpCommands) PutOpCommand(previousKey string, command OpCommand) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if previousName != "" && previousName != command.Name {
-		delete(m.commands, previousName)
+	command = command.withDefaults()
+	key := command.Key()
+	if previousKey != "" && previousKey != key {
+		delete(m.commands, previousKey)
 	}
-	m.commands[command.Name] = command
+	m.commands[key] = command
 	return nil
 }
 
-func (m *MemoryOpCommands) DeleteOpCommand(name string) error {
+func (m *MemoryOpCommands) DeleteOpCommand(key string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	delete(m.commands, name)
+	delete(m.commands, key)
 	return nil
 }
 
+// sortOpCommands orders by name, then file types with "*" first.
 func sortOpCommands(commands []OpCommand) {
-	sort.Slice(commands, func(a, b int) bool { return commands[a].Name < commands[b].Name })
+	sort.Slice(commands, func(a, b int) bool {
+		if commands[a].Name != commands[b].Name {
+			return commands[a].Name < commands[b].Name
+		}
+		if (commands[a].FileTypes == AllFileTypes) != (commands[b].FileTypes == AllFileTypes) {
+			return commands[a].FileTypes == AllFileTypes
+		}
+		return commands[a].FileTypes < commands[b].FileTypes
+	})
 }

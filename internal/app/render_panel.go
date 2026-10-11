@@ -27,27 +27,32 @@ var (
 )
 
 // panelTable holds a table's column widths. A row is
-// "│ [m ]key… │ value… │": with marker, the key cell gains a 2-column gutter
-// for a row marker (▸/✎).
+// "│ [m ]key… │ [middle… │ ]value… │": with marker, the key cell gains a
+// 2-column gutter for a row marker (▸/✎); middleWidth > 0 adds a third column
+// between key and value.
 type panelTable struct {
-	keyWidth, valueWidth int
-	marker               bool
+	keyWidth, middleWidth, valueWidth int
+	marker                            bool
 }
 
-// newPanelTable fits a table into width, the key column sized to keyWidth
-// (callers cap it) and the value column taking the rest.
-func newPanelTable(width, keyWidth int, marker bool) panelTable {
-	table := panelTable{keyWidth: keyWidth, marker: marker}
-	table.valueWidth = max(4, width-keyWidth-table.overhead())
+// newPanelTable fits a table into width, the key (and optional middle)
+// column sized by the caller and the value column taking the rest.
+func newPanelTable(width, keyWidth, middleWidth int, marker bool) panelTable {
+	table := panelTable{keyWidth: keyWidth, middleWidth: middleWidth, marker: marker}
+	table.valueWidth = max(4, width-keyWidth-middleWidth-table.overhead())
 	return table
 }
 
-// overhead is the border, padding, and marker columns around the two cells.
+// overhead is the border, padding, and marker columns around the cells.
 func (table panelTable) overhead() int {
+	overhead := 7
 	if table.marker {
-		return 9
+		overhead += 2
 	}
-	return 7
+	if table.middleWidth > 0 {
+		overhead += 3
+	}
+	return overhead
 }
 
 func (table panelTable) keySpan() int {
@@ -58,36 +63,57 @@ func (table panelTable) keySpan() int {
 }
 
 func (table panelTable) contentWidth() int {
-	return table.keyWidth + table.valueWidth + table.overhead() - 4
+	return table.keyWidth + table.middleWidth + table.valueWidth + table.overhead() - 4
+}
+
+// spans are the dash runs between the table's junctions.
+func (table panelTable) spans() []int {
+	spans := []int{table.keySpan()}
+	if table.middleWidth > 0 {
+		spans = append(spans, table.middleWidth+2)
+	}
+	return append(spans, table.valueWidth+2)
+}
+
+// line joins the column spans with junction, or runs straight across when
+// junction is "" (a row spanning the whole table).
+func (table panelTable) line(junction string) string {
+	spans := table.spans()
+	parts := make([]string, len(spans))
+	for index, span := range spans {
+		parts[index] = strings.Repeat("─", span)
+	}
+	if junction == "" {
+		return strings.Join(parts, "─")
+	}
+	return strings.Join(parts, junction)
 }
 
 func (table panelTable) border(left, middle, right string) string {
-	line := left + strings.Repeat("─", table.keySpan())
-	if middle != "" {
-		line += middle + strings.Repeat("─", table.valueWidth+2)
-	} else {
-		line += strings.Repeat("─", table.valueWidth+3)
-	}
-	return panelBorderStyle.Render(line + right)
+	return panelBorderStyle.Render(left + table.line(middle) + right)
 }
 
 // rowRule separates two rows: a quieter line than the table's own borders,
 // joined to them at the edges.
 func (table panelTable) rowRule() string {
-	return panelBorderStyle.Render("├") +
-		panelRuleStyle.Render(strings.Repeat("─", table.keySpan())+"┼"+strings.Repeat("─", table.valueWidth+2)) +
-		panelBorderStyle.Render("┤")
+	return panelBorderStyle.Render("├") + panelRuleStyle.Render(table.line("┼")) + panelBorderStyle.Render("┤")
 }
 
-// row joins an (optional) marker, key cell, and value cell, each already
-// exactly sized; gap paints the spacing in the row's background.
-func (table panelTable) row(marker, keyCell, valueCell string, gap, markerStyle lipgloss.Style) string {
+// row joins an (optional) marker and the cells (key, [middle,] value), each
+// already exactly sized; gap paints the spacing in the row's background.
+func (table panelTable) row(marker string, cells []string, gap, markerStyle lipgloss.Style) string {
 	bar := panelBorderStyle.Render("│")
-	left := bar + gap.Render(" ")
+	line := bar + gap.Render(" ")
 	if table.marker {
-		left += markerStyle.Render(marker) + gap.Render(" ")
+		line += markerStyle.Render(marker) + gap.Render(" ")
 	}
-	return left + keyCell + gap.Render(" ") + bar + gap.Render(" ") + valueCell + gap.Render(" ") + bar
+	for index, cell := range cells {
+		if index > 0 {
+			line += gap.Render(" ") + bar + gap.Render(" ")
+		}
+		line += cell
+	}
+	return line + gap.Render(" ") + bar
 }
 
 // spanning is a full-width row ignoring the column split; content is already
@@ -97,9 +123,18 @@ func (table panelTable) spanning(content string) string {
 	return bar + baseStyle.Render(" ") + content + baseStyle.Render(" ") + bar
 }
 
-func (table panelTable) header(keyLabel, valueLabel string) string {
-	return table.row(" ", panelHeaderStyle.Render(padTo(keyLabel, table.keyWidth)),
-		panelHeaderStyle.Render(padTo(valueLabel, table.valueWidth)), baseStyle, baseStyle)
+// header labels the columns, one label per cell.
+func (table panelTable) header(labels ...string) string {
+	widths := []int{table.keyWidth}
+	if table.middleWidth > 0 {
+		widths = append(widths, table.middleWidth)
+	}
+	widths = append(widths, table.valueWidth)
+	cells := make([]string, len(labels))
+	for index, label := range labels {
+		cells[index] = panelHeaderStyle.Render(padTo(label, widths[index]))
+	}
+	return table.row(" ", cells, baseStyle, baseStyle)
 }
 
 // panelCell fits already-styled text to exactly width cells: cut with "…"
@@ -164,7 +199,7 @@ func (panel infoPanel) table(width int) panelTable {
 	for _, row := range panel.rows {
 		keyWidth = max(keyWidth, len([]rune(row.label)))
 	}
-	return newPanelTable(width, min(keyWidth, max(6, width/3)), false)
+	return newPanelTable(width, min(keyWidth, max(6, width/3)), 0, false)
 }
 
 // render draws the panel: heading, table, notes, and the Commands legend.
@@ -204,8 +239,8 @@ func (panel infoPanel) render(width, height int) string {
 				if valueIndex+1 == row.selectedPiece {
 					fill = selectedEntryStyle
 				}
-				body = append(body, table.row("", panelCell(panelLabelStyle.Render(label), table.keyWidth),
-					panelCellFill(value, table.valueWidth, fill), baseStyle, baseStyle))
+				body = append(body, table.row("", []string{panelCell(panelLabelStyle.Render(label), table.keyWidth),
+					panelCellFill(value, table.valueWidth, fill)}, baseStyle, baseStyle))
 			}
 		}
 		body = append(body, table.border("╰", "┴", "╯"))

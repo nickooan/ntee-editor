@@ -228,6 +228,7 @@ func (m Model) activateSidebarRow(rowIndex int) (Model, bool) {
 		// A click is a focus change: an open table edit is discarded like Esc.
 		m.opTable.focused, m.opTable.editing, m.opTable.confirmDelete = false, false, ""
 		m.stylePicker.focused = false
+		m.lspPicker = lspPickerState{}
 		return m, true
 	case modeOpenAPI, modeGraphQL:
 		if rowIndex < 0 || rowIndex >= len(m.preview.outline) {

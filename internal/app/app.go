@@ -285,6 +285,7 @@ type Model struct {
 	inspectLoading  bool   // stats fetch in flight
 	inspectBusy     string // "" | "compact" | "relieve" — blocks duplicate runs
 	stylePicker     stylePickerState
+	lspPicker       lspPickerState
 
 	// Op-commands: user-saved shell command templates in the global store
 	// (opStore), edited in the inspect dashboard's table and run from the

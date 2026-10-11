@@ -7,6 +7,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 
+	"github.com/nickooan/ntee-editor/internal/input"
 	"github.com/nickooan/ntee-editor/internal/lsp"
 	"github.com/nickooan/ntee-editor/internal/store"
 )
@@ -166,8 +167,9 @@ func (m Model) renderInspectLSP(width, height int) string {
 		keyHeader:   "LANGUAGE",
 		valueHeader: "STATUS",
 		legend: []panelLegendEntry{
-			{"lsp enable <lang|all>", panelCommandStyle, "start now and persist enable: true to your config"},
-			{"lsp disable <lang|all>", panelCommandStyle, "stop and persist enable: false"},
+			{"lsp start|stop|restart <lang|all>", panelCommandStyle, "this session only — the config is unchanged (a stopped server starts again when a file needs it)"},
+			{"lsp enable <lang|all>", panelCommandStyle, "start now and save enable: true to your config"},
+			{"lsp disable <lang|all>", panelCommandStyle, "stop and save enable: false"},
 		},
 	}
 	statuses := m.lsp.Statuses()
@@ -175,22 +177,71 @@ func (m Model) renderInspectLSP(width, height int) string {
 		panel.message = []string{"LSP is disabled globally (lsp.enabled: false). `lsp enable all` writes the config; restart ntee to apply."}
 		return panel.render(width, height)
 	}
-	for _, status := range statuses {
-		var state string
-		switch status.State {
-		case lsp.LangRunning:
-			state = panelGoodStyle.Render("● running")
-		case lsp.LangStopped:
-			state = panelWarnStyle.Render("○ stopped")
-		default:
-			state = panelDimStyle.Render("⊘ disabled")
-			if status.Reason != "" {
-				state += panelDimStyle.Render(" — " + status.Reason)
+	picker := m.lspPicker
+	if !picker.focused {
+		panel.titleHint = "press → to start, stop, enable or disable a server"
+	}
+	selected := input.Clamp(picker.index, 0, len(statuses)-1)
+	for index, status := range statuses {
+		highlighted := picker.focused && index == selected
+		row := panelRow{label: status.Lang, pieces: []string{renderLSPState(status, highlighted && !picker.menuOpen)}}
+		if highlighted {
+			row.stacked = true
+			if picker.menuOpen {
+				actions := lspActionsFor(status.State)
+				action := input.Clamp(picker.action, 0, len(actions)-1)
+				row.pieces = append(row.pieces, renderLSPActions(actions, action)...)
+				row.selectedPiece = 2 + action
+			} else {
+				row.selectedPiece = 1
 			}
 		}
-		panel.rows = append(panel.rows, panelRow{label: status.Lang, pieces: []string{state}})
+		panel.rows = append(panel.rows, row)
 	}
 	return panel.render(width, height)
+}
+
+// renderLSPState is a language's status line; picked draws it as the
+// highlighted line of the focused list.
+func renderLSPState(status lsp.LangStatus, picked bool) string {
+	marker := ""
+	if picked {
+		marker = "▸ "
+	}
+	var text string
+	style := panelDimStyle
+	switch status.State {
+	case lsp.LangRunning:
+		text, style = marker+"● running", panelGoodStyle
+	case lsp.LangStopped:
+		text, style = marker+"○ stopped", panelWarnStyle
+	default:
+		text = marker + "⊘ disabled"
+		if status.Reason != "" {
+			text += " — " + status.Reason
+		}
+	}
+	if picked {
+		style = style.Background(colSelection).Bold(true)
+	}
+	return style.Render(text)
+}
+
+// renderLSPActions is the action dropdown under the picked language.
+func renderLSPActions(actions []lspAction, highlighted int) []string {
+	labelWidth := 0
+	for _, action := range actions {
+		labelWidth = max(labelWidth, len([]rune(action.label))+2)
+	}
+	lines := make([]string, len(actions))
+	for index, action := range actions {
+		marker, labelStyle, detailStyle := "  ", panelDimStyle, panelDimStyle
+		if index == highlighted {
+			marker, labelStyle, detailStyle = "▸ ", panelPickedStyle, panelPickedNoteStyle
+		}
+		lines[index] = labelStyle.Render(marker+padTo(action.label, labelWidth)) + detailStyle.Render(action.detail)
+	}
+	return lines
 }
 
 // humanBytes formats a byte count for the inspection pane (B/KB/MB/GB).

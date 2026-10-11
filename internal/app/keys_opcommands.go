@@ -14,7 +14,9 @@ import (
 
 const (
 	opFieldKey = iota
+	opFieldType
 	opFieldValue
+	opFieldCount
 )
 
 // opTableState is the inspect dashboard's op-commands table. index ranges over
@@ -23,18 +25,31 @@ type opTableState struct {
 	focused       bool
 	index         int
 	editing       bool
-	field         int // opFieldKey | opFieldValue
+	field         int // opFieldKey | opFieldType | opFieldValue
 	key           string
+	fileTypes     string
 	value         string
 	cursor        int
-	originalName  string // "" when the edit creates a new command
+	originalKey   string // store key of the edited command; "" for a new one
 	saving        bool
-	confirmDelete string
-	selectName    string // row to select once the next reload lands
-	// Placeholder completion in the value field: suggestIndex is the
-	// highlighted candidate; Esc hides the menu until the text changes.
+	confirmDelete string // store key of the command awaiting delete confirmation
+	selectKey     string // row to select once the next reload lands
+	// Completion in the type and value fields: suggestIndex is the
+	// highlighted candidate; Esc (or accepting a type) hides the menu until
+	// the text changes.
 	suggestIndex  int
 	suggestHidden bool
+}
+
+// activeField is the text the edit cursor is in.
+func (state *opTableState) activeField() *string {
+	switch state.field {
+	case opFieldType:
+		return &state.fileTypes
+	case opFieldValue:
+		return &state.value
+	}
+	return &state.key
 }
 
 type opCommandsLoadedMsg struct {
@@ -44,7 +59,8 @@ type opCommandsLoadedMsg struct {
 }
 
 type opCommandSavedMsg struct {
-	name    string
+	label   string // for the status notice
+	key     string
 	deleted bool
 	err     error
 }
@@ -74,10 +90,10 @@ func (m Model) handleOpCommandsLoaded(msg opCommandsLoadedMsg) (tea.Model, tea.C
 	if msg.err == nil {
 		m.opCommands = msg.commands
 	}
-	if name := m.opTable.selectName; name != "" {
-		m.opTable.selectName = ""
+	if selectKey := m.opTable.selectKey; selectKey != "" {
+		m.opTable.selectKey = ""
 		for index, command := range m.opCommands {
-			if command.Name == name {
+			if command.Key() == selectKey {
 				m.opTable.index = index
 			}
 		}
@@ -96,11 +112,11 @@ func (m Model) handleOpCommandSaved(msg opCommandSavedMsg) (tea.Model, tea.Cmd) 
 		return m, nil
 	}
 	if msg.deleted {
-		m.notice = "deleted " + msg.name
+		m.notice = "deleted " + msg.label
 	} else {
-		m.notice = "saved " + msg.name
+		m.notice = "saved " + msg.label
 		m.opTable.editing = false
-		m.opTable.selectName = msg.name
+		m.opTable.selectKey = msg.key
 	}
 	return m.loadOpCommandsCmd()
 }
@@ -109,13 +125,13 @@ func (m Model) handleOpCommandSaved(msg opCommandSavedMsg) (tea.Model, tea.Cmd) 
 // delete with confirmation, and the inline key/value editor.
 func (m Model) handleOpTableKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.opTable.confirmDelete != "" {
-		name := m.opTable.confirmDelete
+		deleteKey := m.opTable.confirmDelete
 		switch msg.String() {
 		case "y", "enter":
 			m.opTable.confirmDelete = ""
-			commandStore := m.opStore
+			commandStore, label := m.opStore, m.opCommandLabel(deleteKey)
 			return m, func() tea.Msg {
-				return opCommandSavedMsg{name: name, deleted: true, err: commandStore.DeleteOpCommand(name)}
+				return opCommandSavedMsg{label: label, key: deleteKey, deleted: true, err: commandStore.DeleteOpCommand(deleteKey)}
 			}
 		case "n", "esc":
 			m.opTable.confirmDelete = ""
@@ -135,7 +151,7 @@ func (m Model) handleOpTableKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m = m.startOpEdit()
 	case "d", "delete":
 		if m.opTable.index < len(m.opCommands) {
-			m.opTable.confirmDelete = m.opCommands[m.opTable.index].Name
+			m.opTable.confirmDelete = m.opCommands[m.opTable.index].Key()
 		}
 	case "left", "esc":
 		m.opTable.focused = false
@@ -147,35 +163,60 @@ func (m Model) startOpEdit() Model {
 	m.opTable.editing = true
 	m.opTable.suggestIndex, m.opTable.suggestHidden = 0, false
 	m.opTable.field = opFieldKey
-	m.opTable.key, m.opTable.value, m.opTable.originalName = "", "", ""
+	m.opTable.key, m.opTable.fileTypes, m.opTable.value, m.opTable.originalKey = "", "", "", ""
 	if m.opTable.index < len(m.opCommands) {
 		command := m.opCommands[m.opTable.index]
-		m.opTable.key, m.opTable.value, m.opTable.originalName = command.Name, command.Command, command.Name
+		m.opTable.key, m.opTable.fileTypes, m.opTable.value = command.Name, command.FileTypes, command.Command
+		m.opTable.originalKey = command.Key()
 	}
 	m.opTable.cursor = len([]rune(m.opTable.key))
 	return m
 }
 
-// opSuggestions returns the placeholder completions for the value field's
-// cursor position, and where the fragment they replace starts.
+// opSuggestions returns the completions for the cursor position — file types
+// in the type field, placeholders in the command — and where the fragment
+// they replace starts. Types are suggested once a letter is typed, so Tab
+// through an empty TYPE never picks one by accident.
 func (m Model) opSuggestions() (int, []opcmd.Candidate) {
-	if !m.opTable.editing || m.opTable.field != opFieldValue || m.opTable.suggestHidden {
+	if !m.opTable.editing || m.opTable.suggestHidden {
 		return 0, nil
 	}
-	return opcmd.Complete(m.opTable.value, m.opTable.cursor)
+	switch m.opTable.field {
+	case opFieldType:
+		start, candidates := opcmd.CompleteFileType(m.opTable.fileTypes, m.opTable.cursor, m.opPreferredFileType())
+		typed := strings.ToLower(strings.TrimPrefix(string([]rune(m.opTable.fileTypes)[start:m.opTable.cursor]), "."))
+		if start == m.opTable.cursor || (len(candidates) == 1 && candidates[0].Insert == typed) {
+			return 0, nil
+		}
+		return start, candidates
+	case opFieldValue:
+		return opcmd.Complete(m.opTable.value, m.opTable.cursor)
+	}
+	return 0, nil
 }
 
-// acceptOpSuggestion replaces the typed fragment with the full placeholder,
-// swallowing a "}" the user already typed after the cursor.
+// opPreferredFileType is the open file's type, offered first while typing a TYPE.
+func (m Model) opPreferredFileType() string {
+	if m.openFile == nil {
+		return ""
+	}
+	return opcmd.FileTypeOf(m.openRel)
+}
+
+// acceptOpSuggestion replaces the typed fragment with the candidate. In the
+// command it swallows a "}" already typed after the cursor; in the type field
+// it closes the menu, so the next Enter moves on instead of re-accepting.
 func (m Model) acceptOpSuggestion(start int, candidate opcmd.Candidate) Model {
-	runes := []rune(m.opTable.value)
+	field := m.opTable.activeField()
+	runes := []rune(*field)
 	rest := runes[m.opTable.cursor:]
-	if len(rest) > 0 && rest[0] == '}' {
+	if m.opTable.field == opFieldValue && len(rest) > 0 && rest[0] == '}' {
 		rest = rest[1:]
 	}
-	m.opTable.value = string(runes[:start]) + candidate.Insert + string(rest)
+	*field = string(runes[:start]) + candidate.Insert + string(rest)
 	m.opTable.cursor = start + len([]rune(candidate.Insert))
 	m.opTable.suggestIndex = 0
+	m.opTable.suggestHidden = m.opTable.field == opFieldType
 	return m
 }
 
@@ -199,21 +240,20 @@ func (m Model) handleOpEditKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Any other key edits or moves: the menu re-derives from the new position.
 	m.opTable.suggestIndex, m.opTable.suggestHidden = 0, false
 
-	field := &m.opTable.key
-	if m.opTable.field == opFieldValue {
-		field = &m.opTable.value
-	}
+	field := m.opTable.activeField()
 	switch msg.String() {
 	case "esc":
 		m.opTable.editing = false
 		m.notice = "edit reverted"
 	case "ctrl+s":
 		return m.saveOpEdit()
-	case "tab", "shift+tab":
-		m = m.switchOpEditField(1 - m.opTable.field)
+	case "tab":
+		m = m.switchOpEditField((m.opTable.field + 1) % opFieldCount)
+	case "shift+tab":
+		m = m.switchOpEditField((m.opTable.field + opFieldCount - 1) % opFieldCount)
 	case "enter":
-		if m.opTable.field == opFieldKey {
-			m = m.switchOpEditField(opFieldValue)
+		if m.opTable.field != opFieldValue {
+			m = m.switchOpEditField(m.opTable.field + 1)
 		}
 	case "left":
 		m.opTable.cursor = input.MoveCursor(*field, m.opTable.cursor, -1)
@@ -235,37 +275,54 @@ func (m Model) handleOpEditKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// opEditDuplicatesName reports whether the edited key collides with another
-// saved command (keeping a command's own name is not a collision).
-func (m Model) opEditDuplicatesName() bool {
+// opEditConflict finds another saved command the edited row would clash with:
+// the same name and overlapping file types. The command's own saved entry is
+// not a conflict, and a TYPE that doesn't parse is reported on save instead.
+func (m Model) opEditConflict() (store.OpCommand, bool) {
 	name := strings.TrimSpace(m.opTable.key)
-	if name == "" || name == m.opTable.originalName {
-		return false
+	fileTypes, err := opcmd.NormalizeFileTypes(m.opTable.fileTypes)
+	if name == "" || err != nil {
+		return store.OpCommand{}, false
 	}
 	for _, existing := range m.opCommands {
-		if existing.Name == name {
-			return true
+		if existing.Key() != m.opTable.originalKey && existing.Name == name && opcmd.FileTypesOverlap(existing.FileTypes, fileTypes) {
+			return existing, true
 		}
 	}
-	return false
+	return store.OpCommand{}, false
+}
+
+// describeFileTypes names a spec for messages: "go,rb" or "all files".
+func describeFileTypes(fileTypes string) string {
+	if fileTypes == "" || fileTypes == store.AllFileTypes {
+		return "all files"
+	}
+	return fileTypes
+}
+
+// opCommandLabel is how messages name a command: "test (go)", or just the
+// name for a "*" command.
+func (m Model) opCommandLabel(key string) string {
+	for _, command := range m.opCommands {
+		if command.Key() == key {
+			if command.FileTypes == store.AllFileTypes {
+				return command.Name
+			}
+			return command.Name + " (" + command.FileTypes + ")"
+		}
+	}
+	return key
 }
 
 func (m Model) switchOpEditField(field int) Model {
 	m.opTable.field = field
-	if field == opFieldValue {
-		m.opTable.cursor = len([]rune(m.opTable.value))
-	} else {
-		m.opTable.cursor = len([]rune(m.opTable.key))
-	}
+	m.opTable.cursor = len([]rune(*m.opTable.activeField()))
 	return m
 }
 
 func (m Model) opEditPaste(text string) Model {
-	if m.opTable.field == opFieldValue {
-		m.opTable.value, m.opTable.cursor = input.InsertAtCursor(m.opTable.value, m.opTable.cursor, pasteLine(text))
-	} else {
-		m.opTable.key, m.opTable.cursor = input.InsertAtCursor(m.opTable.key, m.opTable.cursor, pasteLine(text))
-	}
+	field := m.opTable.activeField()
+	*field, m.opTable.cursor = input.InsertAtCursor(*field, m.opTable.cursor, pasteLine(text))
 	m.opTable.suggestIndex, m.opTable.suggestHidden = 0, false
 	return m
 }
@@ -278,6 +335,8 @@ func (m Model) saveOpEdit() (tea.Model, tea.Cmd) {
 	}
 	name := strings.TrimSpace(m.opTable.key)
 	command := strings.TrimSpace(m.opTable.value)
+	// An empty TYPE is stored as an explicit "*".
+	fileTypes, fileTypesErr := opcmd.NormalizeFileTypes(m.opTable.fileTypes)
 	switch {
 	case name == "":
 		m.errText = "key is empty"
@@ -285,10 +344,19 @@ func (m Model) saveOpEdit() (tea.Model, tea.Cmd) {
 	case strings.ContainsAny(name, " \t"):
 		m.errText = "key must not contain spaces"
 		return m, nil
-	case m.opEditDuplicatesName():
-		m.messageOverlay = fmt.Sprintf("An op-command named %q already exists — choose a different key.", name)
+	case strings.Contains(name, "@"):
+		m.errText = "key must not contain @"
 		return m, nil
-	case command == "":
+	case fileTypesErr != nil:
+		m.errText = fileTypesErr.Error()
+		return m, nil
+	}
+	if existing, conflict := m.opEditConflict(); conflict {
+		m.messageOverlay = fmt.Sprintf("An op-command named %q already exists for %s — change the key or its file types.",
+			name, describeFileTypes(existing.FileTypes))
+		return m, nil
+	}
+	if command == "" {
 		m.errText = "value is empty"
 		return m, nil
 	}
@@ -297,9 +365,13 @@ func (m Model) saveOpEdit() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.opTable.saving = true
-	commandStore, previousName := m.opStore, m.opTable.originalName
-	record := store.OpCommand{Name: name, Command: command, UpdatedAt: time.Now()}
+	commandStore, previousKey := m.opStore, m.opTable.originalKey
+	record := store.OpCommand{Name: name, FileTypes: fileTypes, Command: command, UpdatedAt: time.Now()}
+	label := name
+	if fileTypes != store.AllFileTypes {
+		label += " (" + fileTypes + ")"
+	}
 	return m, func() tea.Msg {
-		return opCommandSavedMsg{name: name, err: commandStore.PutOpCommand(previousName, record)}
+		return opCommandSavedMsg{label: label, key: record.Key(), err: commandStore.PutOpCommand(previousKey, record)}
 	}
 }

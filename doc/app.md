@@ -189,27 +189,42 @@ Every opened file becomes a tab; the list, active index, and per-tab cursors per
 - `inspectLSPCommand` persists the config change *first* (nothing half-applied on a failed write) and then applies it live through the registry — `m.cfg` itself is never mutated because its Languages map is shared with server goroutines.
 - `inspectSyscolorCommand` validates against the curated style list, persists, applies via `syntax.SetStyle`, and invalidates every highlight cache so the new colors show immediately.
 
-- `handleInspectKey` hands every key to whichever right-hand panel has focus: the op-commands table or the style picker. `→` at the end of the bar input moves focus into the panel on the op-commands and system sections.
+- `handleInspectKey` hands every key to whichever right-hand panel has focus: the op-commands table, the style picker or the lsp picker. `→` at the end of the bar input moves focus into the panel on the op-commands, system and lsp sections.
+- The lsp verbs come in two kinds. `start`, `stop` and `restart` act on this session only and never touch the config: start is the registry's `Enable`, stop is `Stop` (the server starts again on demand), and restart is both. `enable` and `disable` also save the language's enable flag. `applyLSPAction` runs one verb for one language, and both the `lsp <verb> <lang|all>` bar command and the picker use it.
+- `setLSPEnabled` is the persisting path behind enable/disable. It writes the config first, then calls the registry's `Enable`/`Disable`, and reports whether it was applied, so the bar is only cleared on success.
+- The lsp picker (`lspPickerState`) is the lsp panel's language list:
+  - `focusLSPPicker` only focuses when there are statuses (with LSP globally off the panel shows a message instead).
+  - In `handleLSPPickerKey`, ↑/↓ choose a language and Enter opens a dropdown of the actions that fit its state (`lspActionsFor`), most likely first: running → stop · restart · disable; stopped → start · disable; disabled → start · enable. ↑/↓ choose the action, Enter applies it through `applyLSPAction` and closes the dropdown with focus kept on the row. Esc/← close the dropdown, then release the list. The action index is re-clamped every key because the list follows the live state.
+  - Statuses are re-read on every key and frame, since a server can start or exit at any time.
+  - `renderLSPState` draws a status line (marked `▸` on the selection bar when picked), and `renderLSPActions` the dropdown lines.
 - The style picker (`stylePickerState`) is the system panel's colour-style list:
   - `focusStylePicker` starts on the current style.
   - In `handleStylePickerKey`, ↑/↓ browse and Enter calls `applySyntaxStyle`; focus stays, so you can keep trying styles. ←/Esc go back to the menu.
   - `refreshStylePreview` re-highlights a 4-line Go sample (`stylePreviewSample`) in the highlighted style with `syntax.HighlightLinesWithStyle`. It runs only when the selection moves, and never changes the active style.
   - `applySyntaxStyle` is shared with `syscolor`: it persists first, then calls `syntax.SetStyle`, sets `m.cfg.Theme.Syntax` and invalidates the highlight caches.
-  - A sidebar click on another section releases the picker.
+  - A sidebar click on another section releases the picker (and the lsp picker).
 
 *Plus small helpers: `inspectDBCommand`, `knownLanguages`, `inspectHint` (the status-bar hint for the current focus) — bar editing and validation.*
 
 #### keys_opcommands.go
 
-The inspect dashboard's op-commands table: a key/value list of saved shell command templates (`opTableState`) kept in the global `OpCommandStore` (`m.opStore`, swapped in by `WithOpCommandStore`). `m.opCommands` is the cached list, shared with the Ctrl+R overlay.
+The inspect dashboard's op-commands table: a KEY / TYPE / COMMAND list of saved shell command templates (`opTableState`) kept in the global `OpCommandStore` (`m.opStore`, swapped in by `WithOpCommandStore`). `m.opCommands` is the cached list, shared with the Ctrl+R overlay.
 
 - `loadOpCommandsCmd` reloads the list off the UI goroutine. It runs when the dashboard opens, when Ctrl+R opens, and after every save or delete. The result lands as `opCommandsLoadedMsg`, which is dropped unless its `opCommandsGen` is current. It also refreshes the picker if the overlay is open.
-- `handleOpTableKey`: ↑/↓ moves through the rows plus a trailing `+ new command` row. Enter edits the row. `d` asks `delete <name>? y/n` before deleting (asynchronously). ←/Esc returns focus to the menu.
-- `handleOpEditKey` is the inline editor. Tab switches between the key and value fields, and the rest is cursor-aware typing. Ctrl+S calls `saveOpEdit`. Esc throws the buffer away, so the row shows its stored value again.
-- Placeholder completion in the value field. `opSuggestions` asks `opcmd.Complete` for the fragment at the cursor (`{`, `{$`, `$`, `{$f`, …), so the menu derives from the text and cursor and needs no stored list. While it is open, ↑/↓ choose a candidate, Tab/Enter call `acceptOpSuggestion`, and Esc hides the menu (`suggestHidden`) until the next edit, so the first Esc never reverts the row. `acceptOpSuggestion` replaces the fragment with the full placeholder and absorbs a `}` already typed after the cursor.
-- `saveOpEdit` validates before writing anything, checking the key before the value. The key must be non-empty and have no spaces. It must also be unique (`opEditDuplicatesName`; keeping a row's own name is fine). A duplicate raises the editor's centred alert (`messageOverlay`), not just a status-bar line. Dismissing the alert keeps the edit open. The value must be non-empty and pass `opcmd.Parse`. Other failures keep editing open with the error in the bar. The `PutOpCommand` write then runs in a Cmd.
+- Rows are identified by their store key (`OpCommand.Key()`): the same name may exist once per file-type spec, so the edit (`originalKey`), the delete confirmation and the row re-selected after a reload (`selectKey`) all use keys.
+- `handleOpTableKey`: ↑/↓ moves through the rows plus a trailing `+ new command` row. Enter edits the row. `d` asks `delete <name (types)>? y/n` before deleting (asynchronously). ←/Esc returns focus to the menu.
+- `handleOpEditKey` is the inline editor over three fields (`activeField`): Tab / Shift+Tab cycle KEY → TYPE → COMMAND, Enter steps forward from KEY and TYPE, and the rest is cursor-aware typing. Ctrl+S calls `saveOpEdit`. Esc throws the buffer away, so the row shows its stored value again.
+- Completion. `opSuggestions` derives the menu from the text and cursor, so it needs no stored list:
+  - In COMMAND it asks `opcmd.Complete` for the placeholder fragment at the cursor (`{`, `{$`, `$`, `{$f`, …).
+  - In TYPE it asks `opcmd.CompleteFileType` for the comma item at the cursor, with the open file's type preferred (`opPreferredFileType`). It stays closed on an empty item, so Tab through an empty TYPE never picks a type by accident, and when the item is already a complete type with nothing longer to offer.
+  - While it is open, ↑/↓ choose a candidate, Tab/Enter call `acceptOpSuggestion`, and Esc hides the menu (`suggestHidden`) until the next edit, so the first Esc never reverts the row. `acceptOpSuggestion` replaces the fragment; in COMMAND it absorbs a `}` already typed after the cursor, and in TYPE it closes the menu so the next Enter moves on.
+- `saveOpEdit` validates before writing anything:
+  - The key must be non-empty, without spaces or `@` (the store's key separator).
+  - TYPE goes through `opcmd.NormalizeFileTypes`; left empty it saves as an explicit `*`.
+  - The name and types must not clash with another command (`opEditConflict`: same name and `opcmd.FileTypesOverlap`; the row's own saved entry is fine). A clash raises the editor's centred alert (`messageOverlay`) naming the types it clashes on; dismissing it keeps the edit open.
+  - The value must be non-empty and pass `opcmd.Parse`. Other failures keep editing open with the error in the bar. The `PutOpCommand(originalKey, …)` write then runs in a Cmd.
 
-*Plus small helpers: `startOpEdit`, `switchOpEditField`, `opEditPaste`, `handleOpCommandsLoaded`, `handleOpCommandSaved`.*
+*Plus small helpers: `startOpEdit`, `switchOpEditField`, `opEditPaste`, `describeFileTypes`, `opCommandLabel` (`test (go)`), `handleOpCommandsLoaded`, `handleOpCommandSaved`.*
 
 ### Git views
 
@@ -333,7 +348,7 @@ Repo-wide content search (Ctrl+G). Everything expensive is async and generation-
 
 The operation overlay runs a saved op-command against the open file. It only opens while a file is open, because `{$fpath}` and `{$dpath}` need one. `opSystemValues` builds both from the *workspace*-relative path (`activeRepo` joined with `openRel`), not the Ctrl+W repo-relative one, because commands always run from the workspace directory. It moves through three stages (`opModeState.stage`):
 
-- **pick**: fuzzy search over command names. This reuses `fuzzy.Prepare`/`Filter`, and rows show the template dimmed. The query is `name [args…]`: `opQueryParts` splits it at the first space, and only the name part filters. `setOpQuery` re-filters and resets the selection only when the name part changes, so typing args never moves the chosen row. With inline args, the box previews the exact command line, or the error (`opInlinePreview`). Enter calls `selectOpCommand`:
+- **pick**: fuzzy search over the commands for the open file (`opCommandsForOpenFile`): those whose TYPE matches it (`opcmd.MatchFileType`), where a command naming the type replaces a `*` command of the same name. When saved commands exist but none apply, the box says `no op-commands for <type> files` and how to fix it. The fuzzy search runs over command names. This reuses `fuzzy.Prepare`/`Filter`, and rows show the template dimmed. The query is `name [args…]`: `opQueryParts` splits it at the first space, and only the name part filters. `setOpQuery` re-filters and resets the selection only when the name part changes, so typing args never moves the chosen row. With inline args, the box previews the exact command line, or the error (`opInlinePreview`). Enter calls `selectOpCommand`:
   - With inline args that fit the template (`test 10`), the command runs at once. If they don't fit, the args stage opens pre-filled with them.
   - Without inline args, a template with no `{$n}` runs immediately; otherwise the overlay moves to the args stage.
 - **args**: the user types the arguments. Under the template, `renderOpArgLines` describes the arguments with the same `opcmd.Bind` the command preview uses:
@@ -341,6 +356,8 @@ The operation overlay runs a saved op-command against the open file. It only ope
   - Before that, it shows the spec (`$1 required · $2 = master`). When the template mixes required and optional args, it adds `type 2 values for $1 $3, or up to 4 to fill $1…$4 in order`.
   - These lines, and errors (`renderOpError`), wrap rather than get cut off. `renderOpCommandLine` splits the typed args with `opcmd.SplitArgs`, adds the system values, and renders the template every frame with defaults filled in, so the box shows either the exact `$ command` or the error (`needs 1–2 args, got 0`). Enter runs it. Esc goes back to the picker with the query kept. A template whose arguments are all optional still opens this stage, and Enter on an empty line runs it with the defaults. Only a template with no arguments at all runs straight from the picker.
 - **run**: `runOpCommand` bumps `opRunGen` and starts the process (see opmode_run.go). `handleOpRunMsg` appends output and re-arms the wait until the done event arrives. A message with an older generation is dropped, which also ends its wait chain. While the run view is open, ↑/↓/PgUp/PgDn/Home/End scroll back through the output; End returns to following the tail.
+
+Every stage names its target, the open file (the active tab), not whatever the tree highlights. The pick and args boxes show `file <path>` with the same workspace-relative path `{$fpath}` receives (`opTargetPath`, cut from the left so the file name survives). The run box writes it on the divider under the command (`renderOpRunTargetDivider`, a label inside the divider row so `opRunLayout` and link clicks are unaffected). Commands read the file from disk, so `opTargetUnsaved` (the `tabDirty` signal that turns the tab red) adds a yellow "unsaved changes — the command reads the saved file" line. The run records `target` and `unsaved` at launch and marks the divider `· unsaved edits not included`.
 
 Both text inputs, the pick query (`queryCursor`) and the args line (`argsCursor`), edit through `editOpInputLine`: ←/→ move the cursor, Home/Ctrl+A and End/Ctrl+E jump to the ends, Backspace and Delete remove around the cursor, and typing or pasting inserts at it. A query edit goes through `setOpQuery`, so fixing a typo in the middle of the name re-filters and editing the args part leaves the selection alone.
 
@@ -472,11 +489,11 @@ The left pane is one list. File tree, inspection menu, and preview outline each 
 
 The shared panel kit, so every inspect panel reads as one design:
 - **Heading**: `panelHeading`, a title and a word-wrapped subtitle.
-- **Table**: a rounded two-column table (`panelTable`) with a header row and soft `rowRule` separators between rows. A table can also have a marker column for `▸`/`✎`; only op-commands uses it.
+- **Table**: a rounded table (`panelTable`) with a header row and soft `rowRule` separators between rows. It has two columns, or three with `middleWidth` set. A table can also have a marker column for `▸`/`✎`. Only op-commands uses the marker and the middle column.
 - **Legend**: `panelLegend` lists commands or placeholders. Descriptions wrap under themselves, so the token column stays clear.
 
 What it provides:
-- `panelTable` holds the column widths and draws the `border`, `header`, `row`, `rowRule` and `spanning` lines. `newPanelTable` gives the value column whatever width the key column and overhead leave.
+- `panelTable` holds the column widths and draws the `border`, `header`, `row`, `rowRule` and `spanning` lines; `row` and `header` take one cell or label per column. `newPanelTable` gives the value column whatever width the key (and middle) columns and overhead leave.
 - `infoPanel.render(width, height)` builds a read-only panel from a description:
   - Title (plus an optional yellow `titleHint`), subtitle and headers.
   - Either `panelRow`s or a spanning `message`.
@@ -486,7 +503,7 @@ What it provides:
 - `panelCell` fits already-styled text to an exact width. It cuts with `ansi.Truncate` plus `…` and pads in the panel background, so a value can mix colours without breaking the table edge.
 - `panelIndent`/`panelInnerWidth` add a one-column left margin, kept inside the width the panel was given.
 
-*Plus small helpers: `wrapWords` (plain word wrap with hard breaks for overlong words), `wrapStyled`, `overhead`/`keySpan`/`contentWidth`.*
+*Plus small helpers: `wrapWords` (plain word wrap with hard breaks for overlong words), `wrapStyled`, `overhead`/`keySpan`/`contentWidth`/`spans`/`line`.*
 
 #### render_opmode.go
 
@@ -502,15 +519,15 @@ The op-commands panel in the inspect dashboard.
 
 - `renderInspectOpCommands` draws the panel:
   - A title. The `press → to edit` hint shows until the table has focus.
-  - A rounded-border table with a KEY and a COMMAND column: a `panelTable` (render_panel.go) with the marker column, sized by `newOpTableLayout`. The key column fits the longest name, capped at a third of the width.
+  - A rounded-border table with KEY, TYPE and COMMAND columns: a `panelTable` (render_panel.go) with the marker column and a middle column, sized by `newOpTableLayout`. The key column fits the longest name, capped at a third of the width; TYPE fits the longest spec, capped at a fifth. A `*` type is drawn dim, specific types aqua (`renderOpTypeCell`), and an empty TYPE input shows a dim `*  all files` placeholder.
   - When there are no commands, the table body explains what op-commands are and shows an example.
   - A `+ New command` button row, which becomes a solid green pill when selected.
   - A placeholder legend.
   - The body scrolls so the selected row, and its dropdown, stay visible.
-- Command rows are separated by `rowRule`: a quieter `├──┼──┤` drawn in the selection grey, joined to the table's own borders. A dropdown stays attached to its edit row, with no rule in between. While a typed key duplicates another command, the key turns red and a line under the table says so.
+- Command rows are separated by `rowRule`: a quieter `├──┼──┤` drawn in the selection grey, joined to the table's own borders. A dropdown stays attached to its edit row, with no rule in between. While the typed key and types clash with another command, the key turns red and a line under the table says which types it clashes on.
 - Each row uses one palette (`opRowStyles`): normal, selected (a solid selection bar marked `▸`), editing (dimmed, marked `✎`), or input (the active cell, drawn as a darker inset with a cursor block). Every text run carries the row's background, so a highlight is never broken by an inner style reset.
-- `renderOpCell` renders a cell at an exact width. Input cells scroll horizontally to keep the cursor visible; other cells end in `…` when cut. `opTokenClasses` colours placeholders per rune using `opcmd.Spans`, the parser's own scanner: a whole `{$n}` or `{$n or default}` is purple (not orange, which reads too close to the red error colour), system variables are blue, and broken or half-typed placeholders are red. The legend includes the `{$1 or x}` form.
-- `renderOpSuggestionRows` draws the completion menu as a dropdown in the COMMAND column under the edit row, styled like the LSP completion popup.
+- `renderOpCell` renders a cell at an exact width, coloured by its `opCellKind` (key, file type, or template). Input cells scroll horizontally to keep the cursor visible; other cells end in `…` when cut. `opTokenClasses` colours placeholders per rune using `opcmd.Spans`, the parser's own scanner: a whole `{$n}` or `{$n or default}` is purple (not orange, which reads too close to the red error colour), system variables are blue, and broken or half-typed placeholders are red. The legend includes the `{$1 or x}` form.
+- `renderOpSuggestionRows` draws the completion menu as a dropdown under the active cell, styled like the LSP completion popup: in the COMMAND column for placeholders, and starting at the TYPE column (spanning into COMMAND, which is wider) for file types. It shows at most `opSuggestionMaxRows`, in a window that follows the selection.
 
 *Plus small helpers: `opTableBody`, `renderOpEditRow`, `opTableEmptyLines`, `opNewButton`, `opLegend`, and the `panelLegend`-based `opLegend`. The inspect bar also hides its own cursor while the table has focus (`renderInspectInput`), so only one cursor is ever visible.*
 

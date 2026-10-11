@@ -57,6 +57,7 @@ func (r stubRegistry) UnavailableReason(string) string     { return "" }
 func (r stubRegistry) Statuses() []lsp.LangStatus          { return nil }
 func (r stubRegistry) Enable(string) (bool, string)        { return true, "" }
 func (r stubRegistry) Disable(string)                      {}
+func (r stubRegistry) Stop(string)                         {}
 func (r stubRegistry) ShutdownAll()                        {}
 
 func newLSPTestModel(t *testing.T) (Model, *stubClient) {

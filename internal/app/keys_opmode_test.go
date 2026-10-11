@@ -569,3 +569,98 @@ func TestOpModeArgsDeleteAndEnd(t *testing.T) {
 		t.Fatalf("args Delete/Ctrl+E: args=%q cursor=%d", m.opMode.args, m.opMode.argsCursor)
 	}
 }
+
+func TestOpModeShowsTargetFile(t *testing.T) {
+	m, _ := opModeFixture(t, store.OpCommand{Name: "echo", Command: "echo {$1}"})
+	m = press(t, m, ctrlKey('r'))
+	frame := ansi.Strip(m.render())
+	if !strings.Contains(frame, "file main.go") || strings.Contains(frame, "unsaved changes") {
+		t.Fatalf("the picker should name the clean target file:\n%s", frame)
+	}
+	m = key(m, keyPress(tea.KeyEnter))
+	if frame := ansi.Strip(m.render()); m.opMode.stage != opStageArgs || !strings.Contains(frame, "file main.go") {
+		t.Fatalf("the args stage should name the target file:\n%s", frame)
+	}
+	m = runes(m, "hi")
+	m = press(t, m, keyPress(tea.KeyEnter))
+	if frame := ansi.Strip(m.render()); m.opMode.stage != opStageRun || !strings.Contains(frame, "── main.go ─") {
+		t.Fatalf("the run divider should name the target file:\n%s", frame)
+	}
+}
+
+func TestOpModeWarnsUnsavedEdits(t *testing.T) {
+	m, _ := opModeFixture(t, store.OpCommand{Name: "build", Command: "true"})
+	m = runes(m, "x") // fixture opens main.go in edit mode
+	m = press(t, m, ctrlKey('r'))
+	if frame := ansi.Strip(m.render()); !strings.Contains(frame, "unsaved changes — the command reads the saved file") {
+		t.Fatalf("the picker should warn about unsaved edits:\n%s", frame)
+	}
+	m = press(t, m, keyPress(tea.KeyEnter))
+	if frame := ansi.Strip(m.render()); !strings.Contains(frame, "main.go · unsaved edits not included") {
+		t.Fatalf("the run divider should say the edits were not included:\n%s", frame)
+	}
+
+	m = key(m, keyPress(tea.KeyEsc))
+	m = press(t, m, ctrlKey('s'))
+	m = press(t, m, ctrlKey('r'))
+	if frame := ansi.Strip(m.render()); m.opTargetUnsaved() || strings.Contains(frame, "unsaved changes") {
+		t.Fatalf("after saving the warning should be gone:\n%s", frame)
+	}
+}
+
+func TestOpRunTargetDividerFitsWidth(t *testing.T) {
+	run := &opRunState{target: "internal/some/deeply/nested/package/main.go", unsaved: true}
+	for _, width := range []int{80, 50, 20, 6} {
+		divider := ansi.Strip(renderOpRunTargetDivider(run, width))
+		if got := len([]rune(divider)); got != width {
+			t.Fatalf("width %d: divider is %d wide: %q", width, got, divider)
+		}
+		if width >= 50 && !strings.Contains(divider, "main.go · unsaved edits not included") {
+			t.Fatalf("width %d: the file name should survive a left cut: %q", width, divider)
+		}
+	}
+	if got := truncateRunesLeft("a/b/main.go", 8); got != "…main.go" {
+		t.Fatalf("truncateRunesLeft = %q", got)
+	}
+}
+
+func TestOpModeOffersCommandsForTheOpenFileType(t *testing.T) {
+	m, _ := opModeFixture(t,
+		store.OpCommand{Name: "gotest", FileTypes: "go", Command: "go test ./..."},
+		store.OpCommand{Name: "rbtest", FileTypes: "rb", Command: "rspec"},
+		store.OpCommand{Name: "all", FileTypes: "*", Command: "ls"},
+		store.OpCommand{Name: "legacy", Command: "pwd"},
+	)
+	m = press(t, m, ctrlKey('r'))
+	var names []string
+	for _, command := range m.opMode.candidates {
+		names = append(names, command.Name)
+	}
+	if strings.Join(names, " ") != "all gotest legacy" {
+		t.Fatalf("main.go should be offered go and * commands only, got %v", names)
+	}
+}
+
+func TestOpModeSpecificTypeOverridesAll(t *testing.T) {
+	m, _ := opModeFixture(t,
+		store.OpCommand{Name: "test", FileTypes: "*", Command: "printf 'any:%s\\n' {$1}"},
+		store.OpCommand{Name: "test", FileTypes: "go,sh", Command: "printf 'go:%s\\n' {$1}"},
+	)
+	m = press(t, m, ctrlKey('r'))
+	if len(m.opMode.candidates) != 1 || m.opMode.candidates[0].FileTypes != "go,sh" {
+		t.Fatalf("test for go should replace test for *: %+v", m.opMode.candidates)
+	}
+	m = runes(m, "test 10")
+	m = press(t, m, keyPress(tea.KeyEnter))
+	if run := m.opMode.run; run == nil || !slices.Equal(run.output.displayLines(), []string{"go:10"}) {
+		t.Fatalf("the inline run should use the go command: %+v", run)
+	}
+}
+
+func TestOpModeHintsWhenNoCommandMatchesTheFileType(t *testing.T) {
+	m, _ := opModeFixture(t, store.OpCommand{Name: "rbtest", FileTypes: "rb", Command: "rspec"})
+	m = press(t, m, ctrlKey('r'))
+	if frame := ansi.Strip(m.render()); !strings.Contains(frame, "no op-commands for go files") {
+		t.Fatalf("the picker should explain why nothing is listed:\n%s", frame)
+	}
+}

@@ -183,12 +183,17 @@ A dashboard for the editor's own machinery. `Shift+↑/↓` switches the left me
 - **system** — version and syntax color style. Press `→` to move into the
   style list: `↑/↓` browses with a live code preview in that style, `Enter`
   applies it (saved to your config), `←`/`Esc` goes back.
-- **op-commands** — your saved shell command templates as a key/value table.
-  Press `→` to move into the table; there `↑/↓` picks a row, `Enter` edits it
-  (or adds a new one on `+ New command`), `Tab` switches between key and value,
-  `Ctrl+S` saves, `Esc` reverts the edit, and `d` deletes after a `y/n`
-  confirmation. `←`/`Esc` goes back to the menu. Keys must be unique: a key
-  that's already taken turns red as you type, and saving it pops up an alert. Typing `{` or `$` in a command
+- **op-commands** — your saved shell command templates as a KEY / TYPE /
+  COMMAND table. Press `→` to move into the table; there `↑/↓` picks a row,
+  `Enter` edits it (or adds a new one on `+ New command`), `Tab`/`Shift+Tab`
+  moves between key, type and command, `Ctrl+S` saves, `Esc` reverts the
+  edit, and `d` deletes after a `y/n` confirmation. `←`/`Esc` goes back to the
+  menu. TYPE is the file types the command is for, e.g. `go`, `tf, tfvars`, or
+  `*` for every file (left empty it saves as `*`). Typing a type suggests common
+  ones (`go`, `rb`, `sh`, `tfvars`, …, the open file's type first). One key can
+  exist once per type, so `test` can be `go test ./...` for `go` and
+  `bundle exec rspec {$fpath}` for `rb`. A key whose types clash with an
+  existing command turns red as you type, and saving it pops up an alert. Typing `{` or `$` in a command
   opens placeholder suggestions: the next free argument (`{$2}` when the command
   already has `{$1}`), the existing ones, and `{$fpath}`/`{$dpath}`. `↑/↓`
   chooses, `Tab`/`Enter` inserts, `Esc` closes the menu. Placeholders are
@@ -227,6 +232,10 @@ arguments:
 
 The args box shows which value lands where before you run.
 
+`Ctrl+R` lists only the commands whose TYPE matches the open file (plus the
+`*` ones). When a key exists both for the file's type and for `*`, the one for
+the type wins, so `test` on a `.go` file runs the go version.
+
 With a file open, press `Ctrl+R`, type to fuzzy-find a command, and press
 `Enter`. If the template takes arguments, type them (`"a b"` groups words into
 one argument). You can also type them on the same line after the name:
@@ -240,6 +249,11 @@ placeholder inside quotes (or right after `\` or `$`) is rejected when you
 save, since the quoting would no longer protect it. Both inputs
 edit like a text field: `←`/`→` move the cursor and typing inserts at it, so
 you can fix a typo in the name or an argument without retyping the line.
+
+Commands run on the file that is open in the editor (the active tab), which the
+overlay names as `file …`, not on whatever the file tree highlights. They read
+the file as saved on disk, so if it has unsaved changes the overlay warns you:
+save with `Ctrl+S` first if the command should see them.
 
 The command runs with `sh -c` in the workspace directory (the one the editor
 was opened on, even after `Ctrl+W` switched to a nested repo), so `{$fpath}` and

@@ -50,6 +50,14 @@ Adding a system variable means adding its name to `SystemVars` and supplying its
 - `ShellQuote` — minimal POSIX quoting: unchanged when the value is only `[A-Za-z0-9_@%+=:,./-]`, otherwise wrapped in `'…'` with embedded `'` written as `'\''`; the empty string is `''`.
 - `SplitArgs` — splits the user's arg line like sh splits words: whitespace separates, `'…'` is literal, `"…"` groups (with `\"`/`\\` escapes), a bare `\` escapes one character. Unterminated quotes are an error.
 
+### filetypes.go
+
+An op-command's TYPE says which files Ctrl+R offers it for: a comma list of file types, or `*` for all.
+- `NormalizeFileTypes` — the stored form: items trimmed, a leading `.` dropped, lowercased, de-duplicated and joined with `,` (`" .Go , rb"` → `go,rb`). An empty spec, or any `*`, is `*`. An item must be `[a-z0-9._+-]`.
+- `MatchFileType(types, fileName)` — whether a spec applies to a file, and whether it did so *specifically* (by naming the type) rather than through `*`. An item matches the file's extension (`prod.tfvars` → `tfvars`, not `tf`) or its whole base name, for extensionless files like `Dockerfile`. `FileTypeOf` is that type for one file.
+- `FileTypesOverlap` — whether two specs claim a common file, which is what makes two commands with the same name clash. `*` overlaps only `*`: a specific type is meant to override it.
+- `CompleteFileType` — suggestions for the comma item at the cursor, from `BuiltinFileTypes` (go, rb, tf, tfvars, sh, …). The open file's type comes first, an exact match of the typed text ranks above everything, types already listed are skipped, and `*` is offered only while the rest of the spec is empty.
+
 ### complete.go
 
 - `Complete` powers placeholder suggestions in the op-commands editor. It finds the partial placeholder that ends at the cursor (`{`, `{$`, `$`, `{$fp`, `$2`) and returns where it starts plus matching candidates, filtered by the typed name prefix. The first candidate is always the *next* unused argument, one past the highest finished `{$n}` or `{$n or …}` in the template (found with `Spans`), so typing `{$` in a template that already uses `{$1}` offers `{$2}` first. The existing arguments and the system variables come next, with descriptions from `SystemVarDetails`. A bare `$` followed by a name that matches nothing (`$HOME`) returns no candidates, so ordinary shell variables don't trigger the menu.

@@ -47,6 +47,7 @@ func (m Model) renderOpPickBox(width int) string {
 	rowWidth := max(1, boxWidth-2)
 
 	lines := []string{promptStyle.Render("run ") + renderInputLine(m.opMode.query, m.opMode.queryCursor)}
+	lines = append(lines, m.renderOpTargetLines(rowWidth)...)
 	// With inline args ("test 10"), show exactly what Enter will run.
 	if commandLine, ok, err := m.opInlinePreview(); ok {
 		if err != nil {
@@ -62,8 +63,14 @@ func (m Model) renderOpPickBox(width int) string {
 		switch {
 		case len(m.opMode.candidates) == 0 && m.opCommandsLoading:
 			lines = append(lines, overlayHintStyle.Render("(loading op-commands…)"))
-		case len(m.opMode.candidates) == 0:
+		case len(m.opCommands) == 0:
 			lines = append(lines, overlayHintStyle.Render(truncateRunes("(no op-commands — add some in Ctrl+T › op-commands)", rowWidth)))
+		case len(m.opMode.candidates) == 0:
+			fileType := opcmd.FileTypeOf(m.openRel)
+			hint := fmt.Sprintf("(no op-commands for %s files — set TYPE to %s or * in Ctrl+T › op-commands)", fileType, fileType)
+			for _, line := range wrapWords(hint, rowWidth) {
+				lines = append(lines, overlayHintStyle.Render(line))
+			}
 		default:
 			lines = append(lines, overlayHintStyle.Render("(no matches)"))
 		}
@@ -103,6 +110,7 @@ func (m Model) renderOpArgsBox(width int) string {
 		modalTitleStyle.Render(truncateRunes("run "+command.Name, rowWidth)),
 		overlayHintStyle.Render(truncateRunes(command.Command, rowWidth)),
 	}
+	lines = append(lines, m.renderOpTargetLines(rowWidth)...)
 	lines = append(lines, renderOpArgLines(m.opMode.template, m.opMode.args, rowWidth)...)
 	lines = append(lines, "",
 		promptStyle.Render("args › ")+renderInputLineStyled(m.opMode.args, m.opMode.argsCursor, opInputStyle))
@@ -200,6 +208,60 @@ func renderOpArgLines(template opcmd.Template, argsLine string, width int) []str
 	return lines
 }
 
+const (
+	opTargetPrefix      = "file "
+	opUnsavedWarning    = "unsaved changes — the command reads the saved file (Ctrl+S in the editor first)"
+	opRunUnsavedSuffix  = " · unsaved edits not included"
+	opRunDividerLeading = 2 // "──" before the run divider's label
+)
+
+// renderOpTargetLines names the file the command runs against and warns when
+// it has unsaved edits the command won't see.
+func (m Model) renderOpTargetLines(width int) []string {
+	pathWidth := max(1, width-len(opTargetPrefix))
+	lines := []string{overlayHintStyle.Render(opTargetPrefix) +
+		opInputStyle.Render(truncateRunesLeft(m.opTargetPath(), pathWidth))}
+	if m.opTargetUnsaved() {
+		for _, line := range wrapWords(opUnsavedWarning, width) {
+			lines = append(lines, opRunningStyle.Render(line))
+		}
+	}
+	return lines
+}
+
+// truncateRunesLeft keeps the end of text (a path's file name) and marks the
+// cut with a leading "…".
+func truncateRunesLeft(text string, width int) string {
+	runes := []rune(text)
+	if len(runes) <= width {
+		return text
+	}
+	if width <= 1 {
+		return "…"
+	}
+	return "…" + string(runes[len(runes)-width+1:])
+}
+
+// renderOpRunTargetDivider is the run box's top divider labelled with the
+// target file (yellow when the run started with unsaved edits). It keeps the
+// divider's width, so the box layout and link click math are unchanged.
+func renderOpRunTargetDivider(run *opRunState, width int) string {
+	suffix, style := "", overlayHintStyle
+	if run.unsaved {
+		suffix, style = opRunUnsavedSuffix, opRunningStyle
+	}
+	// Room for the path: the divider keeps its leading "──", the two spaces
+	// around the label, and at least one trailing "─".
+	pathWidth := width - opRunDividerLeading - 2 - len([]rune(suffix)) - 1
+	if run.target == "" || pathWidth < 4 {
+		return overlayHintStyle.Render(strings.Repeat("─", width))
+	}
+	label := " " + truncateRunesLeft(run.target, pathWidth) + suffix + " "
+	rest := width - opRunDividerLeading - len([]rune(label))
+	return overlayHintStyle.Render(strings.Repeat("─", opRunDividerLeading)) + style.Render(label) +
+		overlayHintStyle.Render(strings.Repeat("─", rest))
+}
+
 // renderOpError word-wraps an args/render error so it is never cut off.
 func renderOpError(err error, width int) []string {
 	var lines []string
@@ -222,7 +284,7 @@ func (m Model) renderOpRunBox(width, height int) string {
 	for _, line := range layout.header {
 		rows = append(rows, modalTitleStyle.Render(padTo(line, innerWidth)))
 	}
-	rows = append(rows, divider)
+	rows = append(rows, renderOpRunTargetDivider(run, innerWidth))
 
 	lines := run.output.displayLines()
 	start, end := layout.visibleRange(len(lines), run.scroll)

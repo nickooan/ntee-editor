@@ -8,6 +8,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/nickooan/ntee-editor/internal/opcmd"
+	"github.com/nickooan/ntee-editor/internal/store"
 )
 
 var (
@@ -20,18 +21,20 @@ var (
 // opRowStyles is one row's palette: every run carries the row's background,
 // so a highlighted row stays one solid bar.
 type opRowStyles struct {
-	text, key, marker, arg, system, invalid lipgloss.Style
+	text, dim, key, fileType, marker, arg, system, invalid lipgloss.Style
 }
 
 func newOpRowStyles(background, textColor, keyColor color.Color) opRowStyles {
 	base := lipgloss.NewStyle().Background(background)
 	return opRowStyles{
-		text:    base.Foreground(textColor),
-		key:     base.Foreground(keyColor).Bold(true),
-		marker:  base.Foreground(colAqua).Bold(true),
-		arg:     base.Foreground(colPurple).Bold(true),
-		system:  base.Foreground(colBlue).Bold(true),
-		invalid: base.Foreground(colRed).Underline(true),
+		text:     base.Foreground(textColor),
+		dim:      base.Foreground(colComment),
+		key:      base.Foreground(keyColor).Bold(true),
+		fileType: base.Foreground(colAqua),
+		marker:   base.Foreground(colAqua).Bold(true),
+		arg:      base.Foreground(colPurple).Bold(true),
+		system:   base.Foreground(colBlue).Bold(true),
+		invalid:  base.Foreground(colRed).Underline(true),
 	}
 }
 
@@ -87,21 +90,33 @@ func (styles opRowStyles) forClass(class opTokenClass) lipgloss.Style {
 	return styles.text
 }
 
+// opCellKind picks how a table cell colors its text.
+type opCellKind uint8
+
+const (
+	opCellKey opCellKind = iota
+	opCellFileType
+	opCellTemplate // placeholders colored by opTokenClasses
+)
+
 // renderOpCell renders text into exactly width cells. With cursor >= 0 it is
 // an input: the view scrolls horizontally to keep the cursor visible.
-// Otherwise overlong text ends in "…". asTemplate colors placeholders;
-// without it the whole text uses the key style.
-func renderOpCell(text string, width, cursor int, asTemplate bool, styles opRowStyles) string {
+// Otherwise overlong text ends in "…".
+func renderOpCell(text string, width, cursor int, kind opCellKind, styles opRowStyles) string {
 	runes := []rune(text)
+	asTemplate := kind == opCellTemplate
 	var classes []opTokenClass
 	if asTemplate {
 		classes = opTokenClasses(runes)
 	}
 	styleAt := func(index int) lipgloss.Style {
-		if !asTemplate {
-			return styles.key
+		switch kind {
+		case opCellFileType:
+			return styles.fileType
+		case opCellTemplate:
+			return styles.forClass(classes[index])
 		}
-		return styles.forClass(classes[index])
+		return styles.key
 	}
 
 	start, end, truncated := 0, min(len(runes), width), false
@@ -144,18 +159,35 @@ func renderOpCell(text string, width, cursor int, asTemplate bool, styles opRowS
 	return b.String()
 }
 
+// opTypePlaceholder fills an empty TYPE input: left empty, it saves as "*".
+const opTypePlaceholder = "*  all files"
+
 // newOpTableLayout sizes the op-commands table: keys fit the longest name (or
-// the key being typed), capped at a third of the width; a marker gutter shows
-// the selected (▸) or edited (✎) row.
+// the key being typed), capped at a third of the width; TYPE fits the longest
+// file-type spec, capped at a fifth; a marker gutter shows the selected (▸)
+// or edited (✎) row.
 func (m Model) newOpTableLayout(width int) panelTable {
-	keyWidth := len("KEY")
+	keyWidth, typeWidth := len("KEY"), len("TYPE")
 	for _, command := range m.opCommands {
 		keyWidth = max(keyWidth, len([]rune(command.Name)))
+		typeWidth = max(typeWidth, len([]rune(command.FileTypes)))
 	}
 	if m.opTable.editing {
 		keyWidth = max(keyWidth, len([]rune(m.opTable.key))+1)
+		typeWidth = max(typeWidth, len([]rune(m.opTable.fileTypes))+1)
+		if m.opTable.field == opFieldType && m.opTable.fileTypes == "" {
+			typeWidth = max(typeWidth, len([]rune(opTypePlaceholder))+1)
+		}
 	}
-	return newPanelTable(width, min(keyWidth, max(6, width/3)), true)
+	return newPanelTable(width, min(keyWidth, max(6, width/3)), min(typeWidth, max(6, width/5)), true)
+}
+
+// renderOpTypeCell draws a stored TYPE: "*" dimmed, specific types in aqua.
+func renderOpTypeCell(fileTypes string, width int, styles opRowStyles) string {
+	if fileTypes == "" || fileTypes == store.AllFileTypes {
+		return styles.dim.Render(padTo("*", width))
+	}
+	return renderOpCell(fileTypes, width, -1, opCellFileType, styles)
 }
 
 // renderInspectOpCommands draws the op-commands panel: a bordered key/command
@@ -177,7 +209,7 @@ func (m Model) renderInspectOpCommands(width, height int) string {
 	}
 	rows = append(rows, "",
 		layout.border("╭", "┬", "╮"),
-		layout.header("KEY", "COMMAND"),
+		layout.header("KEY", "TYPE", "COMMAND"),
 	)
 
 	body, anchor, anchorSpan := m.opTableBody(layout)
@@ -200,12 +232,14 @@ func (m Model) renderInspectOpCommands(width, height int) string {
 	}
 	rows = append(rows, layout.spanning(m.opNewButton(contentWidth)), layout.border("╰", "", "╯"))
 
-	if m.opTable.editing && m.opEditDuplicatesName() {
+	if existing, conflict := m.opEditConflict(); m.opTable.editing && conflict {
 		rows = append(rows, "", opDeleteStyle.Render(truncateRunes(
-			"“"+strings.TrimSpace(m.opTable.key)+"” already exists — choose a different key", width)))
+			"“"+strings.TrimSpace(m.opTable.key)+"” already exists for "+describeFileTypes(existing.FileTypes)+
+				" — change the key or its file types", width)))
 	}
-	if name := m.opTable.confirmDelete; name != "" {
-		rows = append(rows, "", opDeleteStyle.Render("Delete “"+name+"”?")+panelSubtitleStyle.Render("  y delete · n keep"))
+	if deleteKey := m.opTable.confirmDelete; deleteKey != "" {
+		rows = append(rows, "", opDeleteStyle.Render("Delete “"+m.opCommandLabel(deleteKey)+"”?")+
+			panelSubtitleStyle.Render("  y delete · n keep"))
 	}
 	rows = append(rows, "")
 	rows = append(rows, m.opLegend(width)...)
@@ -238,9 +272,11 @@ func (m Model) opTableBody(layout panelTable) (body []string, anchor, anchorSpan
 			styles, marker = opRowSelected, "▸"
 			anchor = len(body)
 		}
-		body = append(body, layout.row(marker,
-			renderOpCell(command.Name, layout.keyWidth, -1, false, styles),
-			renderOpCell(command.Command, layout.valueWidth, -1, true, styles), styles.text, styles.marker))
+		body = append(body, layout.row(marker, []string{
+			renderOpCell(command.Name, layout.keyWidth, -1, opCellKey, styles),
+			renderOpTypeCell(command.FileTypes, layout.middleWidth, styles),
+			renderOpCell(command.Command, layout.valueWidth, -1, opCellTemplate, styles),
+		}, styles.text, styles.marker))
 	}
 	if m.opTable.editing && m.opTable.index >= len(m.opCommands) {
 		if len(body) > 0 {
@@ -255,39 +291,67 @@ func (m Model) opTableBody(layout panelTable) (body []string, anchor, anchorSpan
 }
 
 func (m Model) renderOpEditRow(layout panelTable) string {
-	keyStyles, valueStyles := opRowInput, opRowEditing
-	keyCursor, valueCursor := m.opTable.cursor, -1
-	if m.opTable.field == opFieldValue {
-		keyStyles, valueStyles = opRowEditing, opRowInput
-		keyCursor, valueCursor = -1, m.opTable.cursor
+	stylesFor := func(field int) (opRowStyles, int) {
+		if m.opTable.field == field {
+			return opRowInput, m.opTable.cursor
+		}
+		return opRowEditing, -1
 	}
-	if m.opEditDuplicatesName() {
+	keyStyles, keyCursor := stylesFor(opFieldKey)
+	typeStyles, typeCursor := stylesFor(opFieldType)
+	valueStyles, valueCursor := stylesFor(opFieldValue)
+	if _, conflict := m.opEditConflict(); conflict {
 		keyStyles.key = keyStyles.key.Foreground(colRed)
 	}
+
+	var typeCell string
+	switch {
+	case m.opTable.fileTypes != "":
+		typeCell = renderOpCell(m.opTable.fileTypes, layout.middleWidth, typeCursor, opCellFileType, typeStyles)
+	case typeCursor >= 0:
+		typeCell = cursorStyle.Render(" ") + typeStyles.dim.Render(padTo(truncateRunes(opTypePlaceholder, layout.middleWidth-1), layout.middleWidth-1))
+	default:
+		typeCell = typeStyles.dim.Render(padTo("*", layout.middleWidth))
+	}
+
 	bar := panelBorderStyle.Render("│")
 	gap := opRowEditing.text.Render(" ")
 	return bar + gap + opRowEditing.key.Foreground(colYellow).Render("✎") + gap +
-		renderOpCell(m.opTable.key, layout.keyWidth, keyCursor, false, keyStyles) + gap + bar + gap +
-		renderOpCell(m.opTable.value, layout.valueWidth, valueCursor, true, valueStyles) + gap + bar
+		renderOpCell(m.opTable.key, layout.keyWidth, keyCursor, opCellKey, keyStyles) + gap + bar + gap +
+		typeCell + gap + bar + gap +
+		renderOpCell(m.opTable.value, layout.valueWidth, valueCursor, opCellTemplate, valueStyles) + gap + bar
 }
 
-// renderOpSuggestionRows draws the placeholder completion menu as a dropdown
-// in the value column, directly under the edit row.
+// opSuggestionMaxRows caps the completion dropdown; the window follows the
+// selection (the built-in file-type list is long).
+const opSuggestionMaxRows = 8
+
+// renderOpSuggestionRows draws the completion menu as a dropdown under the
+// active cell: placeholders in the command column, file types starting at
+// the TYPE column (spanning into the command column, which is wider).
 func (m Model) renderOpSuggestionRows(layout panelTable) []string {
 	_, candidates := m.opSuggestions()
 	if len(candidates) == 0 {
 		return nil
 	}
 	selected := min(m.opTable.suggestIndex, len(candidates)-1)
-	insertWidth := 0
-	for _, candidate := range candidates {
-		insertWidth = max(insertWidth, len(candidate.Insert))
+	first := max(0, selected-opSuggestionMaxRows+1)
+	visible := candidates[first:min(len(candidates), first+opSuggestionMaxRows)]
+
+	areaWidth := layout.valueWidth
+	if m.opTable.field == opFieldType {
+		areaWidth = layout.middleWidth + 3 + layout.valueWidth
 	}
-	menuWidth := min(layout.valueWidth, insertWidth+36)
-	rows := make([]string, 0, len(candidates))
-	for index, candidate := range candidates {
+	insertWidth := 0
+	for _, candidate := range visible {
+		insertWidth = max(insertWidth, len([]rune(candidate.Insert)))
+	}
+	menuWidth := min(areaWidth, insertWidth+36)
+	blank := func(width int) string { return opRowNormal.text.Render(strings.Repeat(" ", width)) }
+	rows := make([]string, 0, len(visible))
+	for offset, candidate := range visible {
 		labelStyle, detailStyle := completionItemStyle, completionDetailStyle
-		if index == selected {
+		if first+offset == selected {
 			labelStyle, detailStyle = completionSelStyle, completionSelDetailStyle
 		}
 		label := " " + padTo(candidate.Insert, insertWidth) + "  "
@@ -295,9 +359,12 @@ func (m Model) renderOpSuggestionRows(layout panelTable) []string {
 		if rest := menuWidth - len([]rune(label)); rest > 0 {
 			item += detailStyle.Render(padTo(truncateRunes(candidate.Detail, rest), rest))
 		}
-		valueCell := item + opRowNormal.text.Render(strings.Repeat(" ", max(0, layout.valueWidth-menuWidth)))
-		rows = append(rows, layout.row(" ", opRowNormal.text.Render(strings.Repeat(" ", layout.keyWidth)), valueCell,
-			opRowNormal.text, opRowNormal.marker))
+		menuCell := item + blank(max(0, areaWidth-menuWidth))
+		cells := []string{blank(layout.keyWidth), blank(layout.middleWidth), menuCell}
+		if m.opTable.field == opFieldType {
+			cells = []string{blank(layout.keyWidth), menuCell}
+		}
+		rows = append(rows, layout.row(" ", cells, opRowNormal.text, opRowNormal.marker))
 	}
 	return rows
 }
@@ -309,17 +376,18 @@ func (m Model) opTableEmptyLines(width int) []string {
 	if m.opCommandsLoading {
 		return []string{line(panelSubtitleStyle, "Loading op-commands…")}
 	}
-	example := opRowNormal.key.Render("deploy") + opRowNormal.text.Render("  →  kubectl apply -f ") +
+	example := opRowNormal.key.Render("deploy") + opRowNormal.text.Render("  ") + opRowNormal.fileType.Render("yaml") +
+		opRowNormal.text.Render("  →  kubectl apply -f ") +
 		opRowNormal.system.Render("{$fpath}") + opRowNormal.text.Render(" -n ") + opRowNormal.arg.Render("{$1}")
 	exampleWidth := lipgloss.Width(example)
 	if exampleWidth > width {
-		example = line(opRowNormal.text, "deploy  →  kubectl apply -f {$fpath} -n {$1}")
+		example = line(opRowNormal.text, "deploy  yaml  →  kubectl apply -f {$fpath} -n {$1}")
 	} else {
 		example += opRowNormal.text.Render(strings.Repeat(" ", width-exampleWidth))
 	}
 	return []string{
 		line(opRowNormal.text, "No op-commands yet."),
-		line(panelSubtitleStyle, "Save a shell command under a short key, for example:"),
+		line(panelSubtitleStyle, "Save a shell command under a short key and the file types it is for, for example:"),
 		example,
 		line(panelSubtitleStyle, "Press → then Enter on “+ New command” below to add one."),
 	}
@@ -341,14 +409,15 @@ func (m Model) opNewButton(width int) string {
 }
 
 func (m Model) opLegend(width int) []string {
-	legend := panelLegend("Placeholders", "", []panelLegendEntry{
+	legend := panelLegend("Types & placeholders", "", []panelLegendEntry{
+		{"go,rb  *", opRowNormal.fileType, "TYPE: the files Ctrl+R offers the command for (* = all)"},
 		{"{$1} {$2} …", opRowNormal.arg, "arguments you type when running the command"},
 		{"{$1 or x}", opRowNormal.arg, `default when the argument is left out ("x y" quoted, "" omits it)`},
 		{"{$fpath}", opRowNormal.system, opcmd.SystemVarDetails[opcmd.SystemFilePath]},
 		{"{$dpath}", opRowNormal.system, opcmd.SystemVarDetails[opcmd.SystemDirPath]},
 	}, width)
 	if m.opTable.editing {
-		legend = append(legend, panelSubtitleStyle.Render(truncateRunes("  type { or $ in the command for suggestions · ↑/↓ choose · Tab insert", width)))
+		legend = append(legend, panelSubtitleStyle.Render(truncateRunes("  Tab next column · type for suggestions · ↑/↓ choose · Tab insert", width)))
 	}
 	return legend
 }

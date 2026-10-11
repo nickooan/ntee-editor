@@ -4,6 +4,7 @@ import (
 	"image/color"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -120,7 +121,7 @@ func TestOpCommandsCreateAndSave(t *testing.T) {
 		t.Fatalf("Enter on + row should start editing the key: %+v", m.opTable)
 	}
 	m = runes(m, "plan")
-	m = key(m, keyPress(tea.KeyTab))
+	m = tabToCommand(m)
 	m = runes(m, "terraform plan -var-file={$1}")
 	if frame := ansi.Strip(m.render()); !strings.Contains(frame, "terraform plan") {
 		t.Fatalf("editing row should render the value:\n%s", frame)
@@ -143,7 +144,7 @@ func TestOpCommandsEscRevertsEdit(t *testing.T) {
 	m = key(m, keyPress(tea.KeyRight))
 	m = key(m, keyPress(tea.KeyEnter))
 	m = key(m, keyPress(tea.KeyBackspace))
-	m = key(m, keyPress(tea.KeyTab))
+	m = tabToCommand(m)
 	m = runes(m, " all")
 	m = key(m, keyPress(tea.KeyEsc))
 	if m.opTable.editing || !m.opTable.focused {
@@ -185,7 +186,7 @@ func TestOpCommandsSaveValidation(t *testing.T) {
 			m = key(m, keyPress(tea.KeyDown))
 			m = key(m, keyPress(tea.KeyEnter))
 			m = runes(m, tc.key)
-			m = key(m, keyPress(tea.KeyTab))
+			m = tabToCommand(m)
 			m = runes(m, tc.value)
 			m = press(t, m, ctrlKey('s'))
 			if !m.opTable.editing || !strings.Contains(m.errText, tc.wantErr) {
@@ -227,10 +228,14 @@ func TestOpCommandsPasteIntoEditedField(t *testing.T) {
 	next, _ := m.Update(tea.PasteMsg{Content: "deploy"})
 	m = next.(Model)
 	m = key(m, keyPress(tea.KeyTab))
+	next, _ = m.Update(tea.PasteMsg{Content: "yaml"})
+	m = next.(Model)
+	m = key(m, keyPress(tea.KeyTab))
 	next, _ = m.Update(tea.PasteMsg{Content: "kubectl apply\n-f {$1}"})
 	m = next.(Model)
-	if m.opTable.key != "deploy" || m.opTable.value != "kubectl apply -f {$1}" || m.inspectInput != "" {
-		t.Fatalf("paste should land in the edited field: key=%q value=%q bar=%q", m.opTable.key, m.opTable.value, m.inspectInput)
+	if m.opTable.key != "deploy" || m.opTable.fileTypes != "yaml" || m.opTable.value != "kubectl apply -f {$1}" || m.inspectInput != "" {
+		t.Fatalf("paste should land in the edited field: key=%q type=%q value=%q bar=%q",
+			m.opTable.key, m.opTable.fileTypes, m.opTable.value, m.inspectInput)
 	}
 }
 
@@ -239,7 +244,7 @@ func TestOpCommandsSurviveRestart(t *testing.T) {
 	m = key(m, keyPress(tea.KeyRight))
 	m = key(m, keyPress(tea.KeyEnter))
 	m = runes(m, "build")
-	m = key(m, keyPress(tea.KeyTab))
+	m = tabToCommand(m)
 	m = runes(m, "make")
 	_ = press(t, m, ctrlKey('s'))
 
@@ -280,7 +285,7 @@ func editValueOf(t *testing.T, command store.OpCommand) Model {
 	m, _ := opCommandsFixture(t, command)
 	m = key(m, keyPress(tea.KeyRight))
 	m = key(m, keyPress(tea.KeyEnter))
-	return key(m, keyPress(tea.KeyTab))
+	return tabToCommand(m)
 }
 
 func TestOpCommandsSuggestNextArgumentFirst(t *testing.T) {
@@ -374,14 +379,14 @@ func TestOpCommandsTableRendering(t *testing.T) {
 
 func TestRenderOpCellKeepsCursorVisible(t *testing.T) {
 	text := strings.Repeat("a", 30) + "{$1}"
-	cell := renderOpCell(text, 10, len([]rune(text)), true, opRowInput)
+	cell := renderOpCell(text, 10, len([]rune(text)), opCellTemplate, opRowInput)
 	if width := ansi.StringWidth(cell); width != 10 {
 		t.Fatalf("cell width = %d, want 10", width)
 	}
 	if plain := ansi.Strip(cell); !strings.HasPrefix(plain, "aaaaa{$1}") {
 		t.Fatalf("view should scroll to the cursor at the end: %q", plain)
 	}
-	if plain := ansi.Strip(renderOpCell(text, 10, -1, true, opRowNormal)); plain != "aaaaaaaaa…" {
+	if plain := ansi.Strip(renderOpCell(text, 10, -1, opCellTemplate, opRowNormal)); plain != "aaaaaaaaa…" {
 		t.Fatalf("a non-input cell should truncate with an ellipsis: %q", plain)
 	}
 }
@@ -396,7 +401,7 @@ func TestOpCommandsDuplicateNameAlerts(t *testing.T) {
 		t.Fatalf("a duplicate key should be flagged while typing:\n%s", frame)
 	}
 	m = press(t, m, ctrlKey('s')) // the key is checked before the (still empty) value
-	want := `An op-command named "build" already exists — choose a different key.`
+	want := `An op-command named "build" already exists for all files — change the key or its file types.`
 	if m.messageOverlay != want {
 		t.Fatalf("saving a duplicate should raise the editor alert, got %q", m.messageOverlay)
 	}
@@ -408,14 +413,14 @@ func TestOpCommandsDuplicateNameAlerts(t *testing.T) {
 	}
 
 	m = key(m, keyPress(tea.KeyEsc))
-	m = key(m, keyPress(tea.KeyTab))
+	m = tabToCommand(m)
 	m = runes(m, "make all")
 	if m.messageOverlay != "" || !m.opTable.editing || m.opTable.value != "make all" {
 		t.Fatalf("dismissing the alert must keep the edit: overlay=%q editing=%v value=%q", m.messageOverlay, m.opTable.editing, m.opTable.value)
 	}
 	m = key(m, keyPress(tea.KeyTab))
 	m = runes(m, "2")
-	if m.opEditDuplicatesName() {
+	if opEditHasConflict(m) {
 		t.Fatal("build2 is not a duplicate")
 	}
 	m = press(t, m, ctrlKey('s'))
@@ -428,10 +433,10 @@ func TestOpCommandsKeepingOwnNameIsNotDuplicate(t *testing.T) {
 	m, _ := opCommandsFixture(t, store.OpCommand{Name: "build", Command: "make"})
 	m = key(m, keyPress(tea.KeyRight))
 	m = key(m, keyPress(tea.KeyEnter))
-	if m.opEditDuplicatesName() {
+	if opEditHasConflict(m) {
 		t.Fatal("editing a row without renaming it is not a duplicate")
 	}
-	m = key(m, keyPress(tea.KeyTab))
+	m = tabToCommand(m)
 	m = runes(m, " all")
 	m = press(t, m, ctrlKey('s'))
 	if m.messageOverlay != "" || m.notice != "saved build" {
@@ -481,7 +486,7 @@ func TestOpCommandsRejectBrokenDefault(t *testing.T) {
 	m = key(m, keyPress(tea.KeyRight))
 	m = key(m, keyPress(tea.KeyEnter))
 	m = runes(m, "co")
-	m = key(m, keyPress(tea.KeyTab))
+	m = tabToCommand(m)
 	m = runes(m, "git checkout {$1 or}")
 	m = press(t, m, ctrlKey('s'))
 	if !m.opTable.editing || !strings.Contains(m.errText, "missing default value") {
@@ -500,7 +505,7 @@ func TestOpCommandsRejectQuotedPlaceholder(t *testing.T) {
 	m = key(m, keyPress(tea.KeyRight))
 	m = key(m, keyPress(tea.KeyEnter))
 	m = runes(m, "ci")
-	m = key(m, keyPress(tea.KeyTab))
+	m = tabToCommand(m)
 	m = runes(m, `git commit -m "{$1}"`)
 	m = press(t, m, ctrlKey('s'))
 	if !m.opTable.editing || !strings.Contains(m.errText, `{$1} is inside "…" quotes`) {
@@ -520,5 +525,180 @@ func TestOpCommandsArgumentColorStandsApartFromErrors(t *testing.T) {
 		if argument == confusable {
 			t.Fatalf("argument colour %v must not look like an error", argument)
 		}
+	}
+}
+
+func opEditHasConflict(m Model) bool {
+	_, conflict := m.opEditConflict()
+	return conflict
+}
+
+// tabToCommand moves the editor from KEY past TYPE (left empty: all files)
+// to the COMMAND cell.
+func tabToCommand(m Model) Model {
+	return key(key(m, keyPress(tea.KeyTab)), keyPress(tea.KeyTab))
+}
+
+// newOpCommand starts editing the "+ New command" row of the table.
+func newOpCommand(m Model) Model {
+	if !m.opTable.focused {
+		m = key(m, keyPress(tea.KeyRight))
+	}
+	for m.opTable.index < len(m.opCommands) {
+		m = key(m, keyPress(tea.KeyDown))
+	}
+	return key(m, keyPress(tea.KeyEnter))
+}
+
+func TestOpCommandsEditFieldCycle(t *testing.T) {
+	m, _ := opCommandsFixture(t)
+	m = newOpCommand(m)
+	for _, want := range []int{opFieldType, opFieldValue, opFieldKey} {
+		m = key(m, keyPress(tea.KeyTab))
+		if m.opTable.field != want {
+			t.Fatalf("Tab should move to field %d, got %d", want, m.opTable.field)
+		}
+	}
+	m = key(m, shiftKey(tea.KeyTab))
+	if m.opTable.field != opFieldValue {
+		t.Fatalf("Shift+Tab from KEY should wrap to COMMAND, got %d", m.opTable.field)
+	}
+	m = key(m, keyPress(tea.KeyTab))
+	m = key(m, keyPress(tea.KeyEnter))
+	m = key(m, keyPress(tea.KeyEnter))
+	if m.opTable.field != opFieldValue {
+		t.Fatalf("Enter should walk KEY → TYPE → COMMAND, got %d", m.opTable.field)
+	}
+}
+
+func TestOpCommandsTypeSuggestionsAndSave(t *testing.T) {
+	m, commandStore := opCommandsFixture(t)
+	m = newOpCommand(m)
+	m = runes(m, "test")
+	m = key(m, keyPress(tea.KeyTab))
+	if _, candidates := m.opSuggestions(); len(candidates) != 0 {
+		t.Fatalf("an empty TYPE should not open the menu: %+v", candidates)
+	}
+	m = runes(m, "g")
+	_, candidates := m.opSuggestions()
+	if len(candidates) == 0 || candidates[0].Insert != "go" {
+		t.Fatalf("typing g should suggest go first: %+v", candidates)
+	}
+	m = key(m, keyPress(tea.KeyTab))
+	if m.opTable.fileTypes != "go" || m.opTable.field != opFieldType {
+		t.Fatalf("Tab should accept the type in place: %q field=%d", m.opTable.fileTypes, m.opTable.field)
+	}
+	m = key(m, keyPress(tea.KeyEnter))
+	if m.opTable.field != opFieldValue {
+		t.Fatal("Enter after accepting a type should move on to COMMAND")
+	}
+	m = runes(m, "go test ./...")
+	m = press(t, m, ctrlKey('s'))
+	if m.notice != "saved test (go)" {
+		t.Fatalf("notice = %q err=%q", m.notice, m.errText)
+	}
+	commands := loadedCommands(t, commandStore)
+	if len(commands) != 1 || commands[0].FileTypes != "go" || commands[0].Key() != "test@go" {
+		t.Fatalf("saved: %+v", commands)
+	}
+	frame := ansi.Strip(m.renderInspectOpCommands(120, 40))
+	if !strings.Contains(frame, "TYPE") || !strings.Contains(frame, "│ go ") {
+		t.Fatalf("the TYPE column should show go:\n%s", frame)
+	}
+}
+
+func TestOpCommandsTypeDropdownUnderTypeColumn(t *testing.T) {
+	m, _ := opCommandsFixture(t)
+	m = newOpCommand(m)
+	m = runes(m, "x")
+	m = key(m, keyPress(tea.KeyTab))
+	m = runes(m, "gr")
+	lines := strings.Split(ansi.Strip(m.renderInspectOpCommands(120, 40)), "\n")
+	var editLine, menuLine string
+	for _, line := range lines {
+		switch {
+		case strings.Contains(line, "✎"):
+			editLine = line
+		case strings.Contains(line, "graphql"):
+			menuLine = line
+		}
+	}
+	bars := []int{}
+	for index, r := range []rune(editLine) {
+		if r == '│' {
+			bars = append(bars, index)
+		}
+	}
+	if len(bars) < 3 || menuLine == "" {
+		t.Fatalf("edit row %q / menu row %q", editLine, menuLine)
+	}
+	menuColumn := utf8.RuneCountInString(menuLine[:strings.Index(menuLine, "graphql")])
+	if got, want := menuColumn, bars[1]+3; got != want {
+		t.Fatalf("the type menu should open under the TYPE cell: menu at %d, cell at %d\n%s\n%s", got, want, editLine, menuLine)
+	}
+}
+
+func TestOpCommandsEmptyTypeSavesAll(t *testing.T) {
+	m, commandStore := opCommandsFixture(t)
+	m = newOpCommand(m)
+	m = runes(m, "build")
+	m = key(m, keyPress(tea.KeyTab))
+	if frame := ansi.Strip(m.renderInspectOpCommands(120, 40)); !strings.Contains(frame, opTypePlaceholder) {
+		t.Fatalf("an empty TYPE input should show the * placeholder:\n%s", frame)
+	}
+	m = key(m, keyPress(tea.KeyTab))
+	m = runes(m, "make")
+	m = press(t, m, ctrlKey('s'))
+	if commands := loadedCommands(t, commandStore); len(commands) != 1 || commands[0].FileTypes != store.AllFileTypes {
+		t.Fatalf("an empty TYPE should save as *: %+v", commands)
+	}
+}
+
+func TestOpCommandsSameKeyPerFileType(t *testing.T) {
+	m, commandStore := opCommandsFixture(t, store.OpCommand{Name: "test", FileTypes: "go", Command: "go test ./..."})
+	save := func(m Model, fileTypes, command string) Model {
+		m = newOpCommand(m)
+		m = runes(m, "test")
+		m = key(m, keyPress(tea.KeyTab))
+		m = runes(m, fileTypes)
+		m.opTable.suggestHidden = true
+		m = key(m, keyPress(tea.KeyTab))
+		m = runes(m, command)
+		return press(t, m, ctrlKey('s'))
+	}
+	m = save(m, "rb", "rspec")
+	if m.messageOverlay != "" || m.opTable.editing {
+		t.Fatalf("test for rb should save next to test for go: overlay=%q err=%q", m.messageOverlay, m.errText)
+	}
+	m = save(m, "sh,go", "make test")
+	want := `An op-command named "test" already exists for go — change the key or its file types.`
+	if m.messageOverlay != want || !m.opTable.editing {
+		t.Fatalf("an overlapping type should raise the alert, got %q", m.messageOverlay)
+	}
+	if commands := loadedCommands(t, commandStore); len(commands) != 2 {
+		t.Fatalf("the clash must not save: %+v", commands)
+	}
+}
+
+func TestOpCommandsRejectInvalidFileType(t *testing.T) {
+	m, commandStore := opCommandsFixture(t)
+	m = newOpCommand(m)
+	m = runes(m, "x")
+	m = key(m, keyPress(tea.KeyTab))
+	m = runes(m, "go/rb")
+	m = key(m, keyPress(tea.KeyTab))
+	m = runes(m, "ls")
+	m = press(t, m, ctrlKey('s'))
+	if !m.opTable.editing || !strings.Contains(m.errText, `file type "go/rb"`) || len(loadedCommands(t, commandStore)) != 0 {
+		t.Fatalf("an invalid type should be rejected: editing=%v err=%q", m.opTable.editing, m.errText)
+	}
+	m = key(m, shiftKey(tea.KeyTab))
+	m = key(m, keyPress(tea.KeyHome))
+	m = key(m, keyPress(tea.KeyEnd))
+	m.opTable.fileTypes, m.opTable.cursor = "go", 2
+	m.opTable.key = "x@y"
+	m = press(t, m, ctrlKey('s'))
+	if m.errText != "key must not contain @" {
+		t.Fatalf("@ in a key should be rejected, got %q", m.errText)
 	}
 }

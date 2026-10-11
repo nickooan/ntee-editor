@@ -75,9 +75,9 @@ func opQueryParts(query string) (name, inlineArgs string) {
 }
 
 func (m Model) refreshOpMatches() Model {
-	m.opMode.candidates = m.opCommands
-	names := make([]string, len(m.opCommands))
-	for index, command := range m.opCommands {
+	m.opMode.candidates = m.opCommandsForOpenFile()
+	names := make([]string, len(m.opMode.candidates))
+	for index, command := range m.opMode.candidates {
 		names[index] = command.Name
 	}
 	m.opMode.corpus = fuzzy.Prepare(names)
@@ -85,6 +85,34 @@ func (m Model) refreshOpMatches() Model {
 	m.opMode.matches = fuzzy.Filter(m.opMode.filteredName, m.opMode.corpus)
 	m.opMode.index = input.Clamp(m.opMode.index, 0, max(0, len(m.opMode.matches)-1))
 	return m
+}
+
+// opCommandsForOpenFile is what Ctrl+R offers: the commands whose TYPE matches
+// the open file. A command naming the type overrides a "*" one of the same
+// name, so `test` for go replaces the catch-all `test` on .go files.
+func (m Model) opCommandsForOpenFile() []store.OpCommand {
+	if m.openFile == nil {
+		return m.opCommands
+	}
+	type match struct {
+		command  store.OpCommand
+		specific bool
+	}
+	var matches []match
+	specificNames := map[string]bool{}
+	for _, command := range m.opCommands {
+		if ok, specific := opcmd.MatchFileType(command.FileTypes, m.openRel); ok {
+			matches = append(matches, match{command, specific})
+			specificNames[command.Name] = specificNames[command.Name] || specific
+		}
+	}
+	commands := make([]store.OpCommand, 0, len(matches))
+	for _, candidate := range matches {
+		if candidate.specific || !specificNames[candidate.command.Name] {
+			commands = append(commands, candidate.command)
+		}
+	}
+	return commands
 }
 
 // setOpQuery updates the pick query. Only a change to the name part
@@ -258,7 +286,22 @@ func (m Model) runOpCommand() (tea.Model, tea.Cmd) {
 	m.opRunGen++
 	m.opMode.stage = opStageRun
 	m.opMode.run = newOpRun(commandLine, m.workspaceRoot)
+	m.opMode.run.target = m.opTargetPath()
+	m.opMode.run.unsaved = m.opTargetUnsaved()
 	return m, startOpRunCmd(m.opRunGen, m.opMode.run)
+}
+
+// opTargetPath is the file op-commands run against — the open file, as the
+// workspace-relative path {$fpath} receives.
+func (m Model) opTargetPath() string {
+	return m.opSystemValues()[opcmd.SystemFilePath]
+}
+
+// opTargetUnsaved reports unsaved edits in the target file. Commands read the
+// file from disk, so those edits are not seen. It is the same signal that
+// turns the tab name red.
+func (m Model) opTargetUnsaved() bool {
+	return m.tabDirty(m.tabActive)
 }
 
 func (m Model) handleOpRunKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {

@@ -49,13 +49,13 @@ The key layout is a flat namespace with prefixes:
 
 ### opcommands.go
 
-Op-commands (the Ctrl+R shell command templates) are the one *global* record: they live in their own ntee-db at `~/.ntee-editor/global/`, shared by every project, outside the `Backend` interface. They sit behind a separate `OpCommandStore` interface, which `GlobalOpCommands` (on disk) and `MemoryOpCommands` (tests and fallback) both implement. Records are `OpCommand` (name, command template, updated-at) under plain `opcmd:<name>` keys.
+Op-commands (the Ctrl+R shell command templates) are the one *global* record: they live in their own ntee-db at `~/.ntee-editor/global/`, shared by every project, outside the `Backend` interface. They sit behind a separate `OpCommandStore` interface, which `GlobalOpCommands` (on disk) and `MemoryOpCommands` (tests and fallback) both implement. Records are `OpCommand` (name, file types, command template, updated-at) under `opcmd:<Key()>`. `FileTypes` is the normalized TYPE spec (`go,rb`, or `*` for every file). `Key()` is `name` for a `*` command, which is exactly the key records had before file types existed, and `name@types` otherwise, so one name can exist once per file-type spec. `*` is always written explicitly: `PutOpCommand` stores `"fileTypes":"*"` when the type is empty, and `LoadOpCommands` fills in `*` for records saved before the field existed.
 
 - `GlobalOpCommands` — every editor instance shares this store, and ntee-db allows one writer process. So instead of holding the store open, it opens it per call (`withDB`) and closes it right away. On `ErrLocked` (another instance is mid-read or mid-write) it retries a few times with a short backoff, then returns the error to the status bar. Callers run it on `tea.Cmd` goroutines.
-- `LoadOpCommands` — prefix-scans `opcmd:` and returns the commands sorted by name, for a predictable table and picker order.
-- `PutOpCommand(previousName, command)` — saves one command. A rename (`previousName` differs from the new name) deletes the old key in the same open.
+- `LoadOpCommands` — prefix-scans `opcmd:` and returns the commands sorted by name, then file types with `*` first, for a predictable table and picker order.
+- `PutOpCommand(previousKey, command)` — saves one command under `command.Key()`. A rename or a TYPE change (`previousKey` differs from the new key) deletes the old entry in the same open. `DeleteOpCommand` also takes the key.
 
-*Plus: `GlobalDir` (the store path), `DeleteOpCommand`, the `MemoryOpCommands` mirror (mutex-guarded, since loads and saves run on Cmd goroutines), and `sortOpCommands`.*
+*Plus: `GlobalDir` (the store path), `DeleteOpCommand`, `withDefaults` (empty type → `*`), the `MemoryOpCommands` mirror (mutex-guarded, since loads and saves run on Cmd goroutines), and `sortOpCommands`.*
 
 ### scoped.go
 

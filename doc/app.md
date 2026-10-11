@@ -189,13 +189,20 @@ Every opened file becomes a tab; the list, active index, and per-tab cursors per
 - `inspectLSPCommand` persists the config change *first* (nothing half-applied on a failed write) and then applies it live through the registry — `m.cfg` itself is never mutated because its Languages map is shared with server goroutines.
 - `inspectSyscolorCommand` validates against the curated style list, persists, applies via `syntax.SetStyle`, and invalidates every highlight cache so the new colors show immediately.
 
-- `handleInspectKey` hands every key to whichever right-hand panel has focus: the op-commands table or the style picker. `→` at the end of the bar input moves focus into the panel on the op-commands and system sections.
+- `handleInspectKey` hands every key to whichever right-hand panel has focus: the op-commands table, the style picker or the lsp picker. `→` at the end of the bar input moves focus into the panel on the op-commands, system and lsp sections.
+- The lsp verbs come in two kinds. `start`, `stop` and `restart` act on this session only and never touch the config: start is the registry's `Enable`, stop is `Stop` (the server starts again on demand), and restart is both. `enable` and `disable` also save the language's enable flag. `applyLSPAction` runs one verb for one language, and both the `lsp <verb> <lang|all>` bar command and the picker use it.
+- `setLSPEnabled` is the persisting path behind enable/disable. It writes the config first, then calls the registry's `Enable`/`Disable`, and reports whether it was applied, so the bar is only cleared on success.
+- The lsp picker (`lspPickerState`) is the lsp panel's language list:
+  - `focusLSPPicker` only focuses when there are statuses (with LSP globally off the panel shows a message instead).
+  - In `handleLSPPickerKey`, ↑/↓ choose a language and Enter opens a dropdown of the actions that fit its state (`lspActionsFor`), most likely first: running → stop · restart · disable; stopped → start · disable; disabled → start · enable. ↑/↓ choose the action, Enter applies it through `applyLSPAction` and closes the dropdown with focus kept on the row. Esc/← close the dropdown, then release the list. The action index is re-clamped every key because the list follows the live state.
+  - Statuses are re-read on every key and frame, since a server can start or exit at any time.
+  - `renderLSPState` draws a status line (marked `▸` on the selection bar when picked), and `renderLSPActions` the dropdown lines.
 - The style picker (`stylePickerState`) is the system panel's colour-style list:
   - `focusStylePicker` starts on the current style.
   - In `handleStylePickerKey`, ↑/↓ browse and Enter calls `applySyntaxStyle`; focus stays, so you can keep trying styles. ←/Esc go back to the menu.
   - `refreshStylePreview` re-highlights a 4-line Go sample (`stylePreviewSample`) in the highlighted style with `syntax.HighlightLinesWithStyle`. It runs only when the selection moves, and never changes the active style.
   - `applySyntaxStyle` is shared with `syscolor`: it persists first, then calls `syntax.SetStyle`, sets `m.cfg.Theme.Syntax` and invalidates the highlight caches.
-  - A sidebar click on another section releases the picker.
+  - A sidebar click on another section releases the picker (and the lsp picker).
 
 *Plus small helpers: `inspectDBCommand`, `knownLanguages`, `inspectHint` (the status-bar hint for the current focus) — bar editing and validation.*
 

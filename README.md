@@ -179,7 +179,13 @@ A dashboard for the editor's own machinery. `Shift+↑/↓` switches the left me
   with dead-space percentage, blob usage, orphaned bytes.
 - **lsp** — every configured language server with its live status:
   **running** (green) · **stopped** (yellow — starts on demand) ·
-  **disabled** (gray, with the reason).
+  **disabled** (gray, with the reason). Press `→` to move into the list:
+  `↑/↓` picks a language and `Enter` opens the actions that fit its state.
+  **start / stop / restart** act on this session only and leave your config
+  alone. A stopped server starts again the next time a file needs it.
+  **enable / disable** also save `enable: true` / `false` to your config, so
+  they last across restarts. `↑/↓` chooses, `Enter` applies, `Esc` closes the
+  dropdown, then goes back.
 - **system** — version and syntax color style. Press `→` to move into the
   style list: `↑/↓` browses with a live code preview in that style, `Enter`
   applies it (saved to your config), `←`/`Esc` goes back.
@@ -205,6 +211,7 @@ The `@inspection >` bar takes:
 |---|---|
 | `db compact` | drop dead records from the main log (runs in the background) |
 | `db relieve` | also rewrite the blob store, releasing orphaned blobs |
+| `lsp start\|stop\|restart <lang\|all>` | start, stop, or restart the server for **this session** only; the config is unchanged (a stopped server starts again when a file needs it) |
 | `lsp enable <lang\|all>` | start the server **now** and persist `enable: true` to your config |
 | `lsp disable <lang\|all>` | stop the server and persist `enable: false` |
 

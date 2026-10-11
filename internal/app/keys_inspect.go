@@ -10,6 +10,7 @@ import (
 
 	"github.com/nickooan/ntee-editor/internal/config"
 	"github.com/nickooan/ntee-editor/internal/input"
+	"github.com/nickooan/ntee-editor/internal/lsp"
 	"github.com/nickooan/ntee-editor/internal/store"
 	"github.com/nickooan/ntee-editor/internal/syntax"
 	"github.com/nickooan/ntee-editor/internal/view"
@@ -92,6 +93,9 @@ func (m Model) handleInspectKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.stylePicker.focused {
 		return m.handleStylePickerKey(msg)
 	}
+	if m.lspPicker.focused {
+		return m.handleLSPPickerKey(msg)
+	}
 	switch msg.String() {
 	case "esc":
 		m.mode = m.inspectPrevMode
@@ -114,6 +118,10 @@ func (m Model) handleInspectKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m = m.focusStylePicker()
 			break
 		}
+		if m.inspectMenu == inspectMenuLSP && atInputEnd {
+			m = m.focusLSPPicker()
+			break
+		}
 		m.inspectCursor = input.MoveCursor(m.inspectInput, m.inspectCursor, 1)
 	case "backspace":
 		m.inspectInput, m.inspectCursor, _ = input.RemoveBeforeCursor(m.inspectInput, m.inspectCursor)
@@ -130,7 +138,7 @@ func (m Model) handleInspectKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // renderInspectInput draws the @inspection bar input; it drops its cursor while
 // the op-commands table has focus, so only the table shows where typing goes.
 func (m Model) renderInspectInput() string {
-	if m.opTable.focused || m.stylePicker.focused {
+	if m.opTable.focused || m.stylePicker.focused || m.lspPicker.focused {
 		return execTextStyle.Render(m.inspectInput)
 	}
 	return renderInputLineStyled(m.inspectInput, m.inspectCursor, execTextStyle)
@@ -154,8 +162,14 @@ func (m Model) inspectHint() string {
 		return "↑/↓ style · Enter apply · ←/Esc back"
 	case m.inspectMenu == inspectMenuSystem:
 		return "→ choose a color style · syscolor <style> · Shift+↑/↓ pane · Esc back"
+	case m.lspPicker.menuOpen:
+		return "↑/↓ action · Enter apply · Esc close"
+	case m.lspPicker.focused:
+		return "↑/↓ language · Enter actions · ←/Esc back"
+	case m.inspectMenu == inspectMenuLSP:
+		return "→ manage a server · lsp start|stop|restart|enable|disable <lang|all> · Shift+↑/↓ pane · Esc back"
 	}
-	return "db compact|relieve · lsp enable|disable <lang|all> · syscolor <style> · Shift+↑/↓ pane · Esc back"
+	return "db compact|relieve · lsp start|stop|enable|disable <lang|all> · syscolor <style> · Shift+↑/↓ pane · Esc back"
 }
 
 // runInspectCommand dispatches "db compact|relieve",
@@ -217,11 +231,10 @@ func (m Model) knownLanguages() []string {
 func (m Model) inspectLSPCommand(rest string) (tea.Model, tea.Cmd) {
 	verb, lang, _ := strings.Cut(rest, " ")
 	lang = strings.ToLower(strings.TrimSpace(lang))
-	if (verb != "enable" && verb != "disable") || lang == "" {
-		m.errText = "usage: lsp enable|disable <lang|all>"
+	if !slices.Contains(lspVerbs, verb) || lang == "" {
+		m.errText = "usage: lsp " + strings.Join(lspVerbs, "|") + " <lang|all>"
 		return m, nil
 	}
-	enable := verb == "enable"
 	langs := m.knownLanguages()
 	if lang != "all" {
 		if _, ok := m.cfg.Languages[lang]; !ok {
@@ -230,18 +243,47 @@ func (m Model) inspectLSPCommand(rest string) (tea.Model, tea.Cmd) {
 		}
 		langs = []string{lang}
 	}
+	applied := true
+	switch verb {
+	case lspVerbEnable, lspVerbDisable:
+		m, applied = m.setLSPEnabled(langs, verb == lspVerbEnable, lang == "all")
+	default:
+		for _, each := range langs {
+			if m, applied = m.applyLSPAction(each, verb); !applied {
+				break
+			}
+		}
+		if applied && len(langs) > 1 {
+			m.notice = "lsp " + verb + "ed: " + strings.Join(langs, ", ") + " (this session)"
+			if verb == lspVerbStop {
+				m.notice = "lsp stopped: " + strings.Join(langs, ", ") + " (this session)"
+			}
+		}
+	}
+	if applied {
+		m.inspectMenu = inspectMenuLSP
+		m.inspectInput, m.inspectCursor = "", 0
+	}
+	return m, nil
+}
 
+// setLSPEnabled is what `lsp enable|disable` and the lsp picker both do: persist
+// the languages' enable flag, then start or stop their servers live. all marks
+// the "lsp enable all" form, which also turns the global flag back on.
+// applied is false when the config write or a server start failed (errText
+// says why).
+func (m Model) setLSPEnabled(langs []string, enable, all bool) (Model, bool) {
 	// Persist first, so nothing is half-applied when the write fails. "all"
 	// enable also flips the global lsp.enabled flag on, recovering a
 	// globally-off config; "all" disable stays per-language so the pane stays
 	// informative after restart (the --disable-lsp CLI covers the global off).
 	names := append([]string(nil), langs...)
-	if enable && lang == "all" {
+	if enable && all {
 		names = append(names, "all")
 	}
 	if _, err := config.SetLanguagesEnabled(names, enable); err != nil {
 		m.errText = "config write failed: " + err.Error()
-		return m, nil
+		return m, false
 	}
 
 	// Then apply live. m.cfg is never mutated (its Languages map is shared
@@ -250,7 +292,7 @@ func (m Model) inspectLSPCommand(rest string) (tea.Model, tea.Cmd) {
 		for _, l := range langs {
 			if started, reason := m.lsp.Enable(l); !started {
 				m.errText = reason
-				return m, nil
+				return m, false
 			}
 		}
 		m.notice = "lsp enabled: " + strings.Join(langs, ", ") + " (config updated)"
@@ -263,9 +305,7 @@ func (m Model) inspectLSPCommand(rest string) (tea.Model, tea.Cmd) {
 			m.notice += " — restart to apply"
 		}
 	}
-	m.inspectMenu = inspectMenuLSP
-	m.inspectInput, m.inspectCursor = "", 0
-	return m, nil
+	return m, true
 }
 
 // inspectSyscolorCommand validates, persists, and live-applies a syntax color
@@ -341,6 +381,127 @@ func (m Model) handleStylePickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m = m.applySyntaxStyle(syntaxStyles[m.stylePicker.index])
 	case "left", "esc":
 		m.stylePicker.focused = false
+	}
+	return m, nil
+}
+
+// The lsp verbs. start, stop and restart act on this session only and leave
+// the config alone; enable and disable also persist the language's enable
+// flag (see setLSPEnabled).
+const (
+	lspVerbStart   = "start"
+	lspVerbStop    = "stop"
+	lspVerbRestart = "restart"
+	lspVerbEnable  = "enable"
+	lspVerbDisable = "disable"
+)
+
+var lspVerbs = []string{lspVerbStart, lspVerbStop, lspVerbRestart, lspVerbEnable, lspVerbDisable}
+
+// lspAction is one entry of the lsp picker's dropdown.
+type lspAction struct{ verb, label, detail string }
+
+var (
+	lspStartAction   = lspAction{lspVerbStart, "▶ start", "start now · this session only"}
+	lspStopAction    = lspAction{lspVerbStop, "■ stop", "stop now · starts again when needed"}
+	lspRestartAction = lspAction{lspVerbRestart, "↻ restart", "stop and start now"}
+	lspEnableAction  = lspAction{lspVerbEnable, "✓ enable", "start · save enable: true"}
+	lspDisableAction = lspAction{lspVerbDisable, "⊘ disable", "stop · save enable: false"}
+)
+
+// lspActionsFor is the dropdown for a server state, most likely action first.
+func lspActionsFor(state lsp.LangState) []lspAction {
+	switch state {
+	case lsp.LangRunning:
+		return []lspAction{lspStopAction, lspRestartAction, lspDisableAction}
+	case lsp.LangStopped:
+		return []lspAction{lspStartAction, lspDisableAction}
+	}
+	return []lspAction{lspStartAction, lspEnableAction}
+}
+
+// applyLSPAction runs one verb for one language. The session verbs never
+// touch the config; enable/disable go through setLSPEnabled. applied is false
+// when a server failed to start (errText says why).
+func (m Model) applyLSPAction(lang, verb string) (Model, bool) {
+	switch verb {
+	case lspVerbEnable, lspVerbDisable:
+		return m.setLSPEnabled([]string{lang}, verb == lspVerbEnable, false)
+	case lspVerbStop:
+		m.lsp.Stop(lang)
+		m.notice = "lsp stopped: " + lang + " (starts again when a " + lang + " file needs it)"
+		return m, true
+	case lspVerbRestart:
+		m.lsp.Stop(lang)
+	}
+	if started, reason := m.lsp.Enable(lang); !started {
+		m.errText = reason
+		return m, false
+	}
+	if verb == lspVerbRestart {
+		m.notice = "lsp restarted: " + lang
+	} else {
+		m.notice = "lsp started: " + lang + " (this session)"
+	}
+	return m, true
+}
+
+// lspPickerState is the lsp panel's language list once → focuses it: index is
+// the highlighted language; Enter opens the dropdown of lspActionsFor its
+// state (menuOpen) whose highlighted entry is action.
+type lspPickerState struct {
+	focused  bool
+	index    int
+	menuOpen bool
+	action   int
+}
+
+// focusLSPPicker moves focus into the language list. With LSP globally off
+// there is nothing to pick, and the panel already says why.
+func (m Model) focusLSPPicker() Model {
+	if len(m.lsp.Statuses()) == 0 {
+		return m
+	}
+	m.lspPicker = lspPickerState{focused: true, index: m.lspPicker.index}
+	return m
+}
+
+// handleLSPPickerKey drives the language list and its run/stop dropdown.
+// Statuses are re-read on every key: a server can start or exit at any time.
+func (m Model) handleLSPPickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	statuses := m.lsp.Statuses()
+	if len(statuses) == 0 {
+		m.lspPicker = lspPickerState{}
+		return m, nil
+	}
+	picker := &m.lspPicker
+	picker.index = input.Clamp(picker.index, 0, len(statuses)-1)
+	status := statuses[picker.index]
+	if picker.menuOpen {
+		actions := lspActionsFor(status.State)
+		picker.action = input.Clamp(picker.action, 0, len(actions)-1)
+		switch msg.String() {
+		case "up":
+			picker.action = input.Clamp(picker.action-1, 0, len(actions)-1)
+		case "down":
+			picker.action = input.Clamp(picker.action+1, 0, len(actions)-1)
+		case "enter":
+			picker.menuOpen = false
+			m, _ = m.applyLSPAction(status.Lang, actions[picker.action].verb)
+		case "left", "esc":
+			picker.menuOpen = false
+		}
+		return m, nil
+	}
+	switch msg.String() {
+	case "up":
+		picker.index = input.Clamp(picker.index-1, 0, len(statuses)-1)
+	case "down":
+		picker.index = input.Clamp(picker.index+1, 0, len(statuses)-1)
+	case "enter":
+		picker.menuOpen, picker.action = true, 0
+	case "left", "esc":
+		picker.focused = false
 	}
 	return m, nil
 }

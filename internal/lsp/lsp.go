@@ -73,6 +73,9 @@ type Registry interface {
 	// Disable stops the language's server (if running) and marks it disabled.
 	// Safe when the server is not running.
 	Disable(lang string)
+	// Stop stops the language's running server without disabling it: the next
+	// ClientFor starts a fresh one. Safe when the server is not running.
+	Stop(lang string)
 	ShutdownAll()
 }
 
@@ -88,4 +91,5 @@ func (noopRegistry) Enable(string) (bool, string) {
 	return false, "lsp is off this session — config updated; restart ntee to apply"
 }
 func (noopRegistry) Disable(string) {}
+func (noopRegistry) Stop(string)    {}
 func (noopRegistry) ShutdownAll()   {}

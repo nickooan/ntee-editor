@@ -32,12 +32,15 @@ func (f *fakeMaintBackend) Maintenance() (store.DBInfo, error) { return f.info, 
 func (f *fakeMaintBackend) Compact() error                     { f.compacted++; return f.fail }
 func (f *fakeMaintBackend) RelieveBlobs() error                { f.relieved++; return f.fail }
 
-// fakeRegistry records Enable/Disable calls and serves scripted statuses.
+// fakeRegistry records Enable/Disable/Stop calls (in calls, in order) and
+// serves scripted statuses.
 type fakeRegistry struct {
 	statuses   []lsp.LangStatus
 	enabled    []string
 	disabled   []string
-	failEnable string // language whose Enable fails
+	stopped    []string
+	calls      []string // "enable go", "stop go", …
+	failEnable string   // language whose Enable fails
 }
 
 func (f *fakeRegistry) ClientFor(string) (lsp.Client, bool) { return nil, false }
@@ -48,10 +51,18 @@ func (f *fakeRegistry) Enable(lang string) (bool, string) {
 		return false, lang + "-lsp not found — try: ntee --prepare-lsp"
 	}
 	f.enabled = append(f.enabled, lang)
+	f.calls = append(f.calls, "enable "+lang)
 	return true, ""
 }
-func (f *fakeRegistry) Disable(lang string) { f.disabled = append(f.disabled, lang) }
-func (f *fakeRegistry) ShutdownAll()        {}
+func (f *fakeRegistry) Disable(lang string) {
+	f.disabled = append(f.disabled, lang)
+	f.calls = append(f.calls, "disable "+lang)
+}
+func (f *fakeRegistry) Stop(lang string) {
+	f.stopped = append(f.stopped, lang)
+	f.calls = append(f.calls, "stop "+lang)
+}
+func (f *fakeRegistry) ShutdownAll() {}
 
 // drain feeds a returned tea.Cmd's message back through Update, like the
 // Bubble Tea runtime would.
@@ -577,5 +588,191 @@ func TestStylePickerReleasedBySidebarClick(t *testing.T) {
 	m, _ = m.activateSidebarRow(inspectMenuDB)
 	if m.stylePicker.focused {
 		t.Fatal("switching section by click should release the picker")
+	}
+}
+
+// lspPickerFixture opens the dashboard on the lsp section over a fake registry
+// with go running and typescript stopped, and focuses the language list.
+func lspPickerFixture(t *testing.T) (Model, *fakeRegistry) {
+	t.Helper()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	m, _ := newTestModel(t, nil)
+	reg := &fakeRegistry{statuses: []lsp.LangStatus{
+		{Lang: "go", State: lsp.LangRunning},
+		{Lang: "typescript", State: lsp.LangStopped},
+	}}
+	m.lsp = reg
+	m = key(m, ctrlKey('t'))
+	m = key(m, shiftKey(tea.KeyDown))
+	m = key(m, keyPress(tea.KeyRight))
+	if !m.lspPicker.focused {
+		t.Fatal("→ on the lsp section should focus the language list")
+	}
+	return m, reg
+}
+
+func persistedLanguageEnabled(t *testing.T, lang string) *bool {
+	t.Helper()
+	path, err := config.ConfigPath()
+	must(t, err)
+	data, err := os.ReadFile(path)
+	must(t, err)
+	var file config.Config
+	must(t, yaml.Unmarshal(data, &file))
+	return file.Languages[lang].Enabled
+}
+
+func TestInspectLSPPickerStopsServer(t *testing.T) {
+	m, reg := lspPickerFixture(t)
+	if frame := ansi.Strip(m.render()); !strings.Contains(frame, "▸ ● running") {
+		t.Fatalf("the picked language should be marked:\n%s", frame)
+	}
+	m = key(m, keyPress(tea.KeyEnter))
+	if !m.lspPicker.menuOpen || m.lspPicker.action != 0 {
+		t.Fatalf("Enter should open the menu on its first action: %+v", m.lspPicker)
+	}
+	frame := ansi.Strip(m.render())
+	if !strings.Contains(frame, "▸ ■ stop") || !strings.Contains(frame, "↻ restart") || !strings.Contains(frame, "⊘ disable") ||
+		strings.Contains(frame, "▶ start") {
+		t.Fatalf("a running server should offer stop (picked), restart and disable:\n%s", frame)
+	}
+	m = key(m, keyPress(tea.KeyEnter))
+	if strings.Join(reg.calls, ",") != "stop go" || !strings.Contains(m.notice, "lsp stopped: go") {
+		t.Fatalf("stop should only stop go: calls=%v notice=%q err=%q", reg.calls, m.notice, m.errText)
+	}
+	if _, err := os.Stat(mustConfigPath(t)); !os.IsNotExist(err) {
+		t.Fatalf("stop must not write the config (stat err = %v)", err)
+	}
+	if m.lspPicker.menuOpen || !m.lspPicker.focused {
+		t.Fatalf("applying should close the menu and keep the row focused: %+v", m.lspPicker)
+	}
+}
+
+func TestInspectLSPPickerRunsServer(t *testing.T) {
+	m, reg := lspPickerFixture(t)
+	m = key(m, keyPress(tea.KeyDown))
+	m = key(m, keyPress(tea.KeyEnter))
+	if frame := ansi.Strip(m.render()); !strings.Contains(frame, "▸ ▶ start") || !strings.Contains(frame, "⊘ disable") ||
+		strings.Contains(frame, "■ stop") {
+		t.Fatalf("a stopped server should offer start (picked) and disable:\n%s", frame)
+	}
+	m = key(m, keyPress(tea.KeyDown))
+	m = key(m, keyPress(tea.KeyUp))
+	m = key(m, keyPress(tea.KeyEnter))
+	if strings.Join(reg.calls, ",") != "enable typescript" || !strings.Contains(m.notice, "lsp started: typescript (this session)") {
+		t.Fatalf("start should only start typescript: calls=%v notice=%q", reg.calls, m.notice)
+	}
+	if _, err := os.Stat(mustConfigPath(t)); !os.IsNotExist(err) {
+		t.Fatalf("start must not write the config (stat err = %v)", err)
+	}
+}
+
+func mustConfigPath(t *testing.T) string {
+	t.Helper()
+	path, err := config.ConfigPath()
+	must(t, err)
+	return path
+}
+
+func TestInspectLSPPickerDisablePersists(t *testing.T) {
+	m, reg := lspPickerFixture(t)
+	m = key(m, keyPress(tea.KeyEnter))
+	m = key(m, keyPress(tea.KeyDown))
+	m = key(m, keyPress(tea.KeyDown))
+	m = key(m, keyPress(tea.KeyEnter))
+	if strings.Join(reg.calls, ",") != "disable go" || !strings.Contains(m.notice, "lsp disabled: go") {
+		t.Fatalf("disable should disable go: calls=%v notice=%q err=%q", reg.calls, m.notice, m.errText)
+	}
+	if enabled := persistedLanguageEnabled(t, "go"); enabled == nil || *enabled {
+		t.Fatalf("disable should save enable: false, got %v", enabled)
+	}
+}
+
+func TestInspectLSPPickerRestart(t *testing.T) {
+	m, reg := lspPickerFixture(t)
+	m = key(m, keyPress(tea.KeyEnter))
+	m = key(m, keyPress(tea.KeyDown))
+	m = key(m, keyPress(tea.KeyEnter))
+	if strings.Join(reg.calls, ",") != "stop go,enable go" || m.notice != "lsp restarted: go" {
+		t.Fatalf("restart should stop then start: calls=%v notice=%q", reg.calls, m.notice)
+	}
+	if _, err := os.Stat(mustConfigPath(t)); !os.IsNotExist(err) {
+		t.Fatalf("restart must not write the config (stat err = %v)", err)
+	}
+}
+
+func TestInspectLSPPickerDisabledLanguage(t *testing.T) {
+	m, reg := lspPickerFixture(t)
+	reg.statuses[1] = lsp.LangStatus{Lang: "typescript", State: lsp.LangDisabled, Reason: "disabled in config"}
+	m = key(m, keyPress(tea.KeyDown))
+	m = key(m, keyPress(tea.KeyEnter))
+	if frame := ansi.Strip(m.render()); !strings.Contains(frame, "▸ ▶ start") || !strings.Contains(frame, "✓ enable") {
+		t.Fatalf("a disabled server should offer start (picked) and enable:\n%s", frame)
+	}
+	m = key(m, keyPress(tea.KeyEnter))
+	if strings.Join(reg.calls, ",") != "enable typescript" {
+		t.Fatalf("start should call Enable once: %v", reg.calls)
+	}
+	if _, err := os.Stat(mustConfigPath(t)); !os.IsNotExist(err) {
+		t.Fatal("start on a disabled language must not write the config")
+	}
+	m = key(m, keyPress(tea.KeyEnter))
+	m = key(m, keyPress(tea.KeyDown))
+	m = key(m, keyPress(tea.KeyEnter))
+	if enabled := persistedLanguageEnabled(t, "typescript"); enabled == nil || !*enabled {
+		t.Fatalf("enable should save enable: true, got %v", enabled)
+	}
+}
+
+func TestInspectLSPSessionBarCommands(t *testing.T) {
+	m, reg := lspPickerFixture(t)
+	m = key(m, keyPress(tea.KeyEsc))
+	for _, command := range []string{"lsp stop go", "lsp start go", "lsp restart typescript"} {
+		next, _ := m.runInspectCommand(command)
+		m = next.(Model)
+		if m.errText != "" {
+			t.Fatalf("%q: %s", command, m.errText)
+		}
+	}
+	if got := strings.Join(reg.calls, ","); got != "stop go,enable go,stop typescript,enable typescript" {
+		t.Fatalf("calls = %s", got)
+	}
+	if _, err := os.Stat(mustConfigPath(t)); !os.IsNotExist(err) {
+		t.Fatal("session commands must not write the config")
+	}
+	next, _ := m.runInspectCommand("lsp bogus go")
+	if m = next.(Model); m.errText != "usage: lsp start|stop|restart|enable|disable <lang|all>" {
+		t.Fatalf("usage = %q", m.errText)
+	}
+}
+
+func TestInspectLSPPickerEscLayers(t *testing.T) {
+	m, reg := lspPickerFixture(t)
+	m = key(m, keyPress(tea.KeyEnter))
+	m = key(m, keyPress(tea.KeyEsc))
+	if m.lspPicker.menuOpen || !m.lspPicker.focused {
+		t.Fatalf("first Esc should close only the menu: %+v", m.lspPicker)
+	}
+	m = key(m, keyPress(tea.KeyEsc))
+	if m.lspPicker.focused || m.mode != modeInspect {
+		t.Fatalf("second Esc should return to the bar: %+v mode=%v", m.lspPicker, m.mode)
+	}
+	m = key(m, keyPress(tea.KeyEsc))
+	if m.mode == modeInspect {
+		t.Fatal("third Esc should leave the dashboard")
+	}
+	if len(reg.enabled)+len(reg.disabled) != 0 {
+		t.Fatal("Esc must not change any server")
+	}
+}
+
+func TestInspectLSPPickerNeedsStatuses(t *testing.T) {
+	m, _ := newTestModel(t, nil)
+	m.lsp = &fakeRegistry{}
+	m = key(m, ctrlKey('t'))
+	m = key(m, shiftKey(tea.KeyDown))
+	m = key(m, keyPress(tea.KeyRight))
+	if m.lspPicker.focused {
+		t.Fatal("with LSP off there is no list to focus")
 	}
 }

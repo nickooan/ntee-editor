@@ -192,7 +192,7 @@ A dashboard for the editor's own machinery. `Shift+↑/↓` switches the left me
   opens placeholder suggestions: the next free argument (`{$2}` when the command
   already has `{$1}`), the existing ones, and `{$fpath}`/`{$dpath}`. `↑/↓`
   chooses, `Tab`/`Enter` inserts, `Esc` closes the menu. Placeholders are
-  colour-coded in the table: arguments orange, built-ins blue, broken ones red.
+  colour-coded in the table: arguments purple, built-ins blue, broken ones red.
 
 The `@inspection >` bar takes:
 
@@ -234,7 +234,10 @@ one argument). You can also type them on the same line after the name:
 resulting command before you press `Enter`. A live preview shows the exact command line before `Enter` runs
 it. Commands without arguments run straight away. Values are shell-quoted only
 when they need it, so `master` is passed as `master` and `my file.tf` as
-`'my file.tf'`. The program gets the same arguments either way. Both inputs
+`'my file.tf'`. The program gets the same arguments either way. Because of
+that, write placeholders bare: `git commit -m {$1}`, not `-m "{$1}"`. A
+placeholder inside quotes (or right after `\` or `$`) is rejected when you
+save, since the quoting would no longer protect it. Both inputs
 edit like a text field: `←`/`→` move the cursor and typing inserts at it, so
 you can fix a typo in the name or an argument without retyping the line.
 

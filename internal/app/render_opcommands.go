@@ -29,7 +29,7 @@ func newOpRowStyles(background, textColor, keyColor color.Color) opRowStyles {
 		text:    base.Foreground(textColor),
 		key:     base.Foreground(keyColor).Bold(true),
 		marker:  base.Foreground(colAqua).Bold(true),
-		arg:     base.Foreground(colOrange).Bold(true),
+		arg:     base.Foreground(colPurple).Bold(true),
 		system:  base.Foreground(colBlue).Bold(true),
 		invalid: base.Foreground(colRed).Underline(true),
 	}

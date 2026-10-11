@@ -185,6 +185,40 @@ func TestDefaultErrors(t *testing.T) {
 	}
 }
 
+func TestQuotedPlaceholderRejected(t *testing.T) {
+	for _, source := range []string{
+		`echo "{$1}"`, `echo '{$1}'`, `cat "dir/{$fpath}"`, `echo $'{$1}'`,
+		`echo "a {$2 or x} b"`, `x "{$1 or "y"}"`, `echo "it's {$1}"`, `echo "\"{$1}"`,
+	} {
+		if _, err := Parse(source); err == nil || !strings.Contains(err.Error(), "inside") {
+			t.Errorf("Parse(%q) = %v, want an inside-quotes error", source, err)
+		}
+	}
+	for _, source := range []string{`echo \{$1}`, `echo ${$1}`, `echo "a"\{$1}`} {
+		if _, err := Parse(source); err == nil || !strings.Contains(err.Error(), "directly follow") {
+			t.Errorf("Parse(%q) = %v, want a directly-follows error", source, err)
+		}
+	}
+	for _, source := range []string{
+		`echo {$1}`, `echo "a" {$1}`, `echo \"{$1}`, `echo "\"" {$1}`, `echo 'it'\''s' {$1}`,
+		`awk '{print $1}' {$fpath}`, `x {$2 or "other word"}`, `echo \\{$1}`, `echo {$1}{$2} "b"`,
+		`echo $'a\'b' {$1}`, `echo $HOME/{$1}`,
+	} {
+		if _, err := Parse(source); err != nil {
+			t.Errorf("Parse(%q) = %v, want ok", source, err)
+		}
+	}
+	if _, err := Parse(`git commit -m "{$1}"`); err == nil || err.Error() != `{$1} is inside "…" quotes — remove them, values are quoted for you` {
+		t.Errorf("double-quote error = %v", err)
+	}
+	if _, err := Parse(`echo '{$fpath}'`); err == nil || err.Error() != `{$fpath} is inside '…' quotes — remove them, values are quoted for you` {
+		t.Errorf("single-quote error = %v", err)
+	}
+	if _, err := Parse(`echo \{$1}`); err == nil || err.Error() != `{$1} can't directly follow \ — put a space between them` {
+		t.Errorf("backslash error = %v", err)
+	}
+}
+
 func TestArgCountErrors(t *testing.T) {
 	template, err := Parse("x {$1} {$2 or a} {$3 or b}")
 	if err != nil {
@@ -240,6 +274,10 @@ func TestSpans(t *testing.T) {
 		if text := source[span.Start:span.End]; text != want[index].text || span.Kind != want[index].kind || span.Index != want[index].index {
 			t.Errorf("span %d = %q kind=%d index=%d, want %+v", index, text, span.Kind, span.Index, want[index])
 		}
+	}
+	quoted := `echo "{$1}" {$2} \{$3}`
+	if spans := Spans(quoted); len(spans) != 3 || spans[0].Kind != SpanInvalid || spans[1].Kind != SpanArg || spans[1].Index != 2 || spans[2].Kind != SpanInvalid {
+		t.Fatalf("quoted or escaped placeholders should be invalid: %+v", spans)
 	}
 	if spans := Spans("echo {$1 or"); len(spans) != 1 || spans[0].Kind != SpanInvalid || spans[0].End != len("echo {$1 or") {
 		t.Fatalf("unclosed placeholder should span to the end: %+v", spans)

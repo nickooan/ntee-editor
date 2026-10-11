@@ -69,6 +69,7 @@ type Binding struct {
 // passed through to the shell.
 func Parse(source string) (Template, error) {
 	template := Template{Source: source}
+	var quotes quoteTracker
 	position := 0
 	for {
 		found := strings.Index(source[position:], "{$")
@@ -79,8 +80,12 @@ func Parse(source string) (Template, error) {
 		if start > position {
 			template.segments = append(template.segments, segment{literal: source[position:start]})
 		}
+		quotes.advance(source[position:start])
 		placeholder, end, err := scanPlaceholder(source, start)
 		if err != nil {
+			return Template{}, err
+		}
+		if err := quotes.check(source[start:end]); err != nil {
 			return Template{}, err
 		}
 		template.segments = append(template.segments, placeholder)
@@ -101,6 +106,75 @@ func Parse(source string) (Template, error) {
 		}
 	}
 	return template, nil
+}
+
+const (
+	unquoted     = 0
+	singleQuoted = '\''
+	doubleQuoted = '"'
+	ansiCQuoted  = '$' // $'…'
+)
+
+// quoteTracker follows sh quoting through a template's literal text. Render
+// quotes each value as a standalone word, which is only safe outside quotes
+// and not glued to a preceding \ or $: inside "…" the added '…' is literal
+// (so $(…) in a value would run), \ would escape the opening ', and $ would
+// turn it into a $'…' string that interprets backslashes in the value.
+type quoteTracker struct {
+	quote   byte
+	pending byte // an unescaped \ or $ ending the latest literal
+}
+
+func (tracker *quoteTracker) advance(literal string) {
+	tracker.pending = 0
+	for index := 0; index < len(literal); index++ {
+		character := literal[index]
+		switch tracker.quote {
+		case unquoted:
+			switch character {
+			case '\\':
+				if index+1 == len(literal) {
+					tracker.pending = character
+				}
+				index++
+			case '\'', '"':
+				tracker.quote = character
+			case '$':
+				switch {
+				case index+1 == len(literal):
+					tracker.pending = character
+				case literal[index+1] == '\'':
+					tracker.quote = ansiCQuoted
+					index++
+				}
+			}
+		case singleQuoted:
+			if character == '\'' {
+				tracker.quote = unquoted
+			}
+		default:
+			switch {
+			case character == '\\':
+				index++
+			case character == '"' && tracker.quote == doubleQuoted,
+				character == '\'' && tracker.quote == ansiCQuoted:
+				tracker.quote = unquoted
+			}
+		}
+	}
+}
+
+// check reports why a placeholder can't sit where the tracker stands.
+func (tracker quoteTracker) check(placeholder string) error {
+	switch {
+	case tracker.quote == doubleQuoted:
+		return fmt.Errorf(`%s is inside "…" quotes — remove them, values are quoted for you`, placeholder)
+	case tracker.quote != unquoted:
+		return fmt.Errorf(`%s is inside '…' quotes — remove them, values are quoted for you`, placeholder)
+	case tracker.pending != 0:
+		return fmt.Errorf(`%s can't directly follow %c — put a space between them`, placeholder, tracker.pending)
+	}
+	return nil
 }
 
 // scanPlaceholder reads the placeholder opening at start ("{$"):
@@ -353,12 +427,14 @@ type Span struct {
 // placeholder spans to its next "}" (or the end).
 func Spans(source string) []Span {
 	var spans []Span
+	var quotes quoteTracker
 	for position := 0; ; {
 		found := strings.Index(source[position:], "{$")
 		if found < 0 {
 			return spans
 		}
 		start := position + found
+		quotes.advance(source[position:start])
 		placeholder, end, err := scanPlaceholder(source, start)
 		span := Span{Start: start, End: end, Kind: SpanSystem}
 		switch {
@@ -367,6 +443,8 @@ func Spans(source string) []Span {
 			if closing := strings.IndexByte(source[start:], '}'); closing >= 0 {
 				span.End = start + closing + 1
 			}
+		case quotes.check("") != nil:
+			span.Kind = SpanInvalid
 		case placeholder.argIndex > 0:
 			span.Kind, span.Index = SpanArg, placeholder.argIndex
 		}

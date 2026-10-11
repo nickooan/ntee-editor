@@ -1,6 +1,7 @@
 package app
 
 import (
+	"image/color"
 	"strings"
 	"testing"
 
@@ -491,5 +492,33 @@ func TestOpCommandsRejectBrokenDefault(t *testing.T) {
 	}
 	if len(loadedCommands(t, commandStore)) != 0 {
 		t.Fatal("nothing should be saved")
+	}
+}
+
+func TestOpCommandsRejectQuotedPlaceholder(t *testing.T) {
+	m, commandStore := opCommandsFixture(t)
+	m = key(m, keyPress(tea.KeyRight))
+	m = key(m, keyPress(tea.KeyEnter))
+	m = runes(m, "ci")
+	m = key(m, keyPress(tea.KeyTab))
+	m = runes(m, `git commit -m "{$1}"`)
+	m = press(t, m, ctrlKey('s'))
+	if !m.opTable.editing || !strings.Contains(m.errText, `{$1} is inside "…" quotes`) {
+		t.Fatalf("a quoted placeholder should be rejected: editing=%v err=%q", m.opTable.editing, m.errText)
+	}
+	if !strings.Contains(m.render(), opRowInput.invalid.Render("{$1}")) {
+		t.Fatal("the quoted placeholder should be drawn red while editing")
+	}
+	if len(loadedCommands(t, commandStore)) != 0 {
+		t.Fatal("nothing should be saved")
+	}
+}
+
+func TestOpCommandsArgumentColorStandsApartFromErrors(t *testing.T) {
+	argument := opRowNormal.arg.GetForeground()
+	for _, confusable := range []color.Color{colRed, colOrange, opRowNormal.invalid.GetForeground()} {
+		if argument == confusable {
+			t.Fatalf("argument colour %v must not look like an error", argument)
+		}
 	}
 }

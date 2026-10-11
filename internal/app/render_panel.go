@@ -11,7 +11,10 @@ import (
 // and a legend. Op-commands and the info panels (ntee-db, lsp, system) all
 // draw through it so they read as one design.
 
-var colBlue = lipgloss.Color("#83a598")
+var (
+	colBlue   = lipgloss.Color("#83a598")
+	colPurple = lipgloss.Color("#d3869b")
+)
 
 var (
 	panelBorderStyle   = lipgloss.NewStyle().Foreground(colGutter).Background(colBg)

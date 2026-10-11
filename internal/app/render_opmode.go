@@ -46,7 +46,7 @@ func (m Model) renderOpPickBox(width int) string {
 	boxWidth := input.Clamp(width*8/10, 24, max(24, width-2))
 	rowWidth := max(1, boxWidth-2)
 
-	lines := []string{promptStyle.Render("run ") + renderInputLine(m.opMode.query, len([]rune(m.opMode.query)))}
+	lines := []string{promptStyle.Render("run ") + renderInputLine(m.opMode.query, m.opMode.queryCursor)}
 	// With inline args ("test 10"), show exactly what Enter will run.
 	if commandLine, ok, err := m.opInlinePreview(); ok {
 		if err != nil {

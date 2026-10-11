@@ -475,3 +475,97 @@ func TestOpModeArgLinesWrapInsteadOfCutting(t *testing.T) {
 		}
 	}
 }
+
+func TestOpModeQueryCursorEditing(t *testing.T) {
+	m, _ := opModeFixture(t,
+		store.OpCommand{Name: "build", Command: "make"},
+		store.OpCommand{Name: "test", Command: "printf '%s\\n' {$1}"},
+	)
+	m = press(t, m, ctrlKey('r'))
+	m = runes(m, "tst 10")
+	for range 5 {
+		m = key(m, keyPress(tea.KeyLeft))
+	}
+	if m.opMode.queryCursor != 1 {
+		t.Fatalf("← should move the cursor back to after 't', cursor=%d", m.opMode.queryCursor)
+	}
+	m = runes(m, "e")
+	if m.opMode.query != "test 10" || m.opMode.queryCursor != 2 {
+		t.Fatalf("typing should insert at the cursor: query=%q cursor=%d", m.opMode.query, m.opMode.queryCursor)
+	}
+	if command, ok := m.opHighlighted(); !ok || command.Name != "test" {
+		t.Fatalf("the fixed name should re-filter to test, got %+v %v", command, ok)
+	}
+	if frame := ansi.Strip(m.render()); !strings.Contains(frame, "$ printf '%s\\n' 10") {
+		t.Fatalf("the inline preview should follow the edited query:\n%s", frame)
+	}
+
+	m = key(m, keyPress(tea.KeyHome))
+	m = key(m, keyPress(tea.KeyDelete))
+	m = key(m, keyPress(tea.KeyEnd))
+	m = key(m, keyPress(tea.KeyBackspace))
+	if m.opMode.query != "est 1" || m.opMode.queryCursor != 5 {
+		t.Fatalf("Home+Delete and End+Backspace: query=%q cursor=%d", m.opMode.query, m.opMode.queryCursor)
+	}
+	m = key(m, ctrlKey('a'))
+	m = key(m, keyPress(tea.KeyRight))
+	if m.opMode.queryCursor != 1 {
+		t.Fatalf("Ctrl+A then → should land after the first rune, cursor=%d", m.opMode.queryCursor)
+	}
+	m = key(m, ctrlKey('e'))
+	if m.opMode.queryCursor != 5 {
+		t.Fatalf("Ctrl+E should jump to the end, cursor=%d", m.opMode.queryCursor)
+	}
+}
+
+func TestOpModeQueryCursorDrawnInPlace(t *testing.T) {
+	m, _ := opModeFixture(t, store.OpCommand{Name: "build", Command: "make"})
+	m = press(t, m, ctrlKey('r'))
+	m = runes(m, "bld")
+	m = key(m, keyPress(tea.KeyLeft))
+	if frame := m.render(); !strings.Contains(frame, cursorStyle.Render("d")) {
+		t.Fatal("the cursor block should sit on 'd', not after the query")
+	}
+}
+
+func TestOpModeEditingArgsInQueryKeepsSelection(t *testing.T) {
+	m, _ := opModeFixture(t,
+		store.OpCommand{Name: "echo-a", Command: "echo {$1}"},
+		store.OpCommand{Name: "echo-b", Command: "echo {$1}"},
+	)
+	m = press(t, m, ctrlKey('r'))
+	m = runes(m, "echo 12")
+	m = key(m, keyPress(tea.KeyDown))
+	m = key(m, keyPress(tea.KeyLeft))
+	m = runes(m, "x")
+	if m.opMode.query != "echo 1x2" || m.opMode.index != 1 {
+		t.Fatalf("inserting into the args part must keep the row: query=%q index=%d", m.opMode.query, m.opMode.index)
+	}
+}
+
+func TestOpModePasteInsertsAtQueryCursor(t *testing.T) {
+	m, _ := opModeFixture(t, store.OpCommand{Name: "test", Command: "echo {$1}"})
+	m = press(t, m, ctrlKey('r'))
+	m = runes(m, "test  b")
+	m = key(m, keyPress(tea.KeyLeft))
+	m = key(m, keyPress(tea.KeyLeft))
+	next, _ := m.Update(tea.PasteMsg{Content: "a"})
+	m = next.(Model)
+	if m.opMode.query != "test a b" || m.opMode.queryCursor != 6 {
+		t.Fatalf("paste should insert at the cursor: query=%q cursor=%d", m.opMode.query, m.opMode.queryCursor)
+	}
+}
+
+func TestOpModeArgsDeleteAndEnd(t *testing.T) {
+	m, _ := opModeFixture(t, store.OpCommand{Name: "test", Command: "echo {$1} {$2}"})
+	m = press(t, m, ctrlKey('r'))
+	m = key(m, keyPress(tea.KeyEnter))
+	m = runes(m, "ab cd")
+	m = key(m, keyPress(tea.KeyHome))
+	m = key(m, keyPress(tea.KeyDelete))
+	m = key(m, ctrlKey('e'))
+	m = runes(m, "e")
+	if m.opMode.args != "b cde" || m.opMode.argsCursor != 5 {
+		t.Fatalf("args Delete/Ctrl+E: args=%q cursor=%d", m.opMode.args, m.opMode.argsCursor)
+	}
+}

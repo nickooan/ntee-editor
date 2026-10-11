@@ -234,7 +234,9 @@ one argument). You can also type them on the same line after the name:
 resulting command before you press `Enter`. A live preview shows the exact command line before `Enter` runs
 it. Commands without arguments run straight away. Values are shell-quoted only
 when they need it, so `master` is passed as `master` and `my file.tf` as
-`'my file.tf'`. The program gets the same arguments either way.
+`'my file.tf'`. The program gets the same arguments either way. Both inputs
+edit like a text field: `←`/`→` move the cursor and typing inserts at it, so
+you can fix a typo in the name or an argument without retyping the line.
 
 The command runs with `sh -c` in the workspace directory (the one the editor
 was opened on, even after `Ctrl+W` switched to a nested repo), so `{$fpath}` and

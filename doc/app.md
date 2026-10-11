@@ -342,6 +342,8 @@ The operation overlay runs a saved op-command against the open file. It only ope
   - These lines, and errors (`renderOpError`), wrap rather than get cut off. `renderOpCommandLine` splits the typed args with `opcmd.SplitArgs`, adds the system values, and renders the template every frame with defaults filled in, so the box shows either the exact `$ command` or the error (`needs 1–2 args, got 0`). Enter runs it. Esc goes back to the picker with the query kept. A template whose arguments are all optional still opens this stage, and Enter on an empty line runs it with the defaults. Only a template with no arguments at all runs straight from the picker.
 - **run**: `runOpCommand` bumps `opRunGen` and starts the process (see opmode_run.go). `handleOpRunMsg` appends output and re-arms the wait until the done event arrives. A message with an older generation is dropped, which also ends its wait chain. While the run view is open, ↑/↓/PgUp/PgDn/Home/End scroll back through the output; End returns to following the tail.
 
+Both text inputs, the pick query (`queryCursor`) and the args line (`argsCursor`), edit through `editOpInputLine`: ←/→ move the cursor, Home/Ctrl+A and End/Ctrl+E jump to the ends, Backspace and Delete remove around the cursor, and typing or pasting inserts at it. A query edit goes through `setOpQuery`, so fixing a typo in the middle of the name re-filters and editing the args part leaves the selection alone.
+
 `closeOpMode` (Esc, or `quit`) cancels a still-running process and bumps `opRunGen`, so the cancelled run's last messages are dropped.
 
 *Plus small helpers: `openOpMode`, `refreshOpMatches`, `handleOpArgsKey`, `handleOpRunKey`, `opRunState.status` (the footer text, and whether it is green or red).*

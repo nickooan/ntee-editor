@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"image/color"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -490,7 +489,7 @@ func (m Model) renderFile(width, height int) string {
 		var content string
 		switch {
 		case editing && i == m.edit.cy:
-			content = renderEditLine(lines[i], m.edit.cx, contentWidth, m.edit.sel)
+			content = renderEditLine(lines[i], m.lineSegments(i), m.edit.cx, contentWidth, m.edit.sel)
 		case editing && m.edit.inLineSelection(i):
 			content = renderSelectedLine(lines[i], contentWidth)
 		default:
@@ -663,10 +662,19 @@ func completionRow(it lsp.CompletionItem, labelW, detW, originW int, selected bo
 // when a row is available, plain otherwise (nil rows cover un-lexed files,
 // oversized files, and lines edited since the last rescan).
 func (m Model) renderContentLine(i int, line string, off, width int) string {
-	if m.hlLines != nil && i < len(m.hlLines) && m.hlLines[i] != nil {
-		return renderSegments(m.hlLines[i], off, width)
+	if segments := m.lineSegments(i); segments != nil {
+		return renderSegments(segments, off, width)
 	}
 	return plainWindow(line, off, width)
+}
+
+// lineSegments is line i's cached syntax highlighting, or nil when the file
+// renders plain or the row was invalidated by an edit.
+func (m Model) lineSegments(i int) []view.HighlightSegment {
+	if i < 0 || i >= len(m.hlLines) {
+		return nil
+	}
+	return m.hlLines[i]
 }
 
 func plainWindow(line string, off, width int) string {
@@ -726,9 +734,9 @@ func renderSegmentsBg(segs []view.HighlightSegment, off, width int, bg string, p
 // renderEditLine draws the cursor line, scrolling horizontally so the cursor
 // stays visible when the line is longer than width: it slices a width-wide
 // window that follows the cursor and draws the cursor at its in-window column.
-// An active selection (sel, in full-line rune columns) is highlighted where it
-// intersects the window.
-func renderEditLine(line string, cx, width int, sel *selRange) string {
+// segments (the line's syntax highlighting, or nil) keep their colours on the
+// cursor-line and selection backgrounds.
+func renderEditLine(line string, segments []view.HighlightSegment, cx, width int, sel *selRange) string {
 	if width < 1 {
 		width = 1
 	}
@@ -753,9 +761,6 @@ func renderEditLine(line string, cx, width int, sel *selRange) string {
 		selE = input.Clamp(e, off, end) - off
 	}
 
-	// The row is at most 5 maximal runs — line-hl, selection, the cursor cell,
-	// selection, line-hl — so emit spans at the style boundaries instead of a
-	// Render per column (the batching renderSearchLine documents).
 	window := make([]rune, width)
 	for col := 0; col < width; col++ {
 		if idx := off + col; idx < end {
@@ -764,27 +769,82 @@ func renderEditLine(line string, cx, width int, sel *selRange) string {
 			window[col] = ' '
 		}
 	}
-	cuts := []int{0, curCol, curCol + 1, width}
-	if selS >= 0 {
-		cuts = append(cuts, selS, selE)
-	}
-	sort.Ints(cuts)
-	var b strings.Builder
-	for i := 0; i+1 < len(cuts); i++ {
-		lo, hi := cuts[i], min(cuts[i+1], width)
-		if lo >= hi {
-			continue // duplicate or out-of-window boundary
-		}
-		st := cursorLineStyle // Sublime-style current-line highlight
+	segmentAt := editLineSegmentColumns(segments, n, off, end, width)
+	regionAt := func(col int) editLineRegion {
 		switch {
-		case lo == curCol:
-			st = cursorStyle
-		case selS >= 0 && lo >= selS && lo < selE:
-			st = selectionStyle
+		case col == curCol:
+			return editRegionCursor
+		case selS >= 0 && col >= selS && col < selE:
+			return editRegionSelection
 		}
-		b.WriteString(st.Render(string(window[lo:hi])))
+		return editRegionLine
+	}
+
+	// Emit one Render per run of equal (region, segment) rather than per
+	// column — the batching renderSearchLine documents.
+	var b strings.Builder
+	runStart := 0
+	for col := 1; col <= width; col++ {
+		region := regionAt(runStart)
+		if col < width && regionAt(col) == region && segmentAt[col] == segmentAt[runStart] {
+			continue
+		}
+		b.WriteString(editRunStyle(region, segments, segmentAt[runStart]).Render(string(window[runStart:col])))
+		runStart = col
 	}
 	return b.String()
+}
+
+type editLineRegion uint8
+
+const (
+	editRegionLine editLineRegion = iota
+	editRegionSelection
+	editRegionCursor
+)
+
+// editLineSegmentColumns maps each window column to the index of the syntax
+// segment covering it, or -1 for padding. Segments that don't add up to the
+// line's rune count are a stale row and are ignored (all -1), so colours can
+// never land on the wrong characters.
+func editLineSegmentColumns(segments []view.HighlightSegment, lineRunes, off, end, width int) []int {
+	segmentAt := make([]int, width)
+	for col := range segmentAt {
+		segmentAt[col] = -1
+	}
+	total := 0
+	for _, segment := range segments {
+		total += utf8.RuneCountInString(segment.Text)
+	}
+	if total != lineRunes {
+		return segmentAt
+	}
+	position := 0
+	for segmentIndex, segment := range segments {
+		next := position + utf8.RuneCountInString(segment.Text)
+		for idx := max(position, off); idx < min(next, end); idx++ {
+			segmentAt[idx-off] = segmentIndex
+		}
+		if next >= end {
+			break
+		}
+		position = next
+	}
+	return segmentAt
+}
+
+func editRunStyle(region editLineRegion, segments []view.HighlightSegment, segmentIndex int) lipgloss.Style {
+	switch {
+	case region == editRegionCursor:
+		return cursorStyle
+	case segmentIndex < 0 && region == editRegionSelection:
+		return selectionStyle
+	case segmentIndex < 0:
+		return cursorLineStyle
+	case region == editRegionSelection:
+		return segStyleWithBg(segments[segmentIndex], hexSelection)
+	}
+	return segStyleWithBg(segments[segmentIndex], hexLineHl)
 }
 
 // renderSelectedLine draws a whole line covered by a line-wise selection: its
@@ -1150,7 +1210,8 @@ const (
 	hexDiffAddBg    = "#32361a" // diff review: added line (desaturated dark green)
 	hexDiffDelBg    = "#3c2422" // diff review: removed line (desaturated dark red)
 	hexConflictInBg = "#1d3040" // conflict solving: incoming/theirs side (desaturated dark blue)
-	hexLineHl       = "#3c3836" // openapi preview: cursor row (bg1, matches cursorLineStyle)
+	hexLineHl       = "#3c3836" // cursor row: edit mode and openapi preview (bg1, matches cursorLineStyle)
+	hexSelection    = "#504945" // selection (bg2)
 )
 
 // Gruvbox-dark palette (matches the default grammar style). Every emitted
@@ -1160,8 +1221,8 @@ var (
 	colBg        = lipgloss.Color(hexBg)     // editor background
 	colBgChrome  = lipgloss.Color("#1d2021") // header / status chrome (bg0_h)
 	colFg        = lipgloss.Color("#ebdbb2") // cream foreground
-	colLineHl    = lipgloss.Color("#3c3836") // cursor-line highlight (bg1)
-	colSelection = lipgloss.Color("#504945") // bg2
+	colLineHl    = lipgloss.Color(hexLineHl) // cursor-line highlight (bg1)
+	colSelection = lipgloss.Color(hexSelection)
 	colBorder    = lipgloss.Color("#3c3836")
 	colGutter    = lipgloss.Color("#7c6f64") // bg4
 	colComment   = lipgloss.Color("#928374") // gray

@@ -203,7 +203,8 @@ A dashboard for the editor's own machinery. `Shift+↑/↓` switches the left me
   opens placeholder suggestions: the next free argument (`{$2}` when the command
   already has `{$1}`), the existing ones, and `{$fpath}`/`{$dpath}`. `↑/↓`
   chooses, `Tab`/`Enter` inserts, `Esc` closes the menu. Placeholders are
-  colour-coded in the table: arguments purple, built-ins blue, broken ones red.
+  colour-coded in the table: arguments purple, built-ins blue, `{#"…"}` fragments
+  green (with their `$n` purple), broken ones red.
 
 The `@inspection >` bar takes:
 
@@ -227,6 +228,7 @@ dashboard's **op-commands** table. It can use these placeholders:
 | Placeholder | Replaced with |
 |---|---|
 | `{$1}`, `{$2}`, … | the 1st, 2nd, … argument you type when running it |
+| `{#"-P $2"}` | `-P <argument 2>` when you give argument 2, and nothing at all when you leave it out, so no dangling `-P`. Joined forms work too: `{#"--parallel=$2"}`. The text around `$2` can only be plain words and spaces |
 | `{$1 or master}` | argument 1, or `master` when you leave it out. Quote a default with spaces: `{$2 or "other word"}`. `{$3 or ""}` makes the placeholder disappear when omitted (no empty `''` argument) |
 | `{$fpath}` | the open file's path, relative to the workspace directory (e.g. `apps/web/main.go`) |
 | `{$dpath}` | the open file's directory, relative to the workspace directory (e.g. `apps/web`; `.` at the top level) |
@@ -238,6 +240,11 @@ arguments:
 - `deploy a b c` fills `$1 $2 $3` in order and leaves `$4` to its default.
 
 The args box shows which value lands where before you run.
+
+To pass flags the template doesn't name, put them after `--`, like `npm run x -- …`:
+`test 10 -- -P 30` fills `{$1}` with `10` and adds `-P 30` to the end of the
+command. Words after `--` are quoted like normal arguments and don't count
+toward the argument limit. Write `'--'` to pass a literal `--` as an argument.
 
 `Ctrl+R` lists only the commands whose TYPE matches the open file (plus the
 `*` ones). When a key exists both for the file's type and for `*`, the one for

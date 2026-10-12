@@ -21,7 +21,7 @@ var (
 // opRowStyles is one row's palette: every run carries the row's background,
 // so a highlighted row stays one solid bar.
 type opRowStyles struct {
-	text, dim, key, fileType, marker, arg, system, invalid lipgloss.Style
+	text, dim, key, fileType, marker, arg, system, fragment, invalid lipgloss.Style
 }
 
 func newOpRowStyles(background, textColor, keyColor color.Color) opRowStyles {
@@ -34,6 +34,7 @@ func newOpRowStyles(background, textColor, keyColor color.Color) opRowStyles {
 		marker:   base.Foreground(colAqua).Bold(true),
 		arg:      base.Foreground(colPurple).Bold(true),
 		system:   base.Foreground(colBlue).Bold(true),
+		fragment: base.Foreground(colGreen),
 		invalid:  base.Foreground(colRed).Underline(true),
 	}
 }
@@ -53,11 +54,13 @@ const (
 	opTokenText opTokenClass = iota
 	opTokenArg
 	opTokenSystem
+	opTokenFragment
 	opTokenInvalid
 )
 
 // opTokenClasses colors a template per rune: {$n} / {$n or default} args,
-// system variables, and anything opcmd would reject (half-typed included).
+// system variables, {#"… $n"} fragments (their $n in the arg color), and
+// anything opcmd would reject (half-typed included).
 // Spans is the parser's own scanner, so the colors match what Parse accepts.
 func opTokenClasses(runes []rune) []opTokenClass {
 	classes := make([]opTokenClass, len(runes))
@@ -69,10 +72,18 @@ func opTokenClasses(runes []rune) []opTokenClass {
 			class = opTokenArg
 		case opcmd.SpanSystem:
 			class = opTokenSystem
+		case opcmd.SpanFragment:
+			class = opTokenFragment
 		}
 		first := utf8.RuneCountInString(text[:span.Start])
 		for index := first; index < first+utf8.RuneCountInString(text[span.Start:span.End]); index++ {
 			classes[index] = class
+		}
+		if span.Kind == opcmd.SpanFragment {
+			referenceFirst := utf8.RuneCountInString(text[:span.ReferenceStart])
+			for index := referenceFirst; index < referenceFirst+span.ReferenceEnd-span.ReferenceStart; index++ {
+				classes[index] = opTokenArg
+			}
 		}
 	}
 	return classes
@@ -84,6 +95,8 @@ func (styles opRowStyles) forClass(class opTokenClass) lipgloss.Style {
 		return styles.arg
 	case opTokenSystem:
 		return styles.system
+	case opTokenFragment:
+		return styles.fragment
 	case opTokenInvalid:
 		return styles.invalid
 	}
@@ -413,6 +426,7 @@ func (m Model) opLegend(width int) []string {
 		{"go,rb  *", opRowNormal.fileType, "TYPE: the files Ctrl+R offers the command for (* = all)"},
 		{"{$1} {$2} …", opRowNormal.arg, "arguments you type when running the command"},
 		{"{$1 or x}", opRowNormal.arg, `default when the argument is left out ("x y" quoted, "" omits it)`},
+		{`{#"-P $1"}`, opRowNormal.fragment, "flag + value only when the argument is given, else nothing"},
 		{"{$fpath}", opRowNormal.system, opcmd.SystemVarDetails[opcmd.SystemFilePath]},
 		{"{$dpath}", opRowNormal.system, opcmd.SystemVarDetails[opcmd.SystemDirPath]},
 	}, width)

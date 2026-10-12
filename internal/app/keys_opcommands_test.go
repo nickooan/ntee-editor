@@ -702,3 +702,15 @@ func TestOpCommandsRejectInvalidFileType(t *testing.T) {
 		t.Fatalf("@ in a key should be rejected, got %q", m.errText)
 	}
 }
+
+func TestOpTokenClassesFragment(t *testing.T) {
+	text := `go {#"-p $12"} {$1}`
+	classes := opTokenClasses([]rune(text))
+	var got strings.Builder
+	for _, class := range classes {
+		got.WriteString(map[opTokenClass]string{opTokenText: ".", opTokenArg: "a", opTokenFragment: "f", opTokenSystem: "s", opTokenInvalid: "x"}[class])
+	}
+	if want := "...ffffffaaaff.aaaa"; got.String() != want {
+		t.Fatalf("classes = %s, want %s for %s", got.String(), want, text)
+	}
+}

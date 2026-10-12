@@ -1,6 +1,7 @@
 // Package opcmd parses op-command templates — user-saved shell command lines
-// with {$1}, {$2}, … positional placeholders and {$name} system variables —
-// and renders them into an executable command line.
+// with {$1}, {$2}, … positional placeholders, {#"-P $2"} optional fragments
+// and {$name} system variables — and renders them into an executable command
+// line.
 package opcmd
 
 import (
@@ -32,7 +33,15 @@ type segment struct {
 	system       string // system variable name; "" when not a system placeholder
 	defaultValue string // {$n or default}; an empty default renders as nothing
 	hasDefault   bool
+	// A {#"prefix $N suffix"} fragment: rendered around the quoted value when
+	// $N is given, and as nothing when it is omitted.
+	isFragment                                        bool
+	fragmentPrefix, fragmentReference, fragmentSuffix string
 }
+
+// fragmentOpen starts a fragment. The quote is part of it so shell's ${#var}
+// stays literal.
+const fragmentOpen = `{#"`
 
 // Template is a parsed op-command template.
 type Template struct {
@@ -55,6 +64,7 @@ type ArgSpec struct {
 	Index    int
 	Default  string // the first default given for it, when Optional
 	Optional bool
+	Fragment string // the first {#"…"} body using it, e.g. "-P $2"
 }
 
 // Binding is the value one argument index receives for a run.
@@ -72,11 +82,10 @@ func Parse(source string) (Template, error) {
 	var quotes quoteTracker
 	position := 0
 	for {
-		found := strings.Index(source[position:], "{$")
-		if found < 0 {
+		start := nextPlaceholder(source, position)
+		if start < 0 {
 			break
 		}
-		start := position + found
 		if start > position {
 			template.segments = append(template.segments, segment{literal: source[position:start]})
 		}
@@ -177,13 +186,31 @@ func (tracker quoteTracker) check(placeholder string) error {
 	return nil
 }
 
-// scanPlaceholder reads the placeholder opening at start ("{$"):
+// nextPlaceholder returns the offset of the first "{$" or `{#"` at or after
+// from, or -1.
+func nextPlaceholder(source string, from int) int {
+	dollar := strings.Index(source[from:], "{$")
+	fragment := strings.Index(source[from:], fragmentOpen)
+	switch {
+	case dollar < 0 && fragment < 0:
+		return -1
+	case dollar < 0 || (fragment >= 0 && fragment < dollar):
+		return from + fragment
+	}
+	return from + dollar
+}
+
+// scanPlaceholder reads the placeholder opening at start ("{$", or `{#"` for
+// a fragment):
 //
-//	{$NAME}  |  {$N or WORD}  |  {$N or "TEXT"}
+//	{$NAME}  |  {$N or WORD}  |  {$N or "TEXT"}  |  {#"TEXT $N TEXT"}
 //
 // A quoted default may hold spaces and "}" (with \" and \\ escapes). It
 // returns the segment and the offset just past the closing "}".
 func scanPlaceholder(source string, start int) (segment, int, error) {
+	if strings.HasPrefix(source[start:], fragmentOpen) {
+		return scanFragment(source, start)
+	}
 	unclosed := func() (segment, int, error) {
 		return segment{}, 0, fmt.Errorf("unclosed placeholder %q", source[start:])
 	}
@@ -246,6 +273,69 @@ func scanPlaceholder(source string, start int) (segment, int, error) {
 	return placeholder, position + 1, nil
 }
 
+// scanFragment reads a {#"…"} fragment opening at start. Its body holds
+// exactly one $N; everything else must be characters ShellQuote leaves bare,
+// or spaces, so the body can never reopen quoting around the value or add
+// shell syntax of its own.
+func scanFragment(source string, start int) (segment, int, error) {
+	bodyStart := start + len(fragmentOpen)
+	closing := strings.IndexByte(source[bodyStart:], '"')
+	if closing < 0 {
+		return segment{}, 0, fmt.Errorf("unclosed placeholder %q", source[start:])
+	}
+	body := source[bodyStart : bodyStart+closing]
+	label := fragmentOpen + body + `"}`
+	position := skipSpaces(source, bodyStart+closing+1)
+	if position >= len(source) {
+		return segment{}, 0, fmt.Errorf("unclosed placeholder %q", source[start:])
+	}
+	if source[position] != '}' {
+		if strings.HasPrefix(source[position:], "or") {
+			return segment{}, 0, fmt.Errorf("%s is already empty when its argument is omitted — for a default write -P {$2 or 4}", label)
+		}
+		return segment{}, 0, fmt.Errorf("unexpected %q after %s", strings.TrimSpace(source[position:]), label)
+	}
+	if strings.Contains(body, "{$") {
+		return segment{}, 0, fmt.Errorf("%s: write the argument as $2, not {$2}", label)
+	}
+
+	placeholder := segment{isFragment: true, hasDefault: true}
+	referenceStart := -1
+	for index := 0; index < len(body); index++ {
+		character := body[index]
+		switch {
+		case character == '$':
+			digitsEnd := index + 1
+			for digitsEnd < len(body) && body[digitsEnd] >= '0' && body[digitsEnd] <= '9' {
+				digitsEnd++
+			}
+			if digitsEnd == index+1 {
+				return segment{}, 0, fmt.Errorf("%s: $ must be followed by an argument number like $1 (shell variables aren't allowed here)", label)
+			}
+			if referenceStart >= 0 {
+				return segment{}, 0, fmt.Errorf("%s: a fragment uses exactly one argument", label)
+			}
+			argIndex, err := strconv.Atoi(body[index+1 : digitsEnd])
+			if err != nil || argIndex < 1 {
+				return segment{}, 0, fmt.Errorf("%s: invalid argument %s (args start at $1)", label, body[index:digitsEnd])
+			}
+			placeholder.argIndex = argIndex
+			referenceStart = index
+			placeholder.fragmentPrefix = body[:index]
+			placeholder.fragmentReference = body[index:digitsEnd]
+			placeholder.fragmentSuffix = body[digitsEnd:]
+			index = digitsEnd - 1
+		case character == ' ' || character == '\t':
+		case needsQuoting(rune(character)):
+			return segment{}, 0, fmt.Errorf("%s: %q isn't allowed (only plain words, spaces and one $N)", label, string(character))
+		}
+	}
+	if referenceStart < 0 {
+		return segment{}, 0, fmt.Errorf("%s: needs an argument like $1", label)
+	}
+	return placeholder, position + 1, nil
+}
+
 // scanQuoted reads a "…" default starting at the opening quote, unescaping
 // \" and \\. It returns the value and the offset past the closing quote.
 func scanQuoted(source string, start int) (string, int, bool) {
@@ -303,6 +393,11 @@ func (t Template) ArgSpecs() []ArgSpec {
 			specs[index].Default = defaults[index]
 		}
 	}
+	for _, part := range t.segments {
+		if part.isFragment && specs[part.argIndex-1].Fragment == "" {
+			specs[part.argIndex-1].Fragment = part.fragmentPrefix + part.fragmentReference + part.fragmentSuffix
+		}
+	}
 	return specs
 }
 
@@ -327,10 +422,12 @@ func (t Template) firstDefaults() []string {
 func (t Template) Bind(args []string) ([]Binding, error) {
 	count := len(args)
 	switch {
-	case count < t.MinArg || (count > t.MaxArg && t.MinArg == t.MaxArg):
+	case count < t.MinArg:
 		return nil, t.countError(count)
+	case count > t.MaxArg && t.MinArg == t.MaxArg:
+		return nil, fmt.Errorf("%w — put extra flags after --", t.countError(count))
 	case count > t.MaxArg:
-		return nil, fmt.Errorf("takes at most %d args, got %d", t.MaxArg, count)
+		return nil, fmt.Errorf("takes at most %d args, got %d — put extra flags after --", t.MaxArg, count)
 	}
 	defaults := t.firstDefaults()
 	bindings := make([]Binding, t.MaxArg)
@@ -374,8 +471,9 @@ func Plural(count int, noun string) string {
 
 // Render substitutes args (assigned by Bind) and system values into the
 // template, shell-quoting each value. An omitted argument uses the default
-// written at that placeholder; an empty default renders as nothing.
-func (t Template) Render(args []string, system map[string]string) (string, error) {
+// written at that placeholder; an empty default renders as nothing. extra
+// (the words after "--") is appended to the end, each one quoted.
+func (t Template) Render(args, extra []string, system map[string]string) (string, error) {
 	bindings, err := t.Bind(args)
 	if err != nil {
 		return "", err
@@ -385,9 +483,12 @@ func (t Template) Render(args []string, system map[string]string) (string, error
 		switch {
 		case part.argIndex > 0:
 			binding := bindings[part.argIndex-1]
-			if !binding.FromDefault {
+			switch {
+			case !binding.FromDefault && part.isFragment:
+				out.WriteString(part.fragmentPrefix + ShellQuote(binding.Value) + part.fragmentSuffix)
+			case !binding.FromDefault:
 				out.WriteString(ShellQuote(binding.Value))
-			} else if part.defaultValue != "" {
+			case part.defaultValue != "":
 				// A defaulted index is never required, so every occurrence
 				// carries its own default.
 				out.WriteString(ShellQuote(part.defaultValue))
@@ -402,6 +503,9 @@ func (t Template) Render(args []string, system map[string]string) (string, error
 			out.WriteString(part.literal)
 		}
 	}
+	for _, word := range extra {
+		out.WriteString(" " + ShellQuote(word))
+	}
 	return out.String(), nil
 }
 
@@ -411,15 +515,18 @@ type SpanKind uint8
 const (
 	SpanArg SpanKind = iota + 1
 	SpanSystem
+	SpanFragment
 	SpanInvalid
 )
 
 // Span is one placeholder in a template, as byte offsets [Start, End).
-// Index is the argument number for SpanArg.
+// Index is the argument number for SpanArg and SpanFragment; a fragment's
+// $N reference sits at [ReferenceStart, ReferenceEnd).
 type Span struct {
-	Start, End int
-	Kind       SpanKind
-	Index      int
+	Start, End                   int
+	Kind                         SpanKind
+	Index                        int
+	ReferenceStart, ReferenceEnd int
 }
 
 // Spans finds every placeholder in source with the parser's own scanner, so
@@ -429,11 +536,10 @@ func Spans(source string) []Span {
 	var spans []Span
 	var quotes quoteTracker
 	for position := 0; ; {
-		found := strings.Index(source[position:], "{$")
-		if found < 0 {
+		start := nextPlaceholder(source, position)
+		if start < 0 {
 			return spans
 		}
-		start := position + found
 		quotes.advance(source[position:start])
 		placeholder, end, err := scanPlaceholder(source, start)
 		span := Span{Start: start, End: end, Kind: SpanSystem}
@@ -445,6 +551,10 @@ func Spans(source string) []Span {
 			}
 		case quotes.check("") != nil:
 			span.Kind = SpanInvalid
+		case placeholder.isFragment:
+			span.Kind, span.Index = SpanFragment, placeholder.argIndex
+			span.ReferenceStart = start + len(fragmentOpen) + len(placeholder.fragmentPrefix)
+			span.ReferenceEnd = span.ReferenceStart + len(placeholder.fragmentReference)
 		case placeholder.argIndex > 0:
 			span.Kind, span.Index = SpanArg, placeholder.argIndex
 		}
@@ -475,33 +585,46 @@ func needsQuoting(r rune) bool {
 
 // SplitArgs splits the user's argument line the way sh splits words:
 // whitespace separates, '…' is literal, "…" groups (with \" and \\ escapes),
-// and a bare backslash escapes the next character.
-func SplitArgs(line string) ([]string, error) {
+// and a bare backslash escapes the next character. The first unquoted "--"
+// ends the positional args: every word after it is returned in extra.
+func SplitArgs(line string) (args, extra []string, err error) {
 	var (
-		args    []string
-		current strings.Builder
-		inWord  bool
+		current   strings.Builder
+		inWord    bool
+		quoted    bool // the word used quotes or a backslash, so "--" in it is literal
+		separated bool
 	)
+	finishWord := func() {
+		word := current.String()
+		switch {
+		case separated:
+			extra = append(extra, word)
+		case word == "--" && !quoted:
+			separated = true
+		default:
+			args = append(args, word)
+		}
+		current.Reset()
+		inWord, quoted = false, false
+	}
 	runes := []rune(line)
 	for index := 0; index < len(runes); index++ {
 		r := runes[index]
 		switch {
 		case r == ' ' || r == '\t':
 			if inWord {
-				args = append(args, current.String())
-				current.Reset()
-				inWord = false
+				finishWord()
 			}
 		case r == '\'':
-			inWord = true
+			inWord, quoted = true, true
 			closing := slices.Index(runes[index+1:], '\'')
 			if closing < 0 {
-				return nil, fmt.Errorf("unterminated ' quote")
+				return nil, nil, fmt.Errorf("unterminated ' quote")
 			}
 			current.WriteString(string(runes[index+1 : index+1+closing]))
 			index += closing + 1
 		case r == '"':
-			inWord = true
+			inWord, quoted = true, true
 			closed := false
 			for index++; index < len(runes); index++ {
 				if runes[index] == '"' {
@@ -514,10 +637,10 @@ func SplitArgs(line string) ([]string, error) {
 				current.WriteRune(runes[index])
 			}
 			if !closed {
-				return nil, fmt.Errorf("unterminated \" quote")
+				return nil, nil, fmt.Errorf("unterminated \" quote")
 			}
 		case r == '\\' && index+1 < len(runes):
-			inWord = true
+			inWord, quoted = true, true
 			index++
 			current.WriteRune(runes[index])
 		default:
@@ -526,7 +649,7 @@ func SplitArgs(line string) ([]string, error) {
 		}
 	}
 	if inWord {
-		args = append(args, current.String())
+		finishWord()
 	}
-	return args, nil
+	return args, extra, nil
 }

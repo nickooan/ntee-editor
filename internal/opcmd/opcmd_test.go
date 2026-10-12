@@ -37,7 +37,7 @@ func TestParseAndRender(t *testing.T) {
 			if template.MaxArg != tc.wantMax || !slices.Equal(template.System, tc.wantVars) {
 				t.Fatalf("MaxArg=%d System=%v, want %d %v", template.MaxArg, template.System, tc.wantMax, tc.wantVars)
 			}
-			got, err := template.Render(tc.args, system)
+			got, err := template.Render(tc.args, nil, system)
 			if err != nil {
 				t.Fatalf("Render: %v", err)
 			}
@@ -61,11 +61,11 @@ func TestRenderArgCountMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := template.Render([]string{"a"}, nil); err == nil || err.Error() != "needs 2 args, got 1" {
+	if _, err := template.Render([]string{"a"}, nil, nil); err == nil || err.Error() != "needs 2 args, got 1" {
 		t.Fatalf("too few args: err=%v", err)
 	}
-	if _, err := template.Render([]string{"a", "b", "c"}, nil); err == nil {
-		t.Fatal("too many args should error")
+	if _, err := template.Render([]string{"a", "b", "c"}, nil, nil); err == nil || err.Error() != "needs 2 args, got 3 — put extra flags after --" {
+		t.Fatalf("too many args: err=%v", err)
 	}
 }
 
@@ -74,7 +74,7 @@ func TestRenderMissingSystemValue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := template.Render(nil, map[string]string{}); err == nil {
+	if _, err := template.Render(nil, nil, map[string]string{}); err == nil {
 		t.Fatal("missing system value should error")
 	}
 }
@@ -115,16 +115,16 @@ func TestSplitArgs(t *testing.T) {
 		{`'' x`, []string{"", "x"}},
 	}
 	for _, tc := range cases {
-		got, err := SplitArgs(tc.line)
+		got, extra, err := SplitArgs(tc.line)
 		if err != nil {
 			t.Fatalf("SplitArgs(%q): %v", tc.line, err)
 		}
-		if !slices.Equal(got, tc.want) {
-			t.Errorf("SplitArgs(%q) = %q, want %q", tc.line, got, tc.want)
+		if !slices.Equal(got, tc.want) || extra != nil {
+			t.Errorf("SplitArgs(%q) = %q %q, want %q", tc.line, got, extra, tc.want)
 		}
 	}
-	for _, line := range []string{`"open`, `'open`} {
-		if _, err := SplitArgs(line); err == nil {
+	for _, line := range []string{`"open`, `'open`, `a -- "open`} {
+		if _, _, err := SplitArgs(line); err == nil {
 			t.Errorf("SplitArgs(%q) should error", line)
 		}
 	}
@@ -160,7 +160,7 @@ func TestDefaults(t *testing.T) {
 			if template.MinArg != tc.wantMin || template.MaxArg != tc.wantMax {
 				t.Fatalf("MinArg=%d MaxArg=%d, want %d %d", template.MinArg, template.MaxArg, tc.wantMin, tc.wantMax)
 			}
-			got, err := template.Render(tc.args, nil)
+			got, err := template.Render(tc.args, nil, nil)
 			if err != nil || got != tc.want {
 				t.Fatalf("Render = %q, %v; want %q", got, err, tc.want)
 			}
@@ -224,13 +224,13 @@ func TestArgCountErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := template.Render(nil, nil); err == nil || err.Error() != "needs 1 arg ($1), got 0" {
+	if _, err := template.Render(nil, nil, nil); err == nil || err.Error() != "needs 1 arg ($1), got 0" {
 		t.Errorf("too few: %v", err)
 	}
-	if _, err := template.Render([]string{"1", "2", "3", "4"}, nil); err == nil || err.Error() != "takes at most 3 args, got 4" {
+	if _, err := template.Render([]string{"1", "2", "3", "4"}, nil, nil); err == nil || err.Error() != "takes at most 3 args, got 4 — put extra flags after --" {
 		t.Errorf("too many: %v", err)
 	}
-	if got, err := template.Render([]string{"1", "2"}, nil); err != nil || got != "x 1 2 b" {
+	if got, err := template.Render([]string{"1", "2"}, nil, nil); err != nil || got != "x 1 2 b" {
 		t.Errorf("partial: %q %v", got, err)
 	}
 }
@@ -314,11 +314,11 @@ func TestBindRequiredOnlyAndPositional(t *testing.T) {
 		{[]string{"a", "b", "c"}, "$1=a $2=b $3=c $4=*", "printf '[%s]' a b c ", ""},
 		{[]string{"a", "b", "c", "d"}, "$1=a $2=b $3=c $4=d", "printf '[%s]' a b c d", ""},
 		{[]string{"a"}, "", "", "needs 2 args ($1, $3), got 1"},
-		{[]string{"a", "b", "c", "d", "e"}, "", "", "takes at most 4 args, got 5"},
+		{[]string{"a", "b", "c", "d", "e"}, "", "", "takes at most 4 args, got 5 — put extra flags after --"},
 	}
 	for _, tc := range cases {
 		bindings, err := template.Bind(tc.args)
-		rendered, renderErr := template.Render(tc.args, nil)
+		rendered, renderErr := template.Render(tc.args, nil, nil)
 		if tc.wantErr != "" {
 			if err == nil || err.Error() != tc.wantErr || renderErr == nil {
 				t.Errorf("Bind(%q) err = %v, want %q", tc.args, err, tc.wantErr)
@@ -347,5 +347,136 @@ func TestBindUncoveredRequiredArg(t *testing.T) {
 	}
 	if bindings, err := template.Bind([]string{"a", "b", "c", "d"}); err != nil || bindingText(bindings) != "$1=a $2=b $3=c $4=d" {
 		t.Errorf("all typed: %q %v", bindingText(bindings), err)
+	}
+}
+
+func TestSplitArgsExtra(t *testing.T) {
+	cases := []struct {
+		line            string
+		wantArgs, wantX []string
+	}{
+		{"a -- -P 30", []string{"a"}, []string{"-P", "30"}},
+		{"-- -v", nil, []string{"-v"}},
+		{"a b --", []string{"a", "b"}, nil},
+		{`a -- -m "two words"`, []string{"a"}, []string{"-m", "two words"}},
+		{"-- a -- b", nil, []string{"a", "--", "b"}},
+		{`'--' x`, []string{"--", "x"}, nil},
+		{`"--" x`, []string{"--", "x"}, nil},
+		{`\-- x`, []string{"--", "x"}, nil},
+		{"a --x b", []string{"a", "--x", "b"}, nil},
+	}
+	for _, tc := range cases {
+		args, extra, err := SplitArgs(tc.line)
+		if err != nil || !slices.Equal(args, tc.wantArgs) || !slices.Equal(extra, tc.wantX) {
+			t.Errorf("SplitArgs(%q) = %q %q %v, want %q %q", tc.line, args, extra, err, tc.wantArgs, tc.wantX)
+		}
+	}
+}
+
+func TestRenderExtra(t *testing.T) {
+	cases := []struct {
+		source string
+		args   []string
+		extra  []string
+		want   string
+	}{
+		{"go test {$1}", []string{"./..."}, []string{"-P", "30"}, "go test ./... -P 30"},
+		{"make test", nil, []string{"-v"}, "make test -v"},
+		{"echo {$1}", []string{"a"}, []string{"two words", "a;b"}, "echo a 'two words' 'a;b'"},
+		{"echo {$1}", []string{"a"}, nil, "echo a"},
+		{"git log {$1 or \"\"}", nil, []string{"--oneline"}, "git log  --oneline"},
+	}
+	for _, tc := range cases {
+		template, err := Parse(tc.source)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", tc.source, err)
+		}
+		if got, err := template.Render(tc.args, tc.extra, nil); err != nil || got != tc.want {
+			t.Errorf("Render(%q, %q, %q) = %q, %v; want %q", tc.source, tc.args, tc.extra, got, err, tc.want)
+		}
+	}
+}
+
+func TestFragments(t *testing.T) {
+	cases := []struct {
+		name, source     string
+		args             []string
+		want             string
+		wantMin, wantMax int
+	}{
+		{"given", `cmd {#"-P $1"}`, []string{"30"}, "cmd -P 30", 0, 1},
+		{"omitted", `cmd {#"-P $1"} x`, nil, "cmd  x", 0, 1},
+		{"glued", `cmd {#"--parallel=$1"}`, []string{"4"}, "cmd --parallel=4", 0, 1},
+		{"value quoted", `cmd {#"-m $1"}`, []string{"two words"}, "cmd -m 'two words'", 0, 1},
+		{"suffix", `cmd {#"-o $1.out"}`, []string{"a b"}, "cmd -o 'a b'.out", 0, 1},
+		{"spaces around closing", `cmd {#"-P $1"  }`, []string{"3"}, "cmd -P 3", 0, 1},
+		{"after required", `cmd {$1} {#"-P $2"}`, []string{"a"}, "cmd a ", 1, 2},
+		{"after required given", `cmd {$1} {#"-P $2"}`, []string{"a", "b"}, "cmd a -P b", 1, 2},
+		{"required elsewhere", `cmd {$1} {#"-P $1"}`, []string{"a"}, "cmd a -P a", 1, 1},
+		{"typed empty", `cmd {#"-P $1"}`, []string{""}, "cmd -P ''", 0, 1},
+		{"shell length stays literal", `echo ${#HOME} {$1}`, []string{"a"}, "echo ${#HOME} a", 1, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			template, err := Parse(tc.source)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if template.MinArg != tc.wantMin || template.MaxArg != tc.wantMax {
+				t.Fatalf("MinArg=%d MaxArg=%d, want %d %d", template.MinArg, template.MaxArg, tc.wantMin, tc.wantMax)
+			}
+			if got, err := template.Render(tc.args, nil, nil); err != nil || got != tc.want {
+				t.Fatalf("Render = %q, %v; want %q", got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestFragmentErrors(t *testing.T) {
+	cases := []struct{ source, wantErr string }{
+		{`x {#"-P"}`, "needs an argument like $1"},
+		{`x {#"$1 $2"}`, "exactly one argument"},
+		{`x {#"-P $HOME"}`, "shell variables aren't allowed"},
+		{`x {#"-P $"}`, "shell variables aren't allowed"},
+		{`x {#"-P $0"}`, "args start at $1"},
+		{`x {#"-P {$1}"}`, "not {$2}"},
+		{`x {#"-P $1;rm"}`, `";" isn't allowed`},
+		{`x {#"-P '$1'"}`, `"'" isn't allowed`},
+		{`x {#"-P \$1"}`, `"\\" isn't allowed`},
+		{`x {#"-P $1" or ""}`, "already empty"},
+		{`x {#"-P $1" y}`, "unexpected"},
+		{`x {#"-P $1`, "unclosed"},
+		{`x {#"-P $1"`, "unclosed"},
+		{`x "{#"-P $1"}"`, "inside"},
+		{`x '{#"-P $1"}'`, "inside"},
+		{`x ${#"-P $1"}`, "directly follow"},
+	}
+	for _, tc := range cases {
+		if _, err := Parse(tc.source); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			t.Errorf("Parse(%q) = %v, want error containing %q", tc.source, err, tc.wantErr)
+		}
+	}
+}
+
+func TestFragmentSpansAndSpecs(t *testing.T) {
+	source := `go test {$1} {#"-p $2"} {#"-run $3"`
+	spans := Spans(source)
+	if len(spans) != 3 || spans[1].Kind != SpanFragment || spans[1].Index != 2 || spans[2].Kind != SpanInvalid {
+		t.Fatalf("Spans = %+v", spans)
+	}
+	if text := source[spans[1].Start:spans[1].End]; text != `{#"-p $2"}` {
+		t.Fatalf("fragment span = %q", text)
+	}
+	if reference := source[spans[1].ReferenceStart:spans[1].ReferenceEnd]; reference != "$2" {
+		t.Fatalf("reference = %q", reference)
+	}
+
+	template, err := Parse(`go test {$1} {#"-p $2"} {#"-x $2"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []ArgSpec{{Index: 1}, {Index: 2, Optional: true, Fragment: "-p $2"}}
+	if got := template.ArgSpecs(); !slices.Equal(got, want) {
+		t.Fatalf("ArgSpecs = %+v, want %+v", got, want)
 	}
 }

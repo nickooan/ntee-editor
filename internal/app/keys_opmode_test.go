@@ -664,3 +664,60 @@ func TestOpModeHintsWhenNoCommandMatchesTheFileType(t *testing.T) {
 		t.Fatalf("the picker should explain why nothing is listed:\n%s", frame)
 	}
 }
+
+func TestOpModeExtraArgsAfterDoubleDash(t *testing.T) {
+	m, _ := opModeFixture(t, store.OpCommand{Name: "p", Command: `printf '[%s]\n' {$1}`})
+	m.width = 180 // wide enough that each asserted line renders unwrapped
+	m = press(t, m, ctrlKey('r'))
+	m = runes(m, `p a -- -x "b c"`)
+	if frame := ansi.Strip(m.render()); !strings.Contains(frame, `$ printf '[%s]\n' a -x 'b c'`) {
+		t.Fatalf("words after -- should be appended, quoted:\n%s", frame)
+	}
+	m = press(t, m, keyPress(tea.KeyEnter))
+	if lines := m.opMode.run.output.displayLines(); !slices.Equal(lines, []string{"[a]", "[-x]", "[b c]"}) {
+		t.Fatalf("output = %q", lines)
+	}
+}
+
+func TestOpModeZeroArgCommandTakesExtraArgs(t *testing.T) {
+	m, _ := opModeFixture(t, store.OpCommand{Name: "p", Command: `printf '[%s]\n' x`})
+	m = press(t, m, ctrlKey('r'))
+	m = runes(m, "p -- y")
+	m = press(t, m, keyPress(tea.KeyEnter))
+	if lines := m.opMode.run.output.displayLines(); !slices.Equal(lines, []string{"[x]", "[y]"}) {
+		t.Fatalf("output = %q", lines)
+	}
+}
+
+func TestOpModeFragmentArg(t *testing.T) {
+	m, _ := opModeFixture(t, store.OpCommand{Name: "f", Command: `printf '[%s]\n' {$1} {#"-P $2"}`})
+	m.width = 180 // wide enough that each asserted line renders unwrapped
+	m = press(t, m, ctrlKey('r'))
+	m = runes(m, "f")
+	m = key(m, keyPress(tea.KeyEnter))
+	if frame := ansi.Strip(m.render()); !strings.Contains(frame, "$1 required · $2 optional: -P $2") {
+		t.Fatalf("the args stage should describe the fragment:\n%s", frame)
+	}
+
+	m = runes(m, "a")
+	if frame := ansi.Strip(m.render()); !strings.Contains(frame, "$1 a · $2 (omitted)") || !strings.Contains(frame, `$ printf '[%s]\n' a `) {
+		t.Fatalf("an omitted fragment arg should drop the whole fragment:\n%s", frame)
+	}
+	m = press(t, m, keyPress(tea.KeyEnter))
+	if lines := m.opMode.run.output.displayLines(); !slices.Equal(lines, []string{"[a]"}) {
+		t.Fatalf("output = %q", lines)
+	}
+
+	m = key(m, keyPress(tea.KeyEsc))
+	m = press(t, m, ctrlKey('r'))
+	m = runes(m, "f")
+	m = key(m, keyPress(tea.KeyEnter))
+	m = runes(m, "a 3 -- -v")
+	if frame := ansi.Strip(m.render()); !strings.Contains(frame, "$1 a · $2 3 · -- -v (appended)") {
+		t.Fatalf("the args stage should show the appended extras:\n%s", frame)
+	}
+	m = press(t, m, keyPress(tea.KeyEnter))
+	if lines := m.opMode.run.output.displayLines(); !slices.Equal(lines, []string{"[a]", "[-P]", "[3]", "[-v]"}) {
+		t.Fatalf("output = %q", lines)
+	}
+}

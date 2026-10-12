@@ -228,11 +228,11 @@ func (m Model) renderOpCommandLine() (string, error) {
 }
 
 func (m Model) renderOpTemplate(template opcmd.Template, argsLine string) (string, error) {
-	args, err := opcmd.SplitArgs(argsLine)
+	args, extra, err := opcmd.SplitArgs(argsLine)
 	if err != nil {
 		return "", err
 	}
-	return template.Render(args, m.opSystemValues())
+	return template.Render(args, extra, m.opSystemValues())
 }
 
 // opInlinePreview renders the highlighted command with the pick query's

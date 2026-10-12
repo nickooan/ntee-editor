@@ -19,7 +19,7 @@ const maxCompleteCandidates = 8
 // Complete finds the partial placeholder ending at cursor (a rune index) —
 // "{", "{$", "$", "{$f", "$2" — and returns where it starts plus the matching
 // candidates: the next unused argument first (auto-incremented past the
-// highest {$n} already in the template), then the existing arguments, then
+// highest argument already in the template), then the existing arguments, then
 // the system variables. No fragment, or nothing matching, returns no
 // candidates.
 func Complete(value string, cursor int) (start int, candidates []Candidate) {
@@ -46,10 +46,10 @@ func Complete(value string, cursor int) (start int, candidates []Candidate) {
 	}
 
 	// The fragment itself is never a complete placeholder, so scanning the
-	// whole value counts only finished {$n} / {$n or …} references.
+	// whole value counts only finished {$n} / {$n or …} / {#"… $n"} references.
 	highest := 0
 	for _, span := range Spans(value) {
-		if span.Kind == SpanArg {
+		if span.Kind == SpanArg || span.Kind == SpanFragment {
 			highest = max(highest, span.Index)
 		}
 	}

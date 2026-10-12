@@ -97,7 +97,7 @@ func (m Model) renderOpPickBox(width int) string {
 		}
 		lines = append(lines, row)
 	}
-	lines = append(lines, "", overlayHintStyle.Render(truncateRunes("name [args…] · ↑/↓ choose · Enter run · Esc close", rowWidth)))
+	lines = append(lines, "", overlayHintStyle.Render(truncateRunes("name [args…] [-- flags] · ↑/↓ choose · Enter run · Esc close", rowWidth)))
 	return modalStyle.Width(boxWidth + 2).Render(strings.Join(lines, "\n"))
 }
 
@@ -121,7 +121,7 @@ func (m Model) renderOpArgsBox(width int) string {
 			lines = append(lines, opSuccessStyle.Render(line))
 		}
 	}
-	lines = append(lines, "", overlayHintStyle.Render(truncateRunes(`enter run · esc back · quote args with spaces: "a b"`, rowWidth)))
+	lines = append(lines, "", overlayHintStyle.Render(truncateRunes(`enter run · esc back · quote args with spaces: "a b" · -- flags go at the end`, rowWidth)))
 	return modalStyle.Width(boxWidth + 2).Render(strings.Join(lines, "\n"))
 }
 
@@ -162,13 +162,14 @@ func opDisplayLine(line string) string {
 
 // renderOpArgLines describes the arguments in the args stage. Once the typed
 // args bind (the same opcmd.Bind the command preview renders with), it shows
-// what each index receives: "$1 a · $2 master (default) · $3 b". Until then it
-// shows the spec ("$1 required · $2 = master") and, when required and
-// optional args mix, how many values to type.
+// what each index receives: "$1 a · $2 master (default) · $3 b", then any
+// words after "--" ("-- -v (appended)"). Until then it shows the spec
+// ("$1 required · $2 = master") and, when required and optional args mix, how
+// many values to type.
 func renderOpArgLines(template opcmd.Template, argsLine string, width int) []string {
 	separator := overlayHintStyle.Render(" · ")
 	name := func(index int) string { return opRowNormal.arg.Render("$" + strconv.Itoa(index)) }
-	if args, err := opcmd.SplitArgs(argsLine); err == nil && (len(args) > 0 || template.MinArg == 0) {
+	if args, extra, err := opcmd.SplitArgs(argsLine); err == nil && (len(args) > 0 || len(extra) > 0 || template.MinArg == 0) {
 		if bindings, err := template.Bind(args); err == nil {
 			var parts []string
 			for _, binding := range bindings {
@@ -181,6 +182,14 @@ func renderOpArgLines(template opcmd.Template, argsLine string, width int) []str
 					parts = append(parts, name(binding.Index)+overlayHintStyle.Render(" "+opcmd.ShellQuote(binding.Value)+" (default)"))
 				}
 			}
+			if len(extra) > 0 {
+				quoted := make([]string, len(extra))
+				for index, word := range extra {
+					quoted[index] = opcmd.ShellQuote(word)
+				}
+				parts = append(parts, opRowNormal.arg.Render("--")+opInputStyle.Render(" "+strings.Join(quoted, " "))+
+					overlayHintStyle.Render(" (appended)"))
+			}
 			return wrapStyled(parts, separator, width)
 		}
 	}
@@ -191,6 +200,8 @@ func renderOpArgLines(template opcmd.Template, argsLine string, width int) []str
 		case !spec.Optional:
 			parts = append(parts, name(spec.Index)+overlayHintStyle.Render(" required"))
 			required = append(required, "$"+strconv.Itoa(spec.Index))
+		case spec.Default == "" && spec.Fragment != "":
+			parts = append(parts, name(spec.Index)+overlayHintStyle.Render(" optional: "+spec.Fragment))
 		case spec.Default == "":
 			parts = append(parts, name(spec.Index)+overlayHintStyle.Render(` = "" (omitted)`))
 		default:

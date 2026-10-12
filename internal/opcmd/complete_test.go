@@ -28,6 +28,7 @@ func TestCompleteFragments(t *testing.T) {
 		{"cp {$1} {$", 8, []string{"{$2}", "{$1}", "{$fpath}", "{$dpath}"}},
 		{"cp {$1} {$1", 8, []string{"{$1}"}},
 		{"cp {$1 or a} {$", 13, []string{"{$2}", "{$1}", "{$fpath}", "{$dpath}"}},
+		{`x {#"-P $2"} {$`, 13, []string{"{$3}", "{$1}", "{$2}", "{$fpath}", "{$dpath}"}},
 		{"echo {$4} $", 10, []string{"{$5}", "{$1}", "{$2}", "{$3}", "{$4}", "{$fpath}", "{$dpath}"}},
 	}
 	for _, tc := range cases {

@@ -384,28 +384,65 @@ lsp: { enabled: true }
 ### Custom keybindings
 
 Bindings live in the **user** config (`~/.config/ntee-editor/config.yaml`), not
-in ntee-db, so copying that one file moves them to another machine. The
-`Ctrl+T` → keybinds pane writes the full list for you:
+in ntee-db, so copying that one file moves them to another machine. Rebind keys
+from `Ctrl+T` → **keybinds**, or edit the `keybinds:` section by hand.
+
+| Action | Default | What it does |
+|---|---|---|
+| `quit` | `ctrl+q` | quit the editor |
+| `repo_picker` | `ctrl+w` | switch the nested repo |
+| `goto_file` | `ctrl+p` | goto anything |
+| `uncommitted` | `ctrl+u` | uncommitted files |
+| `grep` | `ctrl+g` | search the project |
+| `inspect` | `ctrl+t` | inspection dashboard |
+| `op_mode` | `ctrl+r` | run an op-command |
+| `next_tab` | `shift+tab` | cycle open tabs |
+| `save` | `ctrl+s` | save the buffer |
+| `undo` | `ctrl+z` | undo |
+| `redo` | `ctrl+y` | redo |
+| `find` | `ctrl+f` | find in file (also "next match" in the find bar) |
+| `jump_to_reference` | `ctrl+j` | jump to definition |
+| `jump_back` | `ctrl+o` | jump back |
+| `expand_selection` | `ctrl+a` | expand the selection |
+| `exec` | `ctrl+e` | `@exec` bar (also "replace" from the find bar) |
+
+**By hand** — list only what you change; everything else keeps its default.
+For example, goto on `Ctrl+N`, save on `F5`, and undo/redo swapped:
 
 ```yaml
 keybinds:
-  quit: ctrl+q
-  repo_picker: ctrl+w
-  goto_file: ctrl+n          # was ctrl+p
-  uncommitted: ctrl+u
-  grep: ctrl+g
-  inspect: ctrl+t
-  op_mode: ctrl+r
-  next_tab: shift+tab
-  save: f5                   # any F1–F12 works too
-  undo: ctrl+z
-  redo: ctrl+y
-  find: ctrl+f               # also "next match" in the find bar
-  jump_to_reference: ctrl+j
-  jump_back: ctrl+o
-  expand_selection: ctrl+a
-  exec: ctrl+e               # also "replace" from the find bar
+  goto_file: ctrl+n
+  save: f5
+  undo: ctrl+y
+  redo: ctrl+z
 ```
+
+**What the keybinds pane writes** — the same bindings, saved as the full list
+(alphabetical, every action spelled out) so the file always says exactly which
+key does what:
+
+```yaml
+keybinds:
+    exec: ctrl+e
+    expand_selection: ctrl+a
+    find: ctrl+f
+    goto_file: ctrl+n
+    grep: ctrl+g
+    inspect: ctrl+t
+    jump_back: ctrl+o
+    jump_to_reference: ctrl+j
+    next_tab: shift+tab
+    op_mode: ctrl+r
+    quit: ctrl+q
+    redo: ctrl+z
+    repo_picker: ctrl+w
+    save: f5
+    uncommitted: ctrl+u
+    undo: ctrl+y
+```
+
+Saving from the pane rewrites the whole file, so comments are lost (the
+previous version is kept as `config.yaml.bak`).
 
 - A key must be a `ctrl+…` / `alt+…` chord, `f1`–`f12`, or `shift+tab`, and
   each key can belong to one action. `ctrl+c` is reserved (always quits).

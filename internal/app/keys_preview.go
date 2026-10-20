@@ -6,6 +6,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/nickooan/ntee-editor/internal/input"
+	"github.com/nickooan/ntee-editor/internal/keymap"
 )
 
 // handlePreviewKey drives the OpenAPI/GraphQL document preview. Like diff
@@ -21,7 +22,11 @@ func (m Model) handlePreviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handlePreviewSearchKey(msg)
 	}
 
-	switch msg.String() {
+	k := msg.String()
+	if m.keys.Matches(keymap.Find, k) {
+		k = "/"
+	}
+	switch k {
 	case "esc":
 		return m.exitPreview(), nil
 
@@ -58,7 +63,7 @@ func (m Model) handlePreviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		return m.jumpPreviewOutline(), nil
 
-	case "/", "ctrl+f":
+	case "/":
 		m.preview.searching = true
 		m.preview.search = ""
 		m.preview.focused = 0
@@ -71,7 +76,11 @@ func (m Model) handlePreviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // ↑/↓ cycling matches, Enter committing the landing. Deliberately no replace
 // or search-exec — the document is read-only.
 func (m Model) handlePreviewSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
+	k := msg.String()
+	if m.keys.Matches(keymap.Find, k) {
+		k = "down"
+	}
+	switch k {
 	case "esc":
 		m.preview.searching = false
 		m.preview.search = ""
@@ -83,7 +92,7 @@ func (m Model) handlePreviewSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 		m.preview.focused = 0
 	case "up":
 		m = m.cyclePreviewMatch(-1)
-	case "down", "ctrl+f":
+	case "down":
 		m = m.cyclePreviewMatch(1)
 	case "backspace":
 		if runes := []rune(m.preview.search); len(runes) > 0 {

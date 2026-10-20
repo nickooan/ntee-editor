@@ -6,6 +6,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/nickooan/ntee-editor/internal/input"
+	"github.com/nickooan/ntee-editor/internal/keymap"
 	"github.com/nickooan/ntee-editor/internal/syntax"
 )
 
@@ -36,20 +37,26 @@ func (m Model) freezeSearchSnapshot(content string) Model {
 }
 
 func (m Model) handleSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
+	k := msg.String()
+	switch {
+	case m.keys.Matches(keymap.Find, k):
+		return m.nextMatch(1), nil
+	case m.keys.Matches(keymap.Exec, k):
+		if m.searchInput != "" && len(m.searchMatches()) > 0 {
+			return m.enterSearchExec(), nil
+		}
+		m.errText = "no matches to act on"
+		return m, nil
+	}
+	switch k {
 	case "esc":
 		m.mode = m.searchPrevMode
 	case "enter":
 		m = m.acceptSearch()
 	case "up":
 		m = m.nextMatch(-1)
-	case "down", "ctrl+f":
+	case "down":
 		m = m.nextMatch(1)
-	case "ctrl+e":
-		if m.searchInput != "" && len(m.searchMatches()) > 0 {
-			return m.enterSearchExec(), nil
-		}
-		m.errText = "no matches to act on"
 	case "backspace":
 		if runes := []rune(m.searchInput); len(runes) > 0 {
 			m.searchInput = string(runes[:len(runes)-1])

@@ -1,10 +1,12 @@
 package app
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestGitStatusMsgSwapsDirtySet(t *testing.T) {
@@ -173,6 +175,9 @@ func TestCtrlUListsOnlyUncommitted(t *testing.T) {
 	}
 	if rel := m.fuzzyCorpus[m.fuzzyMatches[0].Index].Text; rel != "lib/util.ts" {
 		t.Fatalf("listed %q, want lib/util.ts", rel)
+	}
+	if frame := ansi.Strip(m.render()); !strings.Contains(frame, "1 uncommitted") {
+		t.Fatalf("the title should count the listed files:\n%s", frame)
 	}
 
 	// Filtering works like Ctrl+P; Enter opens the file in edit mode.

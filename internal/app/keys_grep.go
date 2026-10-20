@@ -15,6 +15,7 @@ import (
 
 	"github.com/nickooan/ntee-editor/internal/filetree"
 	"github.com/nickooan/ntee-editor/internal/input"
+	"github.com/nickooan/ntee-editor/internal/keymap"
 	"github.com/nickooan/ntee-editor/internal/syntax"
 	"github.com/nickooan/ntee-editor/internal/view"
 )
@@ -83,7 +84,7 @@ type grepResultsMsg struct {
 func (m Model) openGrep() (Model, tea.Cmd) {
 	m = m.closeCompletion()
 	if m.mode == modeEdit && m.edit.dirty {
-		m.errText = "unsaved changes — save (Ctrl+S) before repo search"
+		m.errText = "unsaved changes — save (" + m.keys.Label(keymap.Save) + ") before repo search"
 		return m, nil
 	}
 	if m.corpusBuiltAt.IsZero() {

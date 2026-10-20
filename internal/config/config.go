@@ -9,7 +9,8 @@
 // .ntee-editor.yaml ships with whatever repo the editor is pointed at, so its
 // per-language `lsp` blocks (command/args/init/bridge — all execution vectors)
 // and `install` strategies are stripped before merging; it may still set
-// behavior (enable, extensions, editor, tree, theme).
+// behavior (enable, extensions, editor, tree, theme). Keybinds are also
+// user-only, so a repo can never remap the user's keys.
 package config
 
 import (
@@ -29,7 +30,9 @@ type Config struct {
 	Theme     ThemeConfig               `yaml:"theme"`
 	Languages map[string]LanguageConfig `yaml:"languages"`
 	LSP       LSPConfig                 `yaml:"lsp"`
-	Keybinds  map[string]string         `yaml:"keybinds"` // reserved, not applied in v1
+	// Keybinds maps action names to key chords (resolved by internal/keymap).
+	// User config only: a project file's keybinds are ignored.
+	Keybinds map[string]string `yaml:"keybinds"`
 }
 
 type EditorConfig struct {
@@ -306,6 +309,22 @@ func SetThemeSyntax(name string) (string, error) {
 	return path, nil
 }
 
+// SetKeybinds replaces the keybinds section of the user config file, creating
+// it if needed (prior content backed up to config.yaml.bak). Callers pass the
+// full action→key map so the file lists every binding explicitly. Returns the
+// path written.
+func SetKeybinds(bindings map[string]string) (string, error) {
+	file, existing, path, err := readUserConfig()
+	if err != nil {
+		return "", err
+	}
+	file.Keybinds = bindings
+	if err := writeUserConfig(path, &file, existing); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
 func merge(cfg *Config, path string, trustExec bool) (warnings []string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -318,6 +337,11 @@ func merge(cfg *Config, path string, trustExec bool) (warnings []string) {
 	// (replace) can't do — so decode the file's languages separately, then merge.
 	prior := cfg.Languages
 	cfg.Languages = nil
+	// yaml.v3 decodes into an existing map in place, so clear it first: the
+	// user file's keybinds replace (not merge), and a project file's are
+	// detected and dropped below.
+	priorKeybinds := cfg.Keybinds
+	cfg.Keybinds = nil
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		// Fields parsed before the error may already be applied; report rather
 		// than silently running a half-configured editor.
@@ -330,6 +354,10 @@ func merge(cfg *Config, path string, trustExec bool) (warnings []string) {
 			l.LSP, l.Install = nil, nil
 			cfg.Languages[name] = l
 		}
+		if len(cfg.Keybinds) > 0 {
+			warnings = append(warnings, "config "+path+": keybinds ignored — set them in the user config")
+		}
+		cfg.Keybinds = priorKeybinds
 	}
 	cfg.Languages = mergeLanguages(prior, cfg.Languages)
 	return warnings

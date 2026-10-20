@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/nickooan/ntee-editor/internal/input"
+	"github.com/nickooan/ntee-editor/internal/keymap"
 	"github.com/nickooan/ntee-editor/internal/lsp"
 	"github.com/nickooan/ntee-editor/internal/view"
 )
@@ -85,7 +86,7 @@ func (m Model) render() string {
 	case m.openFile != nil:
 		mainBody = m.renderFile(mainWidth-4, innerH)
 	default:
-		mainBody = baseStyle.Render("Type a path or fuzzy fragment · enter opens · ctrl+p goto.")
+		mainBody = baseStyle.Render("Type a path or fuzzy fragment · enter opens · " + m.keys.Key(keymap.GotoFile) + " goto.")
 	}
 	if showTabs {
 		divider := tabDividerStyle.Render(strings.Repeat("─", max(0, mainWidth-4)))
@@ -121,7 +122,8 @@ func (m Model) renderStatusLine() string {
 			line += renderInputLine(m.command, m.qCursor)
 		}
 		return withNotice(m, line) + "\n" +
-			hintStyle.Render("Enter open+edit · Shift+↑/↓ tree · Esc parent · :mkdir/:touch/:rm · Ctrl+P goto · Ctrl+W repo · Q quit")
+			hintStyle.Render("Enter open+edit · Shift+↑/↓ tree · Esc parent · :mkdir/:touch/:rm · "+
+				m.keys.Label(keymap.GotoFile)+" goto · "+m.keys.Label(keymap.RepoPicker)+" repo · "+m.keys.Label(keymap.Quit)+" quit")
 	case modeEdit:
 		return m.renderEditStatus()
 	case modeExec:
@@ -152,7 +154,7 @@ func (m Model) renderStatusLine() string {
 		}
 		line := promptStyle.Render("@search /") + statusTextStyle.Render(m.searchInput+"/   "+summary)
 		return withNotice(m, line) + statusTextStyle.Render("   ") +
-			hintStyle.Render("↑/↓ next · Enter jump · Ctrl+E replace · Esc back")
+			hintStyle.Render("↑/↓ next · Enter jump · "+m.keys.Label(keymap.Exec)+" replace · Esc back")
 	case modeSearchExec:
 		// The replace bar keeps the search view (and its highlights) as the
 		// body; only the status line swaps.
@@ -238,7 +240,51 @@ func (m Model) renderEditStatus() string {
 		line += statusTextStyle.Render("   ") + style.Render(truncateRunes(diag.Message, 60))
 	}
 	return line + statusTextStyle.Render("   ") +
-		hintStyle.Render("Ctrl+ S save, F find, A select, J/O jump/back, Z/Y undo/redo · Esc discard")
+		hintStyle.Render(m.actionHints(
+			hintFor("save", keymap.Save), hintFor("find", keymap.Find),
+			hintFor("select", keymap.ExpandSelection),
+			hintFor("jump/back", keymap.JumpToReference, keymap.JumpBack),
+			hintFor("undo/redo", keymap.Undo, keymap.Redo))+" · Esc discard")
+}
+
+// actionHint is one status-bar hint: a label for one or more actions whose
+// keys are shown together ("J/O jump/back").
+type actionHint struct {
+	label   string
+	actions []keymap.Action
+}
+
+func hintFor(label string, actions ...keymap.Action) actionHint {
+	return actionHint{label: label, actions: actions}
+}
+
+// actionHints renders hints from the live keymap. While every key is a
+// plain Ctrl+<char> chord it keeps the compact "Ctrl+ S save, F find" form;
+// any other binding switches to full labels ("F5 save · Ctrl+F find").
+func (m Model) actionHints(hints ...actionHint) string {
+	compact := true
+	for _, hint := range hints {
+		for _, action := range hint.actions {
+			rest, isCtrl := strings.CutPrefix(m.keys.Key(action), "ctrl+")
+			compact = compact && isCtrl && len(rest) == 1
+		}
+	}
+	parts := make([]string, len(hints))
+	for index, hint := range hints {
+		keys := make([]string, len(hint.actions))
+		for keyIndex, action := range hint.actions {
+			if compact {
+				keys[keyIndex] = strings.ToUpper(strings.TrimPrefix(m.keys.Key(action), "ctrl+"))
+			} else {
+				keys[keyIndex] = m.keys.Label(action)
+			}
+		}
+		parts[index] = strings.Join(keys, "/") + " " + hint.label
+	}
+	if compact {
+		return "Ctrl+ " + strings.Join(parts, ", ")
+	}
+	return strings.Join(parts, " · ")
 }
 
 // diagSummary renders "✗N ⚠M " counts for the open file ("" when clean).

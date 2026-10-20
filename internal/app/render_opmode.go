@@ -9,6 +9,7 @@ import (
 
 	"github.com/nickooan/ntee-editor/internal/fuzzy"
 	"github.com/nickooan/ntee-editor/internal/input"
+	"github.com/nickooan/ntee-editor/internal/keymap"
 	"github.com/nickooan/ntee-editor/internal/opcmd"
 )
 
@@ -64,10 +65,10 @@ func (m Model) renderOpPickBox(width int) string {
 		case len(m.opMode.candidates) == 0 && m.opCommandsLoading:
 			lines = append(lines, overlayHintStyle.Render("(loading op-commands…)"))
 		case len(m.opCommands) == 0:
-			lines = append(lines, overlayHintStyle.Render(truncateRunes("(no op-commands — add some in Ctrl+T › op-commands)", rowWidth)))
+			lines = append(lines, overlayHintStyle.Render(truncateRunes("(no op-commands — add some in "+m.keys.Label(keymap.Inspect)+" › op-commands)", rowWidth)))
 		case len(m.opMode.candidates) == 0:
 			fileType := opcmd.FileTypeOf(m.openRel)
-			hint := fmt.Sprintf("(no op-commands for %s files — set TYPE to %s or * in Ctrl+T › op-commands)", fileType, fileType)
+			hint := fmt.Sprintf("(no op-commands for %s files — set TYPE to %s or * in %s › op-commands)", fileType, fileType, m.keys.Label(keymap.Inspect))
 			for _, line := range wrapWords(hint, rowWidth) {
 				lines = append(lines, overlayHintStyle.Render(line))
 			}
@@ -221,7 +222,6 @@ func renderOpArgLines(template opcmd.Template, argsLine string, width int) []str
 
 const (
 	opTargetPrefix      = "file "
-	opUnsavedWarning    = "unsaved changes — the command reads the saved file (Ctrl+S in the editor first)"
 	opRunUnsavedSuffix  = " · unsaved edits not included"
 	opRunDividerLeading = 2 // "──" before the run divider's label
 )
@@ -233,7 +233,8 @@ func (m Model) renderOpTargetLines(width int) []string {
 	lines := []string{overlayHintStyle.Render(opTargetPrefix) +
 		opInputStyle.Render(truncateRunesLeft(m.opTargetPath(), pathWidth))}
 	if m.opTargetUnsaved() {
-		for _, line := range wrapWords(opUnsavedWarning, width) {
+		warning := "unsaved changes — the command reads the saved file (" + m.keys.Label(keymap.Save) + " in the editor first)"
+		for _, line := range wrapWords(warning, width) {
 			lines = append(lines, opRunningStyle.Render(line))
 		}
 	}

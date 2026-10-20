@@ -9,6 +9,7 @@ import (
 	"github.com/nickooan/ntee-editor/internal/filetree"
 	"github.com/nickooan/ntee-editor/internal/fuzzy"
 	"github.com/nickooan/ntee-editor/internal/input"
+	"github.com/nickooan/ntee-editor/internal/keymap"
 )
 
 // enterCommand focuses the bottom : command bar.
@@ -95,7 +96,7 @@ func (m Model) executeCommand(cmd string) (tea.Model, tea.Cmd) {
 		m.snapDirty = true
 		m = m.pushSnapshot("edit") // the revert itself is undoable
 		m.mode = modeEdit
-		m.notice = "reverted to last save — Ctrl+S to write"
+		m.notice = "reverted to last save — " + m.keys.Label(keymap.Save) + " to write"
 		m = m.refreshFileHighlights()
 
 	case "tab":
@@ -315,11 +316,15 @@ func (m Model) selectWorkspaceRepo(rel string) (Model, tea.Cmd) {
 }
 
 func (m Model) handleFuzzyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc", "ctrl+p", "ctrl+u", "ctrl+w":
-		if msg.String() == "ctrl+w" && m.fuzzyPrompt != fuzzyPromptRepo {
-			return m.openRepoPicker()
-		}
+	k := msg.String()
+	switch {
+	case m.keys.Matches(keymap.RepoPicker, k) && m.fuzzyPrompt != fuzzyPromptRepo:
+		return m.openRepoPicker()
+	case m.keys.Matches(keymap.RepoPicker, k), m.keys.Matches(keymap.GotoFile, k), m.keys.Matches(keymap.Uncommitted, k):
+		return m.closeFuzzy(), nil
+	}
+	switch k {
+	case "esc":
 		m = m.closeFuzzy()
 	case "enter":
 		if len(m.fuzzyMatches) == 0 {

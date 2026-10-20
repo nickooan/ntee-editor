@@ -8,6 +8,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/nickooan/ntee-editor/internal/input"
+	"github.com/nickooan/ntee-editor/internal/keymap"
 )
 
 // renderDiff draws the diff review view: a unified GitHub-style listing of
@@ -164,5 +165,6 @@ func (m Model) renderDiffStatus() string {
 		line += statusTextStyle.Render("   ") + errStyle.Render(m.errText)
 	}
 	return line + statusTextStyle.Render("   ") +
-		hintStyle.Render("↑/↓ review · Shift+↑/↓ hunk · PgUp/PgDn page · Ctrl+ J def, O back · Esc exit")
+		hintStyle.Render("↑/↓ review · Shift+↑/↓ hunk · PgUp/PgDn page · "+m.actionHints(
+			hintFor("def", keymap.JumpToReference), hintFor("back", keymap.JumpBack))+" · Esc exit")
 }

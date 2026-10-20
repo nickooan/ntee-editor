@@ -20,6 +20,7 @@ import (
 	"github.com/nickooan/ntee-editor/internal/filetree"
 	"github.com/nickooan/ntee-editor/internal/fuzzy"
 	"github.com/nickooan/ntee-editor/internal/input"
+	"github.com/nickooan/ntee-editor/internal/keymap"
 	"github.com/nickooan/ntee-editor/internal/lsp"
 	"github.com/nickooan/ntee-editor/internal/store"
 	"github.com/nickooan/ntee-editor/internal/syntax"
@@ -58,7 +59,7 @@ const (
 )
 
 // inBarMode reports whether keystrokes are feeding a text-input bar, where
-// global chords (Ctrl+P/U/G, Shift+Tab) must not fire.
+// the global action chords (goto, grep, inspect, …) must not fire.
 func (m Model) inBarMode() bool {
 	return m.mode == modeCommand || m.mode == modeSearch || m.mode == modeExec ||
 		m.mode == modeSearchExec || m.mode == modeInspect ||
@@ -66,8 +67,9 @@ func (m Model) inBarMode() bool {
 }
 
 type Model struct {
-	cfg config.Config
-	lsp lsp.Registry
+	cfg  config.Config
+	keys keymap.Keymap // effective bindings: defaults ← cfg.Keybinds
+	lsp  lsp.Registry
 
 	// root is the current root: every file path, the tree, the search index,
 	// git status, and the store view (db) are relative to it. It is the opened
@@ -286,6 +288,7 @@ type Model struct {
 	inspectBusy     string // "" | "compact" | "relieve" — blocks duplicate runs
 	stylePicker     stylePickerState
 	lspPicker       lspPickerState
+	keybindPicker   keybindPickerState
 
 	// Op-commands: user-saved shell command templates in the global store
 	// (opStore), edited in the inspect dashboard's table and run from the
@@ -435,6 +438,14 @@ func New(cfg config.Config, db store.Backend, root, notice string, reg lsp.Regis
 		opStore:         store.NewMemoryOpCommands(),
 		lastInputAt:     time.Now(),
 		termFocused:     true,
+	}
+	var keymapWarnings []string
+	m.keys, keymapWarnings = keymap.Resolve(cfg.Keybinds)
+	if len(keymapWarnings) > 0 {
+		if notice != "" {
+			keymapWarnings = append([]string{notice}, keymapWarnings...)
+		}
+		m.notice = strings.Join(keymapWarnings, " · ")
 	}
 	// Relaunch into the repo the user was rooted at, if it still exists (one
 	// stat — the nested-repo scan itself runs later, off the UI goroutine).
@@ -1072,7 +1083,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		m.lastInputAt = time.Now()
 		k := msg.String()
-		if k == "ctrl+c" || k == "ctrl+q" {
+		if k == "ctrl+c" {
+			return m.quit()
+		}
+		if m.keybindPicker.capturing {
+			// Ahead of every chord below, so any of them (quit included)
+			// can be captured as a new binding.
+			return m.captureKeybind(k)
+		}
+		if m.keys.Matches(keymap.Quit, k) {
 			return m.quit()
 		}
 		if m.splash {
@@ -1117,26 +1136,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.opMode.open {
 			return m.handleOpKey(msg)
 		}
-		if k == "ctrl+w" && !m.inBarMode() {
-			return m.openRepoPicker()
-		}
-		if k == "ctrl+p" && !m.inBarMode() {
-			return m.openFuzzy()
-		}
-		if k == "ctrl+u" && !m.inBarMode() {
-			return m.openUncommitted()
-		}
-		if k == "ctrl+g" && !m.inBarMode() {
-			return m.openGrep()
-		}
-		if k == "ctrl+t" && !m.inBarMode() {
-			return m.enterInspect()
-		}
-		if k == "ctrl+r" && !m.inBarMode() {
-			return m.openOpMode()
-		}
-		if k == "shift+tab" && !m.inBarMode() {
-			return m.cycleTab(), nil
+		if action, bound := m.keys.ActionFor(k); bound && !m.inBarMode() {
+			switch action {
+			case keymap.RepoPicker:
+				return m.openRepoPicker()
+			case keymap.GotoFile:
+				return m.openFuzzy()
+			case keymap.Uncommitted:
+				return m.openUncommitted()
+			case keymap.Grep:
+				return m.openGrep()
+			case keymap.Inspect:
+				return m.enterInspect()
+			case keymap.OpMode:
+				return m.openOpMode()
+			case keymap.NextTab:
+				return m.cycleTab(), nil
+			}
 		}
 
 		switch m.mode {

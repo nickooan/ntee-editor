@@ -82,6 +82,10 @@ Five things to know in your first five minutes:
 
 ## Keymap
 
+The keys below are the defaults. Every `Ctrl`/`Shift+Tab` action under
+**Everywhere** and the edit-mode chords (save, undo, redo, find, jump/back,
+select, exec) can be rebound — see [Custom keybindings](#custom-keybindings).
+
 ### Everywhere
 
 | Key | Action |
@@ -90,10 +94,10 @@ Five things to know in your first five minutes:
 | `Ctrl+U` | Goto **uncommitted** file — same finder, limited to git-dirty paths |
 | `Ctrl+W` | **Workspace repo** — re-root the editor at a nested git repo under the opened directory (pick the top `name/` row to go back to the whole workspace). The file tree, query bar, `Ctrl+P`/`Ctrl+U`/`Ctrl+G`, change highlights, and git views then cover that repo only, as if you had opened it directly; the title bar shows `working repo: …` in orange next to the path. Each repo remembers its own tabs, open file, and tree position (also across relaunch), and switching stashes unsaved edits as a draft. Refused when the opened directory is already a git repo |
 | `Ctrl+G` | **Grep the repo** — colored preview on top, results below; `↑/↓` + `Enter` jumps |
-| `Ctrl+T` | **Inspection dashboard** — store stats + LSP control + op-commands ([below](#inspection-mode-ctrlt)) |
+| `Ctrl+T` | **Inspection dashboard** — store stats + LSP control + op-commands + keybinds ([below](#inspection-mode-ctrlt)) |
 | `Ctrl+R` | **Run an op-command** on the open file — pick a saved command, fill its `{$1}` `{$2}` args, watch the output stream ([below](#op-commands-ctrlr)) |
 | `Shift+Tab` | Cycle the focused tab (wraps) |
-| `Ctrl+Q` / `Ctrl+C` | Quit (session saved) |
+| `Ctrl+Q` / `Ctrl+C` | Quit (session saved). `Ctrl+C` always quits, whatever the bindings |
 
 ### Query bar (home)
 
@@ -205,6 +209,13 @@ A dashboard for the editor's own machinery. `Shift+↑/↓` switches the left me
   chooses, `Tab`/`Enter` inserts, `Esc` closes the menu. Placeholders are
   colour-coded in the table: arguments purple, built-ins blue, `{#"…"}` fragments
   green (with their `$n` purple), broken ones red.
+- **keybinds** — every rebindable action with its key. Press `→` to move into
+  the list: `↑/↓` picks an action, `Enter` then **press the new chord** to bind
+  it (`Esc` cancels), `r` resets that action to its default, `R` (or `Enter` on
+  the last row) resets **all** of them after a `y/n` confirmation. A key that's
+  already taken, or isn't a chord, is refused in the status bar. Custom keys
+  are highlighted next to their default. Changes apply immediately and are
+  saved to your config — see [Custom keybindings](#custom-keybindings).
 
 The `@inspection >` bar takes:
 
@@ -215,6 +226,9 @@ The `@inspection >` bar takes:
 | `lsp start\|stop\|restart <lang\|all>` | start, stop, or restart the server for **this session** only; the config is unchanged (a stopped server starts again when a file needs it) |
 | `lsp enable <lang\|all>` | start the server **now** and persist `enable: true` to your config |
 | `lsp disable <lang\|all>` | stop the server and persist `enable: false` |
+| `keybind <action> <key>` | bind an action, e.g. `keybind goto_file ctrl+n` (saved to your config) |
+| `keybind <action> default` | restore one action's default key |
+| `keybind reset` | restore every default key |
 
 LSP commands act live *and* write `~/.config/ntee-editor/config.yaml` (previous
 file backed up to `config.yaml.bak`), so the change sticks across restarts. If a
@@ -366,6 +380,41 @@ lsp: { enabled: true }
 - `enable: true|false` per language (omitted = on).
 - The default theme is a tuned gruvbox dark; any chroma style name works,
   rendered truecolor and auto-degraded on 256-color terminals.
+
+### Custom keybindings
+
+Bindings live in the **user** config (`~/.config/ntee-editor/config.yaml`), not
+in ntee-db, so copying that one file moves them to another machine. The
+`Ctrl+T` → keybinds pane writes the full list for you:
+
+```yaml
+keybinds:
+  quit: ctrl+q
+  repo_picker: ctrl+w
+  goto_file: ctrl+n          # was ctrl+p
+  uncommitted: ctrl+u
+  grep: ctrl+g
+  inspect: ctrl+t
+  op_mode: ctrl+r
+  next_tab: shift+tab
+  save: f5                   # any F1–F12 works too
+  undo: ctrl+z
+  redo: ctrl+y
+  find: ctrl+f               # also "next match" in the find bar
+  jump_to_reference: ctrl+j
+  jump_back: ctrl+o
+  expand_selection: ctrl+a
+  exec: ctrl+e               # also "replace" from the find bar
+```
+
+- A key must be a `ctrl+…` / `alt+…` chord, `f1`–`f12`, or `shift+tab`, and
+  each key can belong to one action. `ctrl+c` is reserved (always quits).
+- Actions you leave out keep their defaults. A bad entry (unknown action,
+  invalid or duplicate key) keeps the default too and is reported in the
+  status bar at startup.
+- Keybinds in a project's `.ntee-editor.yaml` are ignored, so a repo can never
+  remap your keys.
+- Arrows, `Enter`, `Esc`, `Tab` and the overlays' own keys are not rebindable.
 
 ## Persistence & maintenance
 

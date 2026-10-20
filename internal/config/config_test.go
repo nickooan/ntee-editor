@@ -387,8 +387,80 @@ func TestConfigEditsRefuseMalformedUserConfig(t *testing.T) {
 	if _, err := MergeUserLanguages(map[string]LanguageConfig{"x": {}}); err == nil {
 		t.Fatal("MergeUserLanguages must refuse a malformed config")
 	}
+	if _, err := SetKeybinds(map[string]string{"save": "ctrl+s"}); err == nil {
+		t.Fatal("SetKeybinds must refuse a malformed config")
+	}
 	// The recoverable file was not overwritten.
 	if data, _ := os.ReadFile(path); string(data) != string(malformed) {
 		t.Fatal("malformed config was overwritten")
+	}
+}
+
+func TestLoadUserKeybinds(t *testing.T) {
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	writeUserConfigFile(t, xdg, "keybinds:\n  goto_file: ctrl+n\n")
+	cfg, warnings := LoadWithWarnings(t.TempDir())
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %v", warnings)
+	}
+	if len(cfg.Keybinds) != 1 || cfg.Keybinds["goto_file"] != "ctrl+n" {
+		t.Fatalf("keybinds = %v", cfg.Keybinds)
+	}
+}
+
+func TestLoadIgnoresProjectKeybinds(t *testing.T) {
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	writeUserConfigFile(t, xdg, "keybinds:\n  goto_file: ctrl+n\n")
+	root := t.TempDir()
+	project := "keybinds:\n  goto_file: ctrl+x\n  save: ctrl+k\ntheme:\n  syntax: nord\n"
+	if err := os.WriteFile(filepath.Join(root, ".ntee-editor.yaml"), []byte(project), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, warnings := LoadWithWarnings(root)
+	if len(cfg.Keybinds) != 1 || cfg.Keybinds["goto_file"] != "ctrl+n" {
+		t.Errorf("project file changed keybinds: %v", cfg.Keybinds)
+	}
+	if cfg.Theme.Syntax != "nord" {
+		t.Errorf("rest of the project file lost: theme = %q", cfg.Theme.Syntax)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "keybinds ignored") {
+		t.Errorf("warnings = %v", warnings)
+	}
+}
+
+func TestSetKeybinds(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	path, err := SetKeybinds(map[string]string{"goto_file": "ctrl+n", "save": "ctrl+s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := Load(t.TempDir())
+	if out.Keybinds["goto_file"] != "ctrl+n" || out.Keybinds["save"] != "ctrl+s" {
+		t.Fatalf("keybinds = %v", out.Keybinds)
+	}
+	if !out.LSP.Enabled {
+		t.Fatal("global lsp.enabled must survive the fresh-file seed")
+	}
+
+	// Existing file: the section is replaced wholesale, other fields kept.
+	if _, err := SetThemeSyntax("nord"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SetKeybinds(map[string]string{"save": "f5"}); err != nil {
+		t.Fatal(err)
+	}
+	out = Load(t.TempDir())
+	if len(out.Keybinds) != 1 || out.Keybinds["save"] != "f5" {
+		t.Fatalf("keybinds after rewrite = %v", out.Keybinds)
+	}
+	if out.Theme.Syntax != "nord" {
+		t.Fatalf("theme lost: %q", out.Theme.Syntax)
+	}
+	if _, err := os.Stat(path + ".bak"); err != nil {
+		t.Fatal("expected a .bak backup")
 	}
 }

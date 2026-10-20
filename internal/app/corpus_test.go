@@ -269,6 +269,9 @@ func TestCorpusMsgRefreshesOpenUncommittedFinder(t *testing.T) {
 	if !containsStr(fuzzyMatchTexts(m), "lib/new.ts") {
 		t.Fatalf("new external file missing from the open finder: %v", fuzzyMatchTexts(m))
 	}
+	if label := m.fuzzyPromptLabel(); label != "2 uncommitted " {
+		t.Fatalf("the title count should follow the refreshed list: %q", label)
+	}
 
 	// The dirty file vanishes externally: it must drop out of the list.
 	must(t, os.Remove(filepath.Join(root, "lib", "util.ts")))

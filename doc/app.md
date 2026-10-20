@@ -24,13 +24,15 @@ Three design rules shape almost every function here:
 | `modeCommand` | the bottom `:` command bar |
 | `modeExec` | the `@exec >` editor-command bar (Ctrl+E from edit) |
 | `modeSearchExec` | the replace bar layered on search (Ctrl+E from search) |
-| `modeInspect` | the Ctrl+T inspection dashboard (store stats, LSP control, theme, op-commands table) |
+| `modeInspect` | the Ctrl+T inspection dashboard (store stats, LSP control, theme, op-commands table, keybinds) |
 | `modeDiff` | read-only git-diff review of the buffer (`git diff` in @exec) |
 | `modeConflict` | interactive merge-conflict resolution over the live buffer (`git scf`) |
 | `modeOpenAPI` / `modeGraphQL` | read-only rendered document previews (`openapi` / `graphql`) |
 | `modeBlame` | read-only git-blame annotation (`git blame`) |
 
-**The Update/View loop.** `Update` first bumps the frame cache's sequence (per-message memos go stale), then handles non-key messages (window size, LSP diagnostics, async results, git status ticks, mouse, paste). For key presses it peels overlays in priority order — quit chords, splash, message overlay, `:rm` confirm, fuzzy finder, definition picker, grep, the Ctrl+R op overlay — then global chords (Ctrl+P/U/G/T/R, Shift+Tab, all suppressed while a text bar has focus via `inBarMode`), and finally dispatches on `m.mode` to the per-mode handler. `View` (render.go) assembles header + sidebar pane + main pane + status rows, choosing the main body by the same overlay-then-mode priority.
+**The Update/View loop.** `Update` first bumps the frame cache's sequence (per-message memos go stale), then handles non-key messages (window size, LSP diagnostics, async results, git status ticks, mouse, paste). For key presses it peels overlays in priority order — Ctrl+C (always quit), a pending keybind capture (so the capture can take any chord, quit included), the bound quit key, splash, message overlay, `:rm` confirm, fuzzy finder, definition picker, grep, the Ctrl+R op overlay — then the global action chords (Ctrl+W/P/U/G/T/R, Shift+Tab, all suppressed while a text bar has focus via `inBarMode`), and finally dispatches on `m.mode` to the per-mode handler.
+
+**Keys are bound, not hardcoded.** Every rebindable chord is matched through `m.keys` (an `internal/keymap.Keymap` resolved in `New` from `cfg.Keybinds`, with any warnings appended to the startup notice): `m.keys.ActionFor(k)` / `m.keys.Matches(action, k)` instead of `k == "ctrl+p"`. Key names in this document are the defaults. Navigation and text primitives (arrows, Enter, Esc, Tab, Backspace) and overlay-local chords (grep's Ctrl+J newline, the op inputs' Ctrl+A/Ctrl+E, the op table's Ctrl+S) stay fixed. Status-bar hints and notices that name a chord read it from the keymap too (`actionHints` in render.go). `View` (render.go) assembles header + sidebar pane + main pane + status rows, choosing the main body by the same overlay-then-mode priority.
 
 **How async results land.** Each worker Cmd captures everything it needs by value (including a copy of the buffer lines where relevant), does its work, and returns a message tagged with `gen` and usually `rel`. The `handleXReady` handler compares `gen` against the Model's current counter, `rel` against the open file, and often the mode too; a mismatch means the result is stale and it is silently dropped. Generations stay monotonic across state clears precisely so in-flight results remain identifiable.
 
@@ -42,7 +44,7 @@ Three design rules shape almost every function here:
 
 #### app.go (core & corpus)
 
-- `New` constructs the Model: wires the store, LSP registry, and clipboard, picks the root to start in (the opened directory, or the Ctrl+W repo it was last rooted at if that repo still has a `.git`), and hands off to `enterRoot`. A cold cache shows the splash and lets `Init` build the index in the background.
+- `New` constructs the Model: resolves the keymap (bad `keybinds:` entries become startup-notice warnings and keep their defaults), wires the store, LSP registry, and clipboard, picks the root to start in (the opened directory, or the Ctrl+W repo it was last rooted at if that repo still has a `.git`), and hands off to `enterRoot`. A cold cache shows the splash and lets `Init` build the index in the background.
 - **Roots.** `workspaceRoot`/`workspaceDB` are the opened directory and its store; `root`/`db` are the *current* root — the workspace, or the nested repo Ctrl+W selected (`activeRepo`). Every root-relative feature (tree, query bar, Ctrl+P/U/G, git status, diff/blame, save, `:mkdir/:touch/:rm`) reads `root`/`db` and so needs no per-feature scoping: rooted at a repo, the editor behaves as if that repo had been opened directly. `db` is `store.Scoped(workspaceDB, activeRepo)`, so file records stay keyed by workspace path. `workspaceIsRepo` covers what is fixed by the opened directory (Ctrl+W's refusal, the nested-repo scan).
 - `enterRoot` points `root`/`db`/`gitRepo` at `activeRepo`, resets all root-relative state, and restores that root's tabs, open file, and tree position (`rootSessionPosition`) plus its warm search index — only store reads and one `.gitignore`, no walk. `leaveRoot` persists the current root first: cursor, tabs, position, unsaved edits stashed as a draft, and every buffer-bound view (completion, diff, blame, conflict, preview, jump trail) ended. `switchRoot` (the Ctrl+W choice) runs leave → `rootGen++` → enter, then fires the index load/rebuild and git refresh in the background. The `rootGen` bump is what drops a corpus walk or git status still in flight for the old root — both messages carry the generation they ran for.
 - `saveSession` read-modify-writes the workspace-level session: the Ctrl+W selection, plus the current root's last file and tree path (the workspace's own in `LastFile`/`Command`, a repo's in `Repos[repo]`), so every root keeps its own position.
@@ -96,7 +98,7 @@ The `editor` struct is a minimal multi-line buffer: `lines`, cursor, a `dirty` f
 
 #### keys_edit.go
 
-- `handleEditKey` is the edit-mode keymap. The interesting choreography: the completion popup consumes its keys first; Esc peels state in order (signature pin → selection → the mode itself, where discarding unsaved edits deletes the draft and pushes a snapshot so one Ctrl+Z recovers the text); every buffer mutation marks its highlight line and sets `snapDirty`; and word boundaries (space, enter, cursor line change) call `flushBurst` so undo coalesces typing bursts.
+- `handleEditKey` is the edit-mode key handler. The interesting choreography: the completion popup consumes its keys first; a bound action chord goes to `handleEditAction` (save, undo, redo, find, jump/back, expand selection, @exec); Esc peels state in order (signature pin → selection → the mode itself, where discarding unsaved edits deletes the draft and pushes a snapshot so one Ctrl+Z recovers the text); every buffer mutation marks its highlight line and sets `snapDirty`; and word boundaries (space, enter, cursor line change) call `flushBurst` so undo coalesces typing bursts.
 - `saveEdit` (Ctrl+S and `:w`'s shared path) writes the buffer through `filetree.WriteViewFile`, pushes a "save" snapshot, deletes the now-obsolete draft, and notifies the language server.
 - `pageEdit` pages with a one-line overlap, recomputing the viewport top from the cursor because `fileScrollY` goes stale during arrow navigation; `moveEditCursor` treats leaving a line as a burst boundary.
 - `editPaste` splits pasted text on newlines and splices the whole block in with one `insertLines` call (plus one bulk highlight-cache splice), as one undo step.
@@ -134,7 +136,7 @@ Every opened file becomes a tab; the list, active index, and per-tab cursors per
 #### keys_search.go
 
 - `enterSearch` freezes a snapshot of the content (and re-tokenizes its highlighting) so the search view is stable while the query is typed; the frozen string also keeps the match cache's key compare on the pointer-equality fast path.
-- `handleSearchKey` types the query, cycles matches with ↑/↓, opens the replace bar with Ctrl+E, and commits with Enter.
+- `handleSearchKey` types the query, cycles matches with ↑/↓ (the bound find key also steps forward), opens the replace bar with the bound exec key (Ctrl+E), and commits with Enter.
 - `acceptSearch` lands the focused match: in edit mode the cursor jumps onto it (byte offset → rune column — the one offset bridge), otherwise the line is centered.
 - `focusNearestMatch` starts a fresh query at the first match at/after the cursor line instead of the top of the file.
 - `anchorScroll`/`anchorCursorLine` place a landed line ~30% from the top — the shared landing convention used by search, jump, grep, conflict, and preview alike.
@@ -156,7 +158,7 @@ Every opened file becomes a tab; the list, active index, and per-tab cursors per
 
 - `executeCommand` dispatches the `:` bar: `jump` (line/top/end), `revert` (loads the last "save" snapshot as an undoable edit), `tab <name|cl|cr>`, and `refresh` (a forced corpus + git-status rebuild).
 - `openFuzzy` (Ctrl+P) builds the finder corpus with recently-opened files moved to the front — an empty query is a recents list — and directories appended last. `openUncommitted` (Ctrl+U) is the same overlay over the corpus ∩ gitDirty intersection. `openRepoPicker` (Ctrl+W) is that overlay over nested git repo roots only (prompt `Repo: `), plus a first row named for the opened directory (`name/`) that selects the whole workspace. It refuses when the opened directory is already a git repository, and lists the same rows whichever root the editor is at. `selectWorkspaceRepo` hands the choice to `switchRoot` (app.go), which re-roots the whole editor there — tree, query bar, Ctrl+P/U/G, git views — so nothing outside the repo is reachable; picking the current root just closes the picker. Both file finders build their candidate lists via `fuzzyGotoCandidates`/`fuzzyUncommittedCandidates`, shared with `refreshFuzzyCandidates`: when a corpus rebuild or a changed git dirty set lands while the finder is open, the list is re-derived in place — typed filter preserved, selection re-found by path — so externally created or deleted files appear/vanish without reopening (and no "refreshing" hint is needed). The grep overlay's snapshot is deliberately not re-derived (its results stream under `grepGen`); reopening Ctrl+G re-snapshots. A workspace that is not itself a repo discovers nested roots with `FindNestedGitRepos` (see `applyWorkspaceRepos`) and, rooted at the workspace, polls `MergeRepoDirty` over all of them.
-- `handleFuzzyKey` runs the overlay: Enter on a file opens it (flushing the burst first so the abandoned buffer stays in history) — on the line of an optional `#L<n>` anchor in the query — and Enter on a directory drills into it inside the finder. `fuzzySearchText` is the query without that anchor; filtering (`refreshFuzzy`), the sidebar mirror, and the overlay's match highlighting all use it.
+- `handleFuzzyKey` runs the overlay: Enter on a file opens it (flushing the burst first so the abandoned buffer stays in history) — on the line of an optional `#L<n>` anchor in the query — and Enter on a directory drills into it inside the finder. `fuzzySearchText` is the query without that anchor; filtering (`refreshFuzzy`), the sidebar mirror, and the overlay's match highlighting all use it. Esc or the bound goto/uncommitted/repo keys close it — except the repo key from a file finder, which switches to the repo picker.
 - `fuzzySelectedPath` mirrors the finder's selection into the sidebar so the tree follows along.
 - `closeFuzzy` releases the prepared corpus — it can be a few MB, and nothing keeps it useful between opens.
 
@@ -185,11 +187,11 @@ Every opened file becomes a tab; the list, active index, and per-tab cursors per
 #### keys_inspect.go
 
 - `enterInspect` (Ctrl+T) opens the dashboard and fires `fetchDBInfoCmd` — store statistics involve real I/O (`BlobUsage` does per-record preads), so they load async.
-- `runInspectCommand` dispatches the `@inspection >` bar: `db compact|relieve` (run via `maintCmd` in the background, guarded by `inspectBusy` against duplicates; completion re-fetches stats), `lsp enable|disable <lang|all>` and `syscolor <style>`.
+- `runInspectCommand` dispatches the `@inspection >` bar: `db compact|relieve` (run via `maintCmd` in the background, guarded by `inspectBusy` against duplicates; completion re-fetches stats), `lsp enable|disable <lang|all>`, `syscolor <style>`, and `keybind …` (keys_keybinds.go).
 - `inspectLSPCommand` persists the config change *first* (nothing half-applied on a failed write) and then applies it live through the registry — `m.cfg` itself is never mutated because its Languages map is shared with server goroutines.
 - `inspectSyscolorCommand` validates against the curated style list, persists, applies via `syntax.SetStyle`, and invalidates every highlight cache so the new colors show immediately.
 
-- `handleInspectKey` hands every key to whichever right-hand panel has focus: the op-commands table, the style picker or the lsp picker. `→` at the end of the bar input moves focus into the panel on the op-commands, system and lsp sections.
+- `handleInspectKey` hands every key to whichever right-hand panel has focus: the op-commands table, the style picker, the lsp picker or the keybind picker. `→` at the end of the bar input moves focus into the panel on the op-commands, system, lsp and keybinds sections.
 - The lsp verbs come in two kinds. `start`, `stop` and `restart` act on this session only and never touch the config: start is the registry's `Enable`, stop is `Stop` (the server starts again on demand), and restart is both. `enable` and `disable` also save the language's enable flag. `applyLSPAction` runs one verb for one language, and both the `lsp <verb> <lang|all>` bar command and the picker use it.
 - `setLSPEnabled` is the persisting path behind enable/disable. It writes the config first, then calls the registry's `Enable`/`Disable`, and reports whether it was applied, so the bar is only cleared on success.
 - The lsp picker (`lspPickerState`) is the lsp panel's language list:
@@ -202,9 +204,21 @@ Every opened file becomes a tab; the list, active index, and per-tab cursors per
   - In `handleStylePickerKey`, ↑/↓ browse and Enter calls `applySyntaxStyle`; focus stays, so you can keep trying styles. ←/Esc go back to the menu.
   - `refreshStylePreview` re-highlights a 4-line Go sample (`stylePreviewSample`) in the highlighted style with `syntax.HighlightLinesWithStyle`. It runs only when the selection moves, and never changes the active style.
   - `applySyntaxStyle` is shared with `syscolor`: it persists first, then calls `syntax.SetStyle`, sets `m.cfg.Theme.Syntax` and invalidates the highlight caches.
-  - A sidebar click on another section releases the picker (and the lsp picker).
+  - A sidebar click on another section releases the picker (and the lsp and keybind pickers).
 
 *Plus small helpers: `inspectDBCommand`, `knownLanguages`, `inspectHint` (the status-bar hint for the current focus) — bar editing and validation.*
+
+#### keys_keybinds.go / render_keybinds.go
+
+The keybinds section of the dashboard: an ACTION | KEY | DESCRIPTION table over `keymap.Actions()` plus a closing "↺ reset all to defaults" row. Bindings live in the *user* config.yaml (portable across machines), never in ntee-db.
+
+- `keybindPickerState` is the focused list: `index` runs over the actions plus the reset row (`keybindResetRow`); `capturing` arms key capture; `confirmReset` is the y/n prompt.
+- `handleKeybindPickerKey`: ↑/↓ move, Enter arms capture on an action row (or asks to reset all on the reset row), `r` resets the row, `R` asks to reset all, ←/Esc release focus. While confirming, `y`/Enter reset and `n`/Esc keep.
+- `captureKeybind` takes the next key press — Update routes it here before any chord fires, so even the bound quit key can be captured; only Ctrl+C still quits. Esc cancels. The key goes through `keymap.With`, so a non-chord or a key already bound to another action is rejected in the status bar and capture stays armed for another try.
+- `resetKeybind` restores one default, refusing (instead of silently swapping) when another action has since taken that key. `beginKeybindResetAll` arms the confirmation, or says there is nothing to reset.
+- `applyKeymap` is the one persisting path: it writes the *full* action→key map through `config.SetKeybinds` first (nothing half-applied on a failed write; the file stays self-describing), then swaps `m.keys` and replaces `m.cfg.Keybinds` wholesale.
+- `inspectKeybindCommand` is the bar form: `keybind <action> <key>`, `keybind <action> default`, and `keybind reset` (typing it out is the confirmation).
+- `renderInspectKeybinds` windows the one-line-per-action body around the selection so short terminals keep the reset row and selection visible, dropping the Commands legend first. A custom binding is highlighted and leads its description with its default. `renderKeybindResetRow` draws the reset row or its confirmation prompt.
 
 #### keys_opcommands.go
 
@@ -268,7 +282,7 @@ Pure functions over line slices — no Model involved, which keeps them independ
 
 #### keys_diff.go
 
-- `handleDiffKey` is the closed read-only switch: arrows move the review cursor, Shift+↑/↓ jump hunks, Ctrl+J/O join the jump ladder, Esc exits — everything else is inert.
+- `handleDiffKey` is the closed read-only switch: arrows move the review cursor, Shift+↑/↓ jump hunks, the bound jump/back keys (Ctrl+J/O) join the jump ladder, Esc exits — everything else is inert.
 - `exitDiff` maps the cursor row back to its buffer line while preserving its on-screen row, so the page doesn't shift even when del rows compress away.
 - `diffJumpToReference` syncs the edit cursor to the row's buffer position and reuses the whole jump ladder; del rows refuse (their text no longer exists in the buffer, so an LSP query there would silently resolve the wrong identifier).
 
@@ -304,7 +318,7 @@ The shared engine for the OpenAPI and GraphQL previews. The two modes were byte-
 
 #### keys_preview.go
 
-- `handlePreviewKey`: the closed read-only switch — cursor movement, Shift+↑/↓ over the outline, Enter jumping to the selected outline entry, `/` or Ctrl+F opening the in-preview search.
+- `handlePreviewKey`: the closed read-only switch — cursor movement, Shift+↑/↓ over the outline, Enter jumping to the selected outline entry, `/` or the bound find key opening the in-preview search.
 - `exitPreview` (Esc) jumps to the source of the row under the cursor via `jumpToLocation` — content from another file opens that file, and a Ctrl+O frame is pushed either way.
 - `handlePreviewSearchKey` is a search-only bar (no replace — the document is read-only); `syncPreviewSel` keeps the outline selection tracking the document cursor by binary search.
 
@@ -394,7 +408,7 @@ Clickable links in the run output.
 - `renderGrepOverlay` is the largest overlay: top ~60% a syntax-colored preview of the selected hit, a divider, then the (possibly multi-line) query input and the result list, with loading/searching states in both panes.
 - `renderPreviewRows` renders a highlighted code window with the target line ~40% down and regex matches overlaid — shared by the grep overlay and the definition picker, which is why the two previews look identical.
 - `renderGrepInputRows` renders the multi-line grep query with the cursor on its own line/column, windowing long queries around the cursor.
-- `renderFuzzyOverlay`/`renderFuzzyRow` draw the Ctrl+P/Ctrl+U finder, computing matched-rune bold positions only for the visible rows rather than during filtering, and rendering contiguous matched/unmatched runs in one lipgloss call each (a call per rune was width×rows ANSI emissions per frame).
+- `renderFuzzyOverlay`/`renderFuzzyRow` draw the Ctrl+P/Ctrl+U finder (titled by `fuzzyPromptLabel`, which prefixes the Ctrl+U title with the number of uncommitted files listed, e.g. `32 uncommitted`), computing matched-rune bold positions only for the visible rows rather than during filtering, and rendering contiguous matched/unmatched runs in one lipgloss call each (a call per rune was width×rows ANSI emissions per frame).
 - `renderSplash` is the cold-start page: name, version, and an animated indexing spinner while the index builds.
 
 *Plus small helpers: `renderMessageOverlay`, `renderConfirmRmOverlay`, `renderDefPickOverlay` — centered modal boxes.*
@@ -431,7 +445,7 @@ Diagnostics themselves land in `Update`'s `lsp.DiagnosticsMsg` branch (app.go), 
 - `View` wraps `render()` in a `tea.View` with alt-screen, mouse cell-motion, and focus reporting (which is what feeds the git-poll pause).
 - `render` assembles the frame: header, sidebar pane, main pane chosen by overlay-then-mode priority, tab strip, and status rows — panes tile the full width so no terminal-default stripe shows. The sidebar body is always `renderSidebarList` over whatever `sidebarListForMode` built.
 - `renderHeader` builds the top row: the version and the opened directory, then — when Ctrl+W has rooted the editor at a nested repo — a bold orange `working repo: x` label directly after the path (left side, where the eye already is, not pushed to the far edge of a wide terminal). Styling the label apart from the title means the row is padded by hand rather than through `Width()`, and a row wider than the terminal cuts the title first so the repo name survives.
-- `renderStatusLine` is the per-mode bottom bar; `renderEditStatus` the edit variant (filename, saved/editing, diagnostics, position, hints). The `@exec`/`@inspection` bars pre-pad in their own background so the chrome padding doesn't repaint them.
+- `renderStatusLine` is the per-mode bottom bar; `renderEditStatus` the edit variant (filename, saved/editing, diagnostics, position, hints). `actionHints` builds chord hints from the live keymap: the compact "Ctrl+ S save, F find" form while every key is a plain Ctrl+letter, full labels ("F5 save · Ctrl+F find") otherwise. The `@exec`/`@inspection` bars pre-pad in their own background so the chrome padding doesn't repaint them.
 - `renderFile` is the main file renderer: line-number gutter with diagnostic dots, viewport following the cursor via `fileViewportTop` (the shared function that keeps renderers, paging, and mouse math agreeing on what's on screen), the cursor line via `renderEditLine`, and — in edit mode — the completion dropdown or pinned signature spliced over the rows.
 - `renderEditLine` draws the cursor line with a horizontal window that follows the cursor. The line keeps its syntax colours: each token is drawn in its own colour on the faint cursor-line tint (`hexLineHl`), or on the selection background (`hexSelection`) where selected, and only the cursor cell is inverted. Runs are cut where the region (line / selection / cursor) or the syntax segment changes, so it emits about one Render per token instead of one per column, a deliberate ANSI-call-count optimization repeated across the renderers. `editLineSegmentColumns` maps window columns to segments and ignores a row whose segments don't add up to the line (a stale row after an edit renders plain until the rescan). `lineSegments` is the shared accessor for a line's cached highlighting.
 - `renderSearchLine` renders a line with syntax segments, match backgrounds, and replace-preview spans layered by priority (preview > matches > syntax), batching consecutive same-style columns into runs; it serves the search view, the previews, and both overlay code panes.

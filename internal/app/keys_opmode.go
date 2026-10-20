@@ -9,6 +9,7 @@ import (
 
 	"github.com/nickooan/ntee-editor/internal/fuzzy"
 	"github.com/nickooan/ntee-editor/internal/input"
+	"github.com/nickooan/ntee-editor/internal/keymap"
 	"github.com/nickooan/ntee-editor/internal/opcmd"
 	"github.com/nickooan/ntee-editor/internal/store"
 )
@@ -142,8 +143,12 @@ func (m Model) handleOpKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case opStageRun:
 		return m.handleOpRunKey(msg)
 	}
-	switch msg.String() {
-	case "esc", "ctrl+r":
+	k := msg.String()
+	if m.keys.Matches(keymap.OpMode, k) {
+		return m.closeOpMode(), nil
+	}
+	switch k {
+	case "esc":
 		return m.closeOpMode(), nil
 	case "up", "shift+up":
 		m.opMode.index = input.Clamp(m.opMode.index-1, 0, max(0, len(m.opMode.matches)-1))

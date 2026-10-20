@@ -3,6 +3,8 @@ package app
 import (
 	"fmt"
 	"strings"
+
+	"github.com/nickooan/ntee-editor/internal/keymap"
 )
 
 // blameDateWidth is the fixed date column width ("2006-01-02").
@@ -84,5 +86,6 @@ func (m Model) renderBlameStatus() string {
 		line += statusTextStyle.Render("   ") + errStyle.Render(m.errText)
 	}
 	return line + statusTextStyle.Render("   ") +
-		hintStyle.Render("↑/↓ move · Shift+↑/↓ commit · PgUp/PgDn page · Ctrl+ J def, O back · Esc exit")
+		hintStyle.Render("↑/↓ move · Shift+↑/↓ commit · PgUp/PgDn page · "+m.actionHints(
+			hintFor("def", keymap.JumpToReference), hintFor("back", keymap.JumpBack))+" · Esc exit")
 }

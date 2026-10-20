@@ -4,6 +4,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/nickooan/ntee-editor/internal/input"
+	"github.com/nickooan/ntee-editor/internal/keymap"
 )
 
 // handleBlameKey drives blame mode. The switch is closed on purpose: any key
@@ -15,7 +16,14 @@ func (m Model) handleBlameKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.clearBlameState(), nil
 	}
 
-	switch msg.String() {
+	k := msg.String()
+	switch {
+	case m.keys.Matches(keymap.JumpToReference, k):
+		return m.blameJumpToReference()
+	case m.keys.Matches(keymap.JumpBack, k):
+		return m.jumpBack()
+	}
+	switch k {
 	case "esc":
 		return m.exitBlame(), nil
 
@@ -46,12 +54,6 @@ func (m Model) handleBlameKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.pageBlame(-1), nil
 	case "pgdown":
 		return m.pageBlame(1), nil
-
-	case "ctrl+j":
-		return m.blameJumpToReference()
-
-	case "ctrl+o":
-		return m.jumpBack()
 	}
 	return m, nil
 }

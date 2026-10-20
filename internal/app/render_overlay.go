@@ -75,6 +75,16 @@ func (m Model) renderConfirmRmOverlay(width, height int) string {
 		lipgloss.WithWhitespaceStyle(whitespaceStyle))
 }
 
+// fuzzyPromptLabel is the overlay title. The uncommitted finder leads with how
+// many files it lists ("32 uncommitted "), the whole list rather than the
+// filtered matches, so it reads as the size of the change set.
+func (m Model) fuzzyPromptLabel() string {
+	if m.fuzzyPrompt == fuzzyPromptUncommitted {
+		return strconv.Itoa(len(m.fuzzyCorpus)) + " " + m.fuzzyPrompt
+	}
+	return m.fuzzyPrompt
+}
+
 // renderFuzzyOverlay draws the fuzzy file finder (Ctrl+P goto / Ctrl+U
 // uncommitted — fuzzyPrompt labels the source): query input on top, matches
 // beneath with the matched runes bold.
@@ -84,7 +94,7 @@ func (m Model) renderFuzzyOverlay(width, height int) string {
 	rowWidth := max(1, boxWidth-2)
 
 	var b strings.Builder
-	b.WriteString(promptStyle.Render(m.fuzzyPrompt) + renderInputLine(m.fuzzyQuery, len([]rune(m.fuzzyQuery))) + "\n")
+	b.WriteString(promptStyle.Render(m.fuzzyPromptLabel()) + renderInputLine(m.fuzzyQuery, len([]rune(m.fuzzyQuery))) + "\n")
 
 	if len(m.fuzzyMatches) == 0 {
 		if m.corpusRebuilding && m.corpusBuiltAt.IsZero() {

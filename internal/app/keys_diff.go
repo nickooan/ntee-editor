@@ -4,6 +4,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/nickooan/ntee-editor/internal/input"
+	"github.com/nickooan/ntee-editor/internal/keymap"
 )
 
 // handleDiffKey drives diff review mode. The switch is closed on purpose:
@@ -15,7 +16,14 @@ func (m Model) handleDiffKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.clearDiffState(), nil
 	}
 
-	switch msg.String() {
+	k := msg.String()
+	switch {
+	case m.keys.Matches(keymap.JumpToReference, k):
+		return m.diffJumpToReference()
+	case m.keys.Matches(keymap.JumpBack, k):
+		return m.jumpBack()
+	}
+	switch k {
 	case "esc":
 		return m.exitDiff(), nil
 
@@ -46,12 +54,6 @@ func (m Model) handleDiffKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.pageDiff(-1), nil
 	case "pgdown":
 		return m.pageDiff(1), nil
-
-	case "ctrl+j":
-		return m.diffJumpToReference()
-
-	case "ctrl+o":
-		return m.jumpBack()
 	}
 	return m, nil
 }

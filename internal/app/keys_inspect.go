@@ -18,13 +18,14 @@ import (
 
 // inspectMenuItems are the left-pane rows of the inspection dashboard, in
 // display order. inspectMenu indexes into this list.
-var inspectMenuItems = []string{"ntee-db", "lsp", "system", "op-commands"}
+var inspectMenuItems = []string{"ntee-db", "lsp", "system", "op-commands", "keybinds"}
 
 const (
 	inspectMenuDB = iota
 	inspectMenuLSP
 	inspectMenuSystem
 	inspectMenuOpCommands
+	inspectMenuKeybinds
 )
 
 // syntaxStyles is the curated set of chroma styles offered by `syscolor`.
@@ -77,6 +78,7 @@ func (m Model) enterInspect() (tea.Model, tea.Cmd) {
 	m.inspectLoading = true
 	m.opTable = opTableState{}
 	m.stylePicker = stylePickerState{}
+	m.keybindPicker = keybindPickerState{}
 	m, loadOpCommands := m.loadOpCommandsCmd()
 	return m, tea.Batch(m.fetchDBInfoCmd(), loadOpCommands)
 }
@@ -95,6 +97,9 @@ func (m Model) handleInspectKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.lspPicker.focused {
 		return m.handleLSPPickerKey(msg)
+	}
+	if m.keybindPicker.focused {
+		return m.handleKeybindPickerKey(msg)
 	}
 	switch msg.String() {
 	case "esc":
@@ -122,6 +127,10 @@ func (m Model) handleInspectKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m = m.focusLSPPicker()
 			break
 		}
+		if m.inspectMenu == inspectMenuKeybinds && atInputEnd {
+			m.keybindPicker.focused = true
+			break
+		}
 		m.inspectCursor = input.MoveCursor(m.inspectInput, m.inspectCursor, 1)
 	case "backspace":
 		m.inspectInput, m.inspectCursor, _ = input.RemoveBeforeCursor(m.inspectInput, m.inspectCursor)
@@ -138,7 +147,7 @@ func (m Model) handleInspectKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // renderInspectInput draws the @inspection bar input; it drops its cursor while
 // the op-commands table has focus, so only the table shows where typing goes.
 func (m Model) renderInspectInput() string {
-	if m.opTable.focused || m.stylePicker.focused || m.lspPicker.focused {
+	if m.opTable.focused || m.stylePicker.focused || m.lspPicker.focused || m.keybindPicker.focused {
 		return execTextStyle.Render(m.inspectInput)
 	}
 	return renderInputLineStyled(m.inspectInput, m.inspectCursor, execTextStyle)
@@ -168,12 +177,20 @@ func (m Model) inspectHint() string {
 		return "↑/↓ language · Enter actions · ←/Esc back"
 	case m.inspectMenu == inspectMenuLSP:
 		return "→ manage a server · lsp start|stop|restart|enable|disable <lang|all> · Shift+↑/↓ pane · Esc back"
+	case m.keybindPicker.confirmReset:
+		return "y reset all · n cancel"
+	case m.keybindPicker.capturing:
+		return "press the new key chord · Esc cancel · Ctrl+C quits"
+	case m.keybindPicker.focused:
+		return "↑/↓ action · Enter rebind · r reset · R reset all · ← back"
+	case m.inspectMenu == inspectMenuKeybinds:
+		return "→ rebind keys · keybind <action> <key|default> · keybind reset · Shift+↑/↓ pane · Esc back"
 	}
-	return "db compact|relieve · lsp start|stop|enable|disable <lang|all> · syscolor <style> · Shift+↑/↓ pane · Esc back"
+	return "db compact|relieve · lsp start|stop|enable|disable <lang|all> · syscolor <style> · keybind <action> <key> · Shift+↑/↓ pane · Esc back"
 }
 
 // runInspectCommand dispatches "db compact|relieve",
-// "lsp enable|disable <lang|all>", and "syscolor <style>". On error it stays
+// "lsp enable|disable <lang|all>", "syscolor <style>", and "keybind …". On error it stays
 // in the bar so the user can correct the input.
 func (m Model) runInspectCommand(cmd string) (tea.Model, tea.Cmd) {
 	ns, rest, _ := strings.Cut(cmd, " ")
@@ -187,6 +204,8 @@ func (m Model) runInspectCommand(cmd string) (tea.Model, tea.Cmd) {
 		return m.inspectLSPCommand(rest)
 	case "syscolor":
 		return m.inspectSyscolorCommand(rest)
+	case "keybind":
+		return m.inspectKeybindCommand(rest)
 	default:
 		m.errText = "unknown command: " + ns
 		return m, nil

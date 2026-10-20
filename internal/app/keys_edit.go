@@ -7,6 +7,7 @@ import (
 
 	"github.com/nickooan/ntee-editor/internal/filetree"
 	"github.com/nickooan/ntee-editor/internal/input"
+	"github.com/nickooan/ntee-editor/internal/keymap"
 )
 
 // contentHeight approximates the file pane's inner height (header + borders +
@@ -55,6 +56,12 @@ func (m Model) handleEditKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.completionDismissed = false
 	}
 
+	if action, bound := m.keys.ActionFor(k); bound {
+		if next, cmd, handled := m.handleEditAction(action); handled {
+			return next, cmd
+		}
+	}
+
 	switch k {
 	case "esc":
 		// Esc peels state in order: popup (consumed above by completionKey),
@@ -86,37 +93,6 @@ func (m Model) handleEditKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.jumpStack = nil       // quitting edit mode ends the jump trail
 		m = m.closeCompletion() // pending request + pin die with the mode
 		return m.refreshFileHighlights(), nil
-
-	case "ctrl+s":
-		m = m.saveEdit()
-		// A write just landed: refresh git status now instead of waiting out
-		// the poll interval, so the tree yellows immediately (no-op when a
-		// refresh is already in flight — the poll lands within seconds).
-		return m.maybeGitRefresh()
-
-	case "ctrl+z":
-		// History rewrites can remove the pinned call outright.
-		return m.undo().sigUnpin(), nil
-
-	case "ctrl+y":
-		return m.redo().sigUnpin(), nil
-
-	case "ctrl+f":
-		m = m.flushBurst()
-		return m.enterSearch(modeEdit, m.edit.content()), nil
-
-	case "ctrl+j":
-		return m.jumpToReference()
-
-	case "ctrl+o":
-		return m.jumpBack()
-
-	case "ctrl+a":
-		m.edit.expandSelection()
-		return m, nil
-
-	case "ctrl+e":
-		return m.enterExec(), nil
 
 	case "up":
 		return m.moveEditCursor(0, -1), nil
@@ -209,6 +185,40 @@ func (m Model) handleEditKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// handleEditAction runs an edit-mode action reached through its (rebindable)
+// key. handled is false for actions edit mode does not own.
+func (m Model) handleEditAction(action keymap.Action) (next tea.Model, cmd tea.Cmd, handled bool) {
+	switch action {
+	case keymap.Save:
+		m = m.saveEdit()
+		// A write just landed: refresh git status now instead of waiting out
+		// the poll interval, so the tree yellows immediately (no-op when a
+		// refresh is already in flight — the poll lands within seconds).
+		next, cmd = m.maybeGitRefresh()
+		return next, cmd, true
+	case keymap.Undo:
+		// History rewrites can remove the pinned call outright.
+		return m.undo().sigUnpin(), nil, true
+	case keymap.Redo:
+		return m.redo().sigUnpin(), nil, true
+	case keymap.Find:
+		m = m.flushBurst()
+		return m.enterSearch(modeEdit, m.edit.content()), nil, true
+	case keymap.JumpToReference:
+		next, cmd = m.jumpToReference()
+		return next, cmd, true
+	case keymap.JumpBack:
+		next, cmd = m.jumpBack()
+		return next, cmd, true
+	case keymap.ExpandSelection:
+		m.edit.expandSelection()
+		return m, nil, true
+	case keymap.Exec:
+		return m.enterExec(), nil, true
+	}
+	return m, nil, false
 }
 
 // editPaste inserts bracketed-paste text into the buffer: newline-split, then

@@ -339,8 +339,9 @@ absolute, and must be inside the editor's folder. It prints one reply line —
   lives in another one, and notes that unsaved edits are kept as a draft. A
   newer request replaces an unanswered one.
 - **review** opens review mode (after the same confirmation when you are
-  busy): the files on the left, grouped by repo, each badged **M** / **A** /
-  **D**; the selected file's diff against `HEAD` on the right, `git diff`
+  busy): the files on the left as a folder tree like the main sidebar, each
+  badged **M** / **A** / **D** — click a folder to fold or unfold it (a folded
+  one shows how many files it hides); the selected file's diff against `HEAD` on the right, `git diff`
   style — added lines green, removed red, a new file all green, a deleted file
   all red. Files may span several nested repos. Review is read-only (no
   editing, no jump-to-definition), and `Esc` returns you to exactly the file
@@ -349,7 +350,7 @@ absolute, and must be inside the editor's folder. It prints one reply line —
 | Review key | Action |
 |---|---|
 | `↑/↓` `PgUp/PgDn` `←/→` `Home/End` | move through the diff |
-| `Shift+↑/↓` | previous / next file |
+| `Shift+↑/↓` | previous / next file (reopens a folded folder) |
 | `n` / `p` | next / previous change |
 | `Ctrl+F` | find in this file (removed lines included) |
 | `Ctrl+P` | jump to a file of the review |

@@ -186,7 +186,7 @@ func (m Model) previewSidebarList() sidebarList {
 			rows[index] = sidebarHeaderRow(entry.Label)
 			continue
 		}
-		rows[index] = sidebarBadgeRow(entry.Badge, kind.badgeW, entry.Color, entry.Tail, fileStyle)
+		rows[index] = sidebarBadgeRow("  ", entry.Badge, kind.badgeW, entry.Color, entry.Tail, fileStyle)
 	}
 	return sidebarList{rows: rows, selectedIndex: m.preview.selection.index}
 }
@@ -197,12 +197,13 @@ func sidebarHeaderRow(label string) sidebarRow {
 	return sidebarRow{segments: []sidebarSegment{{text: " " + label, style: dirStyle}}}
 }
 
-// sidebarBadgeRow is an entry of a two-pane view's left list: a bold colored
-// badge padded to badgeWidth, then the tail filling the rest.
-func sidebarBadgeRow(badge string, badgeWidth int, color, tail string, tailStyle lipgloss.Style) sidebarRow {
+// sidebarBadgeRow is an entry of a two-pane view's left list: prefix (a
+// tree indent), a bold colored badge padded to columnWidth — callers size it
+// to leave a gap after their widest badge — then the tail filling the rest.
+func sidebarBadgeRow(prefix, badge string, columnWidth int, color, tail string, tailStyle lipgloss.Style) sidebarRow {
 	badgeStyle := segStyleFor(view.HighlightSegment{Color: color, Bold: true})
 	return sidebarRow{segments: []sidebarSegment{
-		{text: "  " + padTo(badge, badgeWidth), style: badgeStyle, minimumWidth: badgeWidth + 2},
+		{text: prefix + padTo(badge, columnWidth), style: badgeStyle, minimumWidth: len([]rune(prefix)) + columnWidth},
 		{text: tail, style: tailStyle},
 	}}
 }

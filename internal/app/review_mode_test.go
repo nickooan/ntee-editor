@@ -114,11 +114,30 @@ func TestReviewAcrossReposShowsModifiedAddedDeleted(t *testing.T) {
 		t.Fatalf("cursor should start on a change, got row %d", m.review.position.row)
 	}
 
-	// The left pane: one header per repo, then its files; the main pane
-	// names the file and its counts.
+	// The left pane is the folder tree, like the main file tree, with the
+	// status badge in the marker column and a space before the name; the
+	// main pane names the file and its counts.
+	if got := reviewTreeText(m); got != strings.Join([]string{
+		"↓ apps",
+		"  ↓ web",
+		"    M main.go  +1 −1",
+		"    A new.go  +4 −0",
+		"↓ libs",
+		"  ↓ core",
+		"    D lib.go  +0 −4",
+	}, "\n") {
+		t.Fatalf("review tree:\n%s", got)
+	}
 	list := m.reviewSidebarList()
-	if len(list.rows) != 5 || list.selectedIndex != 1 {
-		t.Fatalf("sidebar rows=%d selected=%d", len(list.rows), list.selectedIndex)
+	if list.selectedIndex != 2 {
+		t.Fatalf("the selected file's row is highlighted: %d", list.selectedIndex)
+	}
+	// The change counts are their own segments, green for additions and red
+	// for deletions.
+	counts := list.rows[3].segments[2:]
+	if len(counts) != 2 || counts[0].text != "  +4" || counts[0].style.GetForeground() != colGreen ||
+		counts[1].text != " −0" || counts[1].style.GetForeground() != colRed {
+		t.Fatalf("count segments = %+v", counts)
 	}
 	main := ansi.Strip(m.renderReview(80, 20))
 	if !strings.Contains(main, "apps/web/main.go") || !strings.Contains(main, "+1 −1") {
@@ -211,5 +230,78 @@ func TestReviewFileOutsideAnyRepoIsAllAdded(t *testing.T) {
 	file := m.review.files[0]
 	if file.status != reviewAdded || file.repoRoot != "" || file.note == "" {
 		t.Fatalf("no-repo file: status=%v repo=%q note=%q", file.status, file.repoRoot, file.note)
+	}
+}
+
+// reviewTreeText is the review's left pane as plain text, one row per line.
+func reviewTreeText(m Model) string {
+	list := m.reviewSidebarList()
+	lines := make([]string, len(list.rows))
+	for i, row := range list.rows {
+		lines[i] = strings.TrimRight(sidebarRowPlain(row), " ")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func TestReviewTreeFoldsOnClickAndUnfoldsOnSelect(t *testing.T) {
+	m, _ := gitReviewWorkspace(t)
+	m = reviewOf(t, m, "libs/core/lib.go", "apps/web/new.go", "apps/web/main.go")
+	if m.review.files[0].workspaceRel != "apps/web/main.go" || m.review.files[2].workspaceRel != "libs/core/lib.go" {
+		t.Fatal("files follow the tree's order")
+	}
+
+	// Clicking a directory row folds it: its subtree hides and the row counts
+	// the reviewed files inside. A second click unfolds it.
+	m, _ = m.activateReviewRow(0) // apps
+	if got := reviewTreeText(m); !strings.HasPrefix(got, "→ apps  2\n↓ libs") {
+		t.Fatalf("folded tree:\n%s", got)
+	}
+	if list := m.reviewSidebarList(); list.selectedIndex != 0 {
+		t.Fatalf("a folded selection highlights its visible folder: %d", list.selectedIndex)
+	}
+	m, _ = m.activateReviewRow(0)
+	if got := reviewTreeText(m); !strings.HasPrefix(got, "↓ apps\n  ↓ web") {
+		t.Fatalf("unfolded tree:\n%s", got)
+	}
+
+	// Folding libs, then walking onto its file with Shift+↓, reopens it.
+	m, _ = m.activateReviewRow(4) // libs
+	m = key(m, shiftKey(tea.KeyDown))
+	m = key(m, shiftKey(tea.KeyDown))
+	if m.review.selection.index != 2 || m.review.collapsed["libs"] {
+		t.Fatalf("selection=%d collapsed=%v", m.review.selection.index, m.review.collapsed)
+	}
+	if list := m.reviewSidebarList(); list.selectedIndex != 6 {
+		t.Fatalf("the file inside the reopened folder is highlighted: %d", list.selectedIndex)
+	}
+
+	// A click on a file row selects it.
+	m, _ = m.activateReviewRow(3) // new.go
+	if m.review.selection.index != 1 {
+		t.Fatalf("clicked file selected: %d", m.review.selection.index)
+	}
+}
+
+func TestReviewExpandsTabsForDisplayOnly(t *testing.T) {
+	m, root := gitReviewWorkspace(t)
+	// A tab-indented line that is unchanged must still diff as context: the
+	// expansion runs after the diff.
+	target := filepath.Join(root, "apps", "web", "main.go")
+	must(t, os.WriteFile(target, []byte("package main\n\nfunc main() { run() }\n\tvar tabbed = 1\n"), 0o644))
+	m = reviewOf(t, m, "apps/web/main.go")
+	document := m.review.files[0].document
+	for i, row := range document.rows {
+		if text := document.rowText(i); strings.Contains(text, "\t") {
+			t.Fatalf("row %d still has a raw tab: %q", i, text)
+		}
+		for _, segment := range document.rowHighlights(i) {
+			if strings.Contains(segment.Text, "\t") {
+				t.Fatalf("row %d highlight keeps a raw tab", i)
+			}
+		}
+		_ = row
+	}
+	if !strings.Contains(m.review.files[0].corpus, "    var tabbed = 1") {
+		t.Fatalf("search corpus matches what is shown: %q", m.review.files[0].corpus)
 	}
 }

@@ -6,13 +6,13 @@ import (
 	"io/fs"
 	"path"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/nickooan/ntee-editor/internal/filetree"
 	"github.com/nickooan/ntee-editor/internal/syntax"
+	"github.com/nickooan/ntee-editor/internal/view"
 )
 
 // reviewFileStatus is what a reviewed file's diff turned out to be.
@@ -53,7 +53,7 @@ func (file reviewFile) loaded() bool {
 // where the user was. gen stays monotonic across reviews so in-flight loads
 // of an older review are dropped.
 type reviewState struct {
-	files        []reviewFile
+	files        []reviewFile  // in tree order (filetree.BuildPathTreeEntries)
 	selection    listSelection // index into files
 	position     rowCursor
 	search       documentSearch
@@ -61,6 +61,15 @@ type reviewState struct {
 	gen          int
 	preparing    bool // repos are being resolved; files is the unsorted request
 	previousMode mode
+
+	// The left pane's folder tree. entries are rebuilt only when the file set
+	// or the fold state changes (refreshReviewTree), never per frame.
+	// collapsed is replaced, never mutated: Model copies share the map.
+	collapsed   map[string]bool
+	entries     []filetree.FileTreeEntry
+	rowByPath   map[string]int // entry RelativePath → row
+	fileByPath  map[string]int // workspace path → index into files
+	hiddenCount map[string]int // collapsed dir → reviewed files it hides
 }
 
 const (
@@ -160,8 +169,8 @@ func (m Model) enterReview(paths []string, base string) (Model, tea.Cmd) {
 	return m, reviewPrepareCmd(m.review.gen, m.workspaceRoot, files)
 }
 
-// reviewPrepareCmd resolves each file's repo and sorts the list by repo, then
-// path, so the left pane groups predictably.
+// reviewPrepareCmd resolves each file's repo and puts the list in the left
+// pane's tree order, so Shift+↑/↓ walks files exactly as they are shown.
 func reviewPrepareCmd(gen int, workspaceRoot string, requested []reviewFile) tea.Cmd {
 	files := append([]reviewFile(nil), requested...)
 	return func() tea.Msg {
@@ -184,14 +193,26 @@ func reviewPrepareCmd(gen int, workspaceRoot string, requested []reviewFile) tea
 			files[i].repoRel = filepath.ToSlash(repoRel)
 			files[i].repoLabel = filepath.ToSlash(label)
 		}
-		sort.SliceStable(files, func(a, b int) bool {
-			if files[a].repoLabel != files[b].repoLabel {
-				return files[a].repoLabel < files[b].repoLabel
-			}
-			return files[a].workspaceRel < files[b].workspaceRel
-		})
-		return reviewPreparedMsg{gen: gen, files: files}
+		return reviewPreparedMsg{gen: gen, files: inTreeOrder(files)}
 	}
+}
+
+// inTreeOrder orders files as the folder tree lists them: directories
+// first, then files, by name at every level.
+func inTreeOrder(files []reviewFile) []reviewFile {
+	byPath := make(map[string]reviewFile, len(files))
+	paths := make([]string, len(files))
+	for i, file := range files {
+		byPath[file.workspaceRel] = file
+		paths[i] = file.workspaceRel
+	}
+	ordered := make([]reviewFile, 0, len(files))
+	for _, entry := range filetree.BuildPathTreeEntries(paths, nil) {
+		if file, ok := byPath[entry.RelativePath]; ok && entry.Type == "file" {
+			ordered = append(ordered, file)
+		}
+	}
+	return ordered
 }
 
 func (m Model) handleReviewPrepared(msg reviewPreparedMsg) (tea.Model, tea.Cmd) {
@@ -202,7 +223,90 @@ func (m Model) handleReviewPrepared(msg reviewPreparedMsg) (tea.Model, tea.Cmd) 
 	m.review.preparing = false
 	m.review.selection = listSelection{}
 	m.review.position = rowCursor{}
+	m.review.collapsed = nil
+	m.review.fileByPath = make(map[string]int, len(msg.files))
+	for i, file := range msg.files {
+		m.review.fileByPath[file.workspaceRel] = i
+	}
+	m = m.refreshReviewTree()
 	return m, m.reviewLoadBatchCmd(0)
+}
+
+// refreshReviewTree rebuilds the folder tree's visible rows and the folded
+// directories' hidden counts — on a new file set or a fold change only.
+func (m Model) refreshReviewTree() Model {
+	paths := make([]string, len(m.review.files))
+	for i, file := range m.review.files {
+		paths[i] = file.workspaceRel
+	}
+	m.review.entries = filetree.BuildPathTreeEntries(paths, m.review.collapsed)
+	m.review.rowByPath = make(map[string]int, len(m.review.entries))
+	m.review.hiddenCount = map[string]int{}
+	for row, entry := range m.review.entries {
+		m.review.rowByPath[entry.RelativePath] = row
+		if entry.Type == "directory" && !entry.IsExpanded {
+			prefix := entry.RelativePath + "/"
+			for _, path := range paths {
+				if strings.HasPrefix(path, prefix) {
+					m.review.hiddenCount[entry.RelativePath]++
+				}
+			}
+		}
+	}
+	return m
+}
+
+// toggleReviewFold folds or unfolds a directory of the left pane.
+func (m Model) toggleReviewFold(dir string) Model {
+	collapsed := make(map[string]bool, len(m.review.collapsed)+1)
+	for folded := range m.review.collapsed {
+		collapsed[folded] = true
+	}
+	if collapsed[dir] {
+		delete(collapsed, dir)
+	} else {
+		collapsed[dir] = true
+	}
+	m.review.collapsed = collapsed
+	return m.refreshReviewTree()
+}
+
+// unfoldReviewAncestors reopens every folded directory above rel, so a file
+// the keyboard (or a search) selects is never hidden.
+func (m Model) unfoldReviewAncestors(rel string) Model {
+	var folded []string
+	for dir := path.Dir(rel); dir != "." && dir != "/"; dir = path.Dir(dir) {
+		if m.review.collapsed[dir] {
+			folded = append(folded, dir)
+		}
+	}
+	if len(folded) == 0 {
+		return m
+	}
+	collapsed := make(map[string]bool, len(m.review.collapsed))
+	for dir := range m.review.collapsed {
+		collapsed[dir] = true
+	}
+	for _, dir := range folded {
+		delete(collapsed, dir)
+	}
+	m.review.collapsed = collapsed
+	return m.refreshReviewTree()
+}
+
+// reviewSelectedRow is the left-pane row to highlight: the selected file's,
+// or its nearest visible ancestor directory while that one is folded.
+func (m Model) reviewSelectedRow() int {
+	file, ok := m.selectedReviewFile()
+	if !ok {
+		return -1
+	}
+	for rel := file.workspaceRel; rel != "." && rel != "/"; rel = path.Dir(rel) {
+		if row, visible := m.review.rowByPath[rel]; visible {
+			return row
+		}
+	}
+	return -1
 }
 
 // reviewLoadBatchCmd computes the diffs of files[start:start+reviewLoadBatch]
@@ -294,13 +398,49 @@ func loadReviewFile(workspaceRoot, base string, file reviewFile, highlightLimit 
 	default:
 		file.status = reviewModified
 	}
-	file.document = document
+	file.document = expandDocumentTabs(document)
+	document = file.document
 	texts := make([]string, len(document.rows))
 	for i := range document.rows {
 		texts[i] = document.rowText(i)
 	}
 	file.corpus = strings.Join(texts, "\n")
 	return file
+}
+
+// reviewTab is how a tab displays — the 4 columns lipgloss draws it as.
+const reviewTab = "    "
+
+// expandDocumentTabs turns tabs into spaces in a review document's text and
+// highlights. Row windowing counts runes, so a raw tab would draw 4 columns
+// for 1 counted and push tab-indented code past the pane. Review is
+// read-only, so it can show expanded text; it runs after the diff, which
+// compares the real content.
+func expandDocumentTabs(document diffDocument) diffDocument {
+	lines := make([]string, len(document.lines))
+	for i, line := range document.lines {
+		lines[i] = strings.ReplaceAll(line, "\t", reviewTab)
+	}
+	document.lines = lines
+	rows := make([]diffRow, len(document.rows))
+	for i, row := range document.rows {
+		row.text = strings.ReplaceAll(row.text, "\t", reviewTab)
+		rows[i] = row
+	}
+	document.rows = rows
+	if document.highlights != nil {
+		highlights := make([][]view.HighlightSegment, len(document.highlights))
+		for i, segments := range document.highlights {
+			expanded := make([]view.HighlightSegment, len(segments))
+			for j, segment := range segments {
+				segment.Text = strings.ReplaceAll(segment.Text, "\t", reviewTab)
+				expanded[j] = segment
+			}
+			highlights[i] = expanded
+		}
+		document.highlights = highlights
+	}
+	return document
 }
 
 // handleReviewLoaded stores loaded diffs. A file that already loaded (the
@@ -360,16 +500,15 @@ func (m Model) selectReviewFile(index int) (Model, tea.Cmd) {
 	m.review.selection = listSelection{}.moved(index, len(m.review.files))
 	m.review.search = documentSearch{}
 	file := m.review.files[m.review.selection.index]
+	m = m.unfoldReviewAncestors(file.workspaceRel)
 	m.review.position = rowCursor{}.anchoredAt(file.document.firstChangeRow(), m.reviewSpanFor(file))
 	return m, m.reviewLoadSelectedCmd()
 }
 
 // selectReviewPath selects the file with workspace-relative path rel.
 func (m Model) selectReviewPath(rel string) (Model, tea.Cmd) {
-	for i, file := range m.review.files {
-		if file.workspaceRel == rel {
-			return m.selectReviewFile(i)
-		}
+	if index, ok := m.review.fileByPath[rel]; ok {
+		return m.selectReviewFile(index)
 	}
 	return m, nil
 }

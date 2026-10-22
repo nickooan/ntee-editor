@@ -7,6 +7,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 
+	"github.com/nickooan/ntee-editor/internal/filetree"
 	"github.com/nickooan/ntee-editor/internal/keymap"
 	"github.com/nickooan/ntee-editor/internal/view"
 )
@@ -31,65 +32,59 @@ func reviewBadge(status reviewFileStatus) (badge, color string) {
 	}
 }
 
-// reviewRepoHeading is a repo group's header text: the workspace-relative
-// repo dir, the workspace's own name for the root, or "(no repository)".
-func (m Model) reviewRepoHeading(file reviewFile) string {
-	switch {
-	case file.repoRoot == "":
-		return "(no repository)"
-	case file.repoLabel == ".":
-		return filepath.Base(m.workspaceRoot) + "/"
-	default:
-		return file.repoLabel + "/"
+// reviewRepoName names a file's repo for the main-pane header: its
+// workspace-relative dir, or the workspace's own name for the root itself.
+func (m Model) reviewRepoName(file reviewFile) string {
+	if file.repoLabel == "." {
+		return filepath.Base(m.workspaceRoot)
 	}
+	return file.repoLabel
 }
 
-// reviewListRows builds the left list — a header per repo group, then its
-// files — and maps each file index to its row so selection and clicks line up.
-func (m Model) reviewListRows() (rows []sidebarRow, fileRow []int, rowFile []int) {
-	if m.review.preparing {
-		return []sidebarRow{sidebarHeaderRow("preparing review…")}, nil, []int{-1}
-	}
-	fileRow = make([]int, len(m.review.files))
-	heading := "\x00"
-	for i, file := range m.review.files {
-		if group := m.reviewRepoHeading(file); group != heading {
-			heading = group
-			rows = append(rows, sidebarHeaderRow(group))
-			rowFile = append(rowFile, -1)
-		}
-		badge, color := reviewBadge(file.status)
-		name := file.repoRel
-		if file.repoRoot == "" {
-			name = file.workspaceRel
-		}
-		if file.status == reviewModified || file.status == reviewAdded || file.status == reviewDeleted {
-			name += fmt.Sprintf("  +%d −%d", file.document.adds, file.document.dels)
-		}
-		fileRow[i] = len(rows)
-		rows = append(rows, sidebarBadgeRow(badge, 1, color, name, fileStyle))
-		rowFile = append(rowFile, i)
-	}
-	return rows, fileRow, rowFile
-}
-
+// reviewSidebarList draws the cached folder tree like the main file tree:
+// directories with their ↓/→ markers (a folded one counts the files it
+// hides), files with their status badge in the marker column, one space,
+// then the name and change counts.
 func (m Model) reviewSidebarList() sidebarList {
-	rows, fileRow, _ := m.reviewListRows()
-	selected := -1
-	if index := m.review.selection.index; index < len(fileRow) {
-		selected = fileRow[index]
+	if m.review.preparing {
+		return sidebarList{rows: []sidebarRow{sidebarHeaderRow("preparing review…")}, selectedIndex: -1}
 	}
-	return sidebarList{rows: rows, selectedIndex: selected}
+	rows := make([]sidebarRow, len(m.review.entries))
+	for row, entry := range m.review.entries {
+		indent := strings.Repeat("  ", entry.Depth)
+		if entry.Type == "directory" {
+			label := strings.TrimRight(filetree.FormatFileTreeEntryLabel(entry, len([]rune(indent))+len([]rune(entry.Name))+2), " ")
+			if hidden := m.review.hiddenCount[entry.RelativePath]; hidden > 0 {
+				label += fmt.Sprintf("  %d", hidden)
+			}
+			rows[row] = sidebarRow{segments: []sidebarSegment{{text: label, style: dirStyle}}}
+			continue
+		}
+		file := m.review.files[m.review.fileByPath[entry.RelativePath]]
+		badge, color := reviewBadge(file.status)
+		fileRow := sidebarBadgeRow(indent, badge, 2, color, entry.Name, fileStyle)
+		if file.status == reviewModified || file.status == reviewAdded || file.status == reviewDeleted {
+			// Counts colored like the diff itself: additions green, deletions red.
+			fileRow.segments = append(fileRow.segments,
+				sidebarSegment{text: fmt.Sprintf("  +%d", file.document.adds), style: reviewHeaderAddStyle},
+				sidebarSegment{text: fmt.Sprintf(" −%d", file.document.dels), style: reviewHeaderDelStyle})
+		}
+		rows[row] = fileRow
+	}
+	return sidebarList{rows: rows, selectedIndex: m.reviewSelectedRow()}
 }
 
-// activateReviewRow applies a click on a left-list row: a file row selects
-// that file, a repo header does nothing.
+// activateReviewRow applies a click on a left-pane row: a directory folds or
+// unfolds, a file is selected.
 func (m Model) activateReviewRow(rowIndex int) (Model, bool) {
-	_, _, rowFile := m.reviewListRows()
-	if rowIndex < 0 || rowIndex >= len(rowFile) || rowFile[rowIndex] < 0 {
+	if m.review.preparing || rowIndex < 0 || rowIndex >= len(m.review.entries) {
 		return m, false
 	}
-	m, _ = m.selectReviewFile(rowFile[rowIndex])
+	entry := m.review.entries[rowIndex]
+	if entry.Type == "directory" {
+		return m.toggleReviewFold(entry.RelativePath), true
+	}
+	m, _ = m.selectReviewFile(m.review.fileByPath[entry.RelativePath])
 	return m, true
 }
 
@@ -111,7 +106,7 @@ func (m Model) renderReview(width, height int) string {
 	header := segStyleFor(view.HighlightSegment{Color: color, Bold: true}).Render(badge+" ") +
 		reviewHeaderPathStyle.Render(file.workspaceRel)
 	if file.repoRoot != "" {
-		header += reviewHeaderDimStyle.Render("  ·  repo " + strings.TrimSuffix(m.reviewRepoHeading(file), "/"))
+		header += reviewHeaderDimStyle.Render("  ·  repo " + m.reviewRepoName(file))
 	}
 	if file.loaded() && len(file.document.rows) > 0 {
 		header += reviewHeaderDimStyle.Render("  ·  ") +

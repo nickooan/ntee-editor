@@ -180,7 +180,7 @@ func (m Model) externalHistorySidebarList() sidebarList {
 		if record.Command == extmsg.CommandReview {
 			tail += fmt.Sprintf(" (%d)", len(record.Paths))
 		}
-		rows[i] = sidebarBadgeRow(record.Command, 6, externalStatusColor(record.Status), tail, fileStyle)
+		rows[i] = sidebarBadgeRow("  ", record.Command, len("review")+1, externalStatusColor(record.Status), tail, fileStyle)
 	}
 	return sidebarList{rows: rows, selectedIndex: m.externalHistory.selection.index}
 }

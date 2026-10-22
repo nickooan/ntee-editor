@@ -2,7 +2,11 @@
 // content on the right, a : command bar at the bottom, and state persisted in
 // ntee-db (recent files, undo snapshots, session).
 //
-// Usage: ntee [project-root]   (defaults to the current directory)
+// Usage: ntee [dir | file[#L<line>]]   (defaults to the current directory;
+// a file opens in edit mode with its folder as the project, and a file that
+// doesn't exist yet opens empty and is created on the first save)
+//
+//	ntee --msg <open|review|help> [paths…]   send a request to a running editor
 package main
 
 import (
@@ -19,6 +23,7 @@ import (
 
 	"github.com/nickooan/ntee-editor/internal/app"
 	"github.com/nickooan/ntee-editor/internal/config"
+	"github.com/nickooan/ntee-editor/internal/extmsg"
 	"github.com/nickooan/ntee-editor/internal/lsp"
 	"github.com/nickooan/ntee-editor/internal/lspsetup"
 	"github.com/nickooan/ntee-editor/internal/store"
@@ -30,10 +35,16 @@ func main() {
 	assumeYes := flag.Bool("yes", false, "skip the confirmation prompt for --prepare-lsp")
 	disableLSP := flag.Bool("disable-lsp", false, "disable LSP for the named languages (or 'all'); writes the user config")
 	enableLSP := flag.Bool("enable-lsp", false, "re-enable LSP for the named languages (or 'all'); writes the user config")
+	sendMsg := flag.Bool("msg", false, "send a request to the running editor of this directory: --msg open <file>#L<n> · --msg review <files…> (or paths on stdin) · --msg help")
+	msgRoot := flag.String("msg-root", "", "with --msg: the editor's opened folder (default: the nearest running one above the current directory)")
+	msgBase := flag.String("msg-base", "", "with --msg review: the base revision to diff against (default HEAD)")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println("ntee-editor " + app.Version)
 		return
+	}
+	if *sendMsg {
+		os.Exit(sendMessage(flag.Args(), *msgRoot, *msgBase))
 	}
 	if *disableLSP || *enableLSP {
 		if *disableLSP && *enableLSP {
@@ -62,35 +73,68 @@ func main() {
 		return
 	}
 
-	root := flag.Arg(0)
-	if root == "" {
-		root = "."
+	argument := flag.Arg(0)
+	if argument == "" {
+		argument = "."
 	}
-	absRoot, err := filepath.Abs(root)
+	absRoot, startFile, startLine, err := resolveStartTarget(argument)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "invalid root:", err)
-		os.Exit(1)
-	}
-	if info, err := os.Stat(absRoot); err != nil || !info.IsDir() {
-		fmt.Fprintln(os.Stderr, "not a directory:", absRoot)
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 
 	// The editor proper runs in a helper so its defers (store close, language
 	// server shutdown) execute even on the error path — os.Exit skips defers,
 	// so it must be the very last thing main does.
-	os.Exit(runEditor(absRoot))
+	os.Exit(runEditor(absRoot, startFile, startLine))
+}
+
+// resolveStartTarget reads the command-line argument: a directory opens as
+// the project; anything else is a file (dotfiles included, optionally with a
+// "#L<n>" anchor) opened in edit mode with its own folder as the project. A
+// file that doesn't exist yet is fine as long as its folder does — it opens
+// empty and is created on the first save.
+func resolveStartTarget(argument string) (root, fileName string, line int, err error) {
+	absolute, err := filepath.Abs(argument)
+	if err != nil {
+		return "", "", 0, fmt.Errorf("invalid path: %w", err)
+	}
+	if info, statErr := os.Stat(absolute); statErr == nil {
+		if info.IsDir() {
+			return absolute, "", 0, nil
+		}
+		// An existing file is taken as named, even one with "#" in its name.
+		return filepath.Dir(absolute), filepath.Base(absolute), 0, nil
+	}
+	pathText, line := app.SplitLineAnchor(argument)
+	if absolute, err = filepath.Abs(pathText); err != nil {
+		return "", "", 0, fmt.Errorf("invalid path: %w", err)
+	}
+	if info, statErr := os.Stat(absolute); statErr == nil && info.IsDir() {
+		return "", "", 0, fmt.Errorf("a line anchor needs a file, not a directory: %s", argument)
+	}
+	folder := filepath.Dir(absolute)
+	if info, statErr := os.Stat(folder); statErr != nil || !info.IsDir() {
+		return "", "", 0, fmt.Errorf("no such file or directory: %s", argument)
+	}
+	return folder, filepath.Base(absolute), line, nil
 }
 
 // runEditor owns every resource with a shutdown obligation and returns the
 // process exit code.
-func runEditor(absRoot string) int {
+func runEditor(absRoot, startFile string, startLine int) int {
 	cfg, warnings := config.LoadWithWarnings(absRoot)
 
-	// Fall back to in-memory (undo only, nothing persists) when another
-	// instance of this project holds the store's single-writer lock.
+	// A single file keeps its own store (keyed by the file's path), so the
+	// folder's tabs, session, and index never show up around it. Fall back to
+	// in-memory (undo only, nothing persists) when another instance holds the
+	// store's single-writer lock.
+	storeKey := absRoot
+	if startFile != "" {
+		storeKey = filepath.Join(absRoot, startFile)
+	}
 	var db store.Backend
-	if s, err := store.Open(absRoot, cfg.Editor.MaxSnapshots); err != nil {
+	if s, err := store.Open(storeKey, cfg.Editor.MaxSnapshots); err != nil {
 		db = store.NewMemory()
 		warnings = append(warnings, "persistence disabled: "+firstLine(err.Error()))
 	} else {
@@ -107,10 +151,33 @@ func runEditor(absRoot string) int {
 	}
 
 	model := app.New(cfg, db, absRoot, notice, reg)
+	var settingsStore store.ExternalSettingsStore = store.NewMemoryExternalSettings(store.DefaultExternalSettings)
 	if globalDir, err := store.GlobalDir(); err == nil {
 		model = model.WithOpCommandStore(store.NewGlobalOpCommands(globalDir))
+		settingsStore = store.NewGlobalExternalSettings(globalDir)
 	}
+
+	var historyStore store.ExternalHistoryStore = store.NewMemoryExternalHistory()
+	var receiver *app.ExternalReceiver
+	if startFile == "" {
+		if history, err := store.NewExternalHistory(absRoot); err == nil {
+			historyStore = history
+		}
+		receiver = app.NewExternalReceiver(absRoot, settingsStore, historyStore)
+	}
+	server, socketPath, socketProblem := listenForExternalMessages(absRoot, receiver)
+	if server != nil {
+		defer server.Close()
+	}
+	model = model.WithExternal(settingsStore, historyStore, socketPath, socketProblem)
+	if startFile != "" {
+		model = model.WithOnlyFile(startFile).WithStartFile(startFile, startLine)
+	}
+
 	program := tea.NewProgram(model)
+	if receiver != nil {
+		receiver.SetSink(func(msg any) { program.Send(msg) })
+	}
 	if manager != nil {
 		manager.SetSink(func(msg any) { program.Send(msg) })
 		defer manager.ShutdownAll()
@@ -120,6 +187,27 @@ func runEditor(absRoot string) int {
 		return 1
 	}
 	return 0
+}
+
+// listenForExternalMessages starts the project's external-message socket. It
+// listens whether or not messages are enabled, so a sender always gets an
+// answer ("disabled") instead of a dead socket. A nil receiver is
+// single-file mode (`ntee <file>`), which never listens: requests name other
+// files of the folder, which that editor deliberately doesn't show. problem
+// says why there is no server.
+func listenForExternalMessages(absRoot string, receiver *app.ExternalReceiver) (server *extmsg.Server, socketPath, problem string) {
+	socketPath, err := store.ExternalSocketPath(absRoot)
+	switch {
+	case receiver == nil:
+		return nil, socketPath, "single-file mode — open a folder to take external messages"
+	case err != nil:
+		return nil, socketPath, firstLine(err.Error())
+	}
+	server, err = extmsg.Listen(socketPath, receiver.Handle)
+	if err != nil {
+		return nil, socketPath, firstLine(err.Error())
+	}
+	return server, socketPath, ""
 }
 
 // firstLine clips an error message to its first line for the status bar.

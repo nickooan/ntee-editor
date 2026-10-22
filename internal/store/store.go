@@ -197,6 +197,12 @@ type Store struct {
 
 // Dir returns the store directory for a project root.
 func Dir(projectRoot string) (string, error) {
+	return projectDir("stores", projectRoot)
+}
+
+// projectDir is ~/.ntee-editor/<area>/<project hash>: every per-project
+// directory is keyed by the same hash of the absolute project root.
+func projectDir(area, projectRoot string) (string, error) {
 	abs, err := filepath.Abs(projectRoot)
 	if err != nil {
 		return "", err
@@ -206,7 +212,7 @@ func Dir(projectRoot string) (string, error) {
 		return "", err
 	}
 	sum := sha256.Sum256([]byte(abs))
-	return filepath.Join(home, ".ntee-editor", "stores", hex.EncodeToString(sum[:])[:16]), nil
+	return filepath.Join(home, ".ntee-editor", area, hex.EncodeToString(sum[:])[:16]), nil
 }
 
 // Open opens (creating if needed) the project's store. maxSnapshotsPerFile caps

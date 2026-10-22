@@ -124,6 +124,7 @@ const (
 	fuzzyPromptGoto        = "goto "
 	fuzzyPromptUncommitted = "uncommitted "
 	fuzzyPromptRepo        = "Repo: "
+	fuzzyPromptReview      = "in review "
 )
 
 // fuzzyGotoCandidates builds the Ctrl+P list: recents first, then the rest of
@@ -168,13 +169,19 @@ func (m Model) fuzzyUncommittedCandidates() []string {
 func (m Model) openFuzzy() (Model, tea.Cmd) {
 	m = m.closeCompletion()
 	m, cmd := m.ensureCorpus()
+	return m.showFuzzy(fuzzyPromptGoto, m.fuzzyGotoCandidates()), cmd
+}
+
+// showFuzzy opens the shared finder overlay over candidates; the prompt names
+// the variant (refreshFuzzyCandidates and Enter dispatch on it).
+func (m Model) showFuzzy(prompt string, candidates []string) Model {
 	m.fuzzyOpen = true
 	m.fuzzyQuery = ""
 	m.fuzzyIndex = 0
-	m.fuzzyPrompt = fuzzyPromptGoto
-	m.fuzzyCorpus = fuzzy.Prepare(m.fuzzyGotoCandidates())
+	m.fuzzyPrompt = prompt
+	m.fuzzyCorpus = fuzzy.Prepare(candidates)
 	m.fuzzyMatches = fuzzy.Filter("", m.fuzzyCorpus)
-	return m, cmd
+	return m
 }
 
 // openUncommitted opens the Ctrl+U finder: the same fuzzy overlay as Ctrl+P,
@@ -202,12 +209,7 @@ func (m Model) openUncommitted() (Model, tea.Cmd) {
 		return m, tea.Batch(cmd, gitCmd)
 	}
 
-	m.fuzzyOpen = true
-	m.fuzzyQuery = ""
-	m.fuzzyIndex = 0
-	m.fuzzyPrompt = fuzzyPromptUncommitted
-	m.fuzzyCorpus = fuzzy.Prepare(ordered)
-	m.fuzzyMatches = fuzzy.Filter("", m.fuzzyCorpus)
+	m = m.showFuzzy(fuzzyPromptUncommitted, ordered)
 	m, gitCmd := m.maybeGitRefresh()
 	return m, tea.Batch(cmd, gitCmd)
 }
@@ -228,6 +230,8 @@ func (m Model) refreshFuzzyCandidates() Model {
 		ordered = m.fuzzyUncommittedCandidates()
 	case fuzzyPromptRepo:
 		ordered, m.repoRels = m.repoPickerCandidates()
+	case fuzzyPromptReview:
+		ordered = m.reviewFuzzyCandidates()
 	default:
 		ordered = m.fuzzyGotoCandidates()
 	}
@@ -281,20 +285,18 @@ func (m Model) repoPickerCandidates() (labels, rels []string) {
 // repo roots only (plus the workspace row), filtered like Ctrl+P, and is the
 // same whichever root the editor is currently at.
 func (m Model) openRepoPicker() (Model, tea.Cmd) {
+	if m.onlyFile != "" {
+		m.errText = "single-file mode — open the folder to switch repos"
+		return m, nil
+	}
 	if m.workspaceIsRepo {
 		m.errText = "not a workspace directory"
 		return m, nil
 	}
 	m = m.closeCompletion()
 	labels, rels := m.repoPickerCandidates()
-	m.fuzzyOpen = true
-	m.fuzzyQuery = ""
-	m.fuzzyIndex = 0
-	m.fuzzyPrompt = fuzzyPromptRepo
 	m.repoRels = rels
-	m.fuzzyCorpus = fuzzy.Prepare(labels)
-	m.fuzzyMatches = fuzzy.Filter("", m.fuzzyCorpus)
-	return m, nil
+	return m.showFuzzy(fuzzyPromptRepo, labels), nil
 }
 
 // selectWorkspaceRepo applies the Ctrl+W choice: it re-roots the editor at
@@ -341,6 +343,9 @@ func (m Model) handleFuzzyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m.selectWorkspaceRepo(rel)
 		}
 		rel := m.fuzzyCorpus[matchIndex].Text
+		if m.fuzzyPrompt == fuzzyPromptReview {
+			return m.closeFuzzy().selectReviewPath(rel)
+		}
 		if strings.HasSuffix(rel, "/") {
 			// Directory: drill down inside the finder instead of opening.
 			m.fuzzyQuery = rel

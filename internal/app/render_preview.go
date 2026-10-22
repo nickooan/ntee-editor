@@ -19,13 +19,13 @@ func (m Model) renderPreview(width, height int) string {
 	if total == 0 {
 		return ""
 	}
-	start := fileViewportTop(m.preview.cursor, m.preview.scrollY, height, total)
+	start := fileViewportTop(m.preview.position.row, m.preview.position.scrollY, height, total)
 
 	var byLine map[int][]view.LineMatch
 	focused := -1
-	if m.preview.searching && m.preview.search != "" {
-		byLine = m.previewMC.matchesByLine(m.preview.corpus, m.preview.search)
-		focused = m.preview.focused
+	if m.preview.search.active && m.preview.search.query != "" {
+		byLine = m.previewMC.matchesByLine(m.preview.corpus, m.preview.search.query)
+		focused = m.preview.search.focused
 	}
 
 	rows := make([]string, 0, height)
@@ -38,7 +38,7 @@ func (m Model) renderPreview(width, height int) string {
 		switch {
 		case len(byLine[i]) > 0:
 			rows = append(rows, renderSearchLine(m.preview.plain[i], line.Segs, byLine[i], nil, focused, 0, width))
-		case i == m.preview.cursor:
+		case i == m.preview.position.row:
 			rows = append(rows, renderSegmentsBg(line.Segs, 0, width, hexLineHl, cursorLineStyle))
 		default:
 			rows = append(rows, renderSegments(line.Segs, 0, width))
@@ -51,15 +51,8 @@ func (m Model) renderPreview(width, height int) string {
 // searching, otherwise file + document title + position + key hints.
 func (m Model) renderPreviewStatus() string {
 	k := m.previewDesc()
-	if m.preview.searching {
-		matches := m.previewMatches()
-		summary := fmt.Sprintf("%d matches", len(matches))
-		if len(matches) > 0 {
-			summary = fmt.Sprintf("%d/%d", min(m.preview.focused+1, len(matches)), len(matches))
-		}
-		line := promptStyle.Render("@"+k.name+" /") + statusTextStyle.Render(m.preview.search+"/   "+summary)
-		return withNotice(m, line) + statusTextStyle.Render("   ") +
-			hintStyle.Render("↑/↓ next/prev · Enter go · Esc close")
+	if m.preview.search.active {
+		return m.renderDocumentSearchStatus(k.name, m.preview.search, len(m.previewMatches()))
 	}
 
 	name := ""
@@ -73,7 +66,7 @@ func (m Model) renderPreviewStatus() string {
 	if m.preview.loading {
 		line += statusTextStyle.Render("   ") + editingStyle.Render("rendering…")
 	} else {
-		line += statusTextStyle.Render(fmt.Sprintf("   Ln %d/%d", m.preview.cursor+1, len(m.preview.lines)))
+		line += statusTextStyle.Render(fmt.Sprintf("   Ln %d/%d", m.preview.position.row+1, len(m.preview.lines)))
 	}
 	if m.notice != "" {
 		line += statusTextStyle.Render("   ") + noticeStyle.Render(m.notice)

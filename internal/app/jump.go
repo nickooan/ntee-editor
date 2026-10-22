@@ -35,16 +35,14 @@ type jumpFrame struct {
 	// diff mode on this file, re-derives the diff against diffBase — the
 	// buffer may have changed at the jump target — and restores the review
 	// position (clamped by handleDiffReady).
-	inDiff      bool
-	diffBase    string
-	diffCursor  int
-	diffScrollY int
+	inDiff       bool
+	diffBase     string
+	diffPosition rowCursor
 
 	// Blame-mode origin: same re-entry story as inDiff — Ctrl+O re-derives
 	// the blame (the buffer may have changed) and restores the position.
-	inBlame      bool
-	blameCursor  int
-	blameScrollY int
+	inBlame       bool
+	blamePosition rowCursor
 }
 
 // maxJumpFrames bounds the trail; oldest frames drop off.
@@ -533,17 +531,15 @@ func (m Model) handleReferences(msg referencesMsg) (tea.Model, tea.Cmd) {
 // itself ends on a successful landing — the target always opens in edit mode.
 func (m Model) jumpToLocation(rel string, line, utf16Col int) Model {
 	m.jumpStack = append(m.jumpStack, jumpFrame{
-		relPath:      m.openRel,
-		cy:           m.edit.cy,
-		cx:           m.edit.cx,
-		scrollY:      m.fileScrollY,
-		inDiff:       m.mode == modeDiff,
-		diffBase:     m.diffBase,
-		diffCursor:   m.diffCursor,
-		diffScrollY:  m.diffScrollY,
-		inBlame:      m.mode == modeBlame,
-		blameCursor:  m.blameCursor,
-		blameScrollY: m.blameScrollY,
+		relPath:       m.openRel,
+		cy:            m.edit.cy,
+		cx:            m.edit.cx,
+		scrollY:       m.fileScrollY,
+		inDiff:        m.mode == modeDiff,
+		diffBase:      m.diffBase,
+		diffPosition:  m.diffPosition,
+		inBlame:       m.mode == modeBlame,
+		blamePosition: m.blamePosition,
 	})
 	if len(m.jumpStack) > maxJumpFrames {
 		m.jumpStack = append([]jumpFrame(nil), m.jumpStack[len(m.jumpStack)-maxJumpFrames:]...)
@@ -611,7 +607,7 @@ func (m Model) jumpBack() (tea.Model, tea.Cmd) {
 		// (the buffer may have changed at the jump target); diffPending*
 		// restore the review position when the recomputed rows land.
 		next.diffBase = frame.diffBase
-		next.diffPendingCursor, next.diffPendingScroll = frame.diffCursor, frame.diffScrollY
+		next.diffPendingCursor, next.diffPendingScroll = frame.diffPosition.row, frame.diffPosition.scrollY
 		next.diffHasPending = true
 		next.diffGen++
 		next.diffLoading = true
@@ -620,7 +616,7 @@ func (m Model) jumpBack() (tea.Model, tea.Cmd) {
 	}
 	if frame.inBlame {
 		// The origin was a blame view: same re-entry story.
-		next.blamePendingCursor, next.blamePendingScroll = frame.blameCursor, frame.blameScrollY
+		next.blamePendingCursor, next.blamePendingScroll = frame.blamePosition.row, frame.blamePosition.scrollY
 		next.blameHasPending = true
 		next.blameGen++
 		next.blameLoading = true

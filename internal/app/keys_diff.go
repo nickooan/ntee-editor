@@ -23,37 +23,18 @@ func (m Model) handleDiffKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case m.keys.Matches(keymap.JumpBack, k):
 		return m.jumpBack()
 	}
+	span := m.diffSpan()
+	if position, handled := handleRowNavigationKey(k, m.diffPosition, span); handled {
+		m.diffPosition = position
+		return m, nil
+	}
 	switch k {
 	case "esc":
 		return m.exitDiff(), nil
-
-	case "up":
-		return m.moveDiffCursor(-1), nil
-	case "down":
-		return m.moveDiffCursor(1), nil
-
 	case "shift+up":
-		return m.jumpDiffHunk(-1), nil
+		m.diffPosition = m.diffPosition.blockJump(-1, span, m.diffDocument.isHunkStart)
 	case "shift+down":
-		return m.jumpDiffHunk(1), nil
-
-	case "left":
-		m.diffCx = max(0, m.diffCx-1)
-		return m, nil
-	case "right":
-		m.diffCx = min(m.diffCx+1, len([]rune(m.diffRowText(m.diffCursor))))
-		return m, nil
-	case "home":
-		m.diffCx = 0
-		return m, nil
-	case "end":
-		m.diffCx = len([]rune(m.diffRowText(m.diffCursor)))
-		return m, nil
-
-	case "pgup":
-		return m.pageDiff(-1), nil
-	case "pgdown":
-		return m.pageDiff(1), nil
+		m.diffPosition = m.diffPosition.blockJump(1, span, m.diffDocument.isHunkStart)
 	}
 	return m, nil
 }
@@ -63,12 +44,11 @@ func (m Model) handleDiffKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // even when del rows above it compress away. Safe while the diff is still
 // loading (empty rows map to the unchanged edit cursor).
 func (m Model) exitDiff() Model {
-	if len(m.diffRows) > 0 {
+	if len(m.diffDocument.rows) > 0 {
 		h := m.contentHeight() + 1
-		total := len(m.diffRows)
-		screenRow := m.diffCursor - fileViewportTop(m.diffCursor, m.diffScrollY, h, total)
-		m.edit.cy = diffRowBufLine(m.diffRows, m.diffCursor)
-		m.edit.cx = m.diffCx
+		screenRow := m.diffPosition.screenRow(m.diffSpan())
+		m.edit.cy = diffRowBufLine(m.diffDocument.rows, m.diffPosition.row)
+		m.edit.cx = m.diffPosition.column
 		m.edit.clampCursor()
 		m.fileScrollY = input.Clamp(m.edit.cy-screenRow, 0, max(0, len(m.edit.lines)-h))
 	}
@@ -76,80 +56,21 @@ func (m Model) exitDiff() Model {
 	return m.clearDiffState()
 }
 
-// moveDiffCursor moves the review cursor by dy rows, keeping the column
-// within the new row's text.
-func (m Model) moveDiffCursor(dy int) Model {
-	if len(m.diffRows) == 0 {
-		return m // still loading
-	}
-	m.diffCursor = input.Clamp(m.diffCursor+dy, 0, len(m.diffRows)-1)
-	m.diffCx = input.Clamp(m.diffCx, 0, len([]rune(m.diffRowText(m.diffCursor))))
-	return m
-}
-
-// jumpDiffHunk moves the review cursor to the previous (dir<0) or next
-// (dir>0) hunk's first row, anchored ~30% from the top like conflict-block
-// jumps. A hunk is a maximal run of non-context rows. No wraparound; inert
-// when there is no hunk in that direction. From inside a hunk, jumping up
-// lands on that hunk's own start.
-func (m Model) jumpDiffHunk(dir int) Model {
-	if len(m.diffRows) == 0 {
-		return m // still loading
-	}
-	target := -1
-	for i, row := range m.diffRows {
-		if row.kind == diffCtx || (i > 0 && m.diffRows[i-1].kind != diffCtx) {
-			continue // not a hunk start
-		}
-		if dir < 0 {
-			if i < m.diffCursor {
-				target = i
-			}
-		} else if i > m.diffCursor {
-			target = i
-			break
-		}
-	}
-	if target == -1 {
-		return m
-	}
-	m.diffCursor = target
-	m.diffCx = input.Clamp(m.diffCx, 0, len([]rune(m.diffRowText(target))))
-	m.diffScrollY = anchorScroll(target, m.contentHeight()+1, len(m.diffRows))
-	return m
-}
-
-// pageDiff pages the review view with a one-line overlap, cursor keeping its
-// on-screen row — the diff-mode mirror of pageEdit.
-func (m Model) pageDiff(dir int) Model {
-	total := len(m.diffRows)
-	if total == 0 {
-		return m
-	}
-	h := m.contentHeight() + 1
-	step := max(1, h-1)
-	top := fileViewportTop(m.diffCursor, m.diffScrollY, h, total)
-	m.diffCursor = input.Clamp(m.diffCursor+dir*step, 0, total-1)
-	m.diffCx = input.Clamp(m.diffCx, 0, len([]rune(m.diffRowText(m.diffCursor))))
-	m.diffScrollY = input.Clamp(top+dir*step, 0, max(0, total-h))
-	return m
-}
-
 // diffJumpToReference is Ctrl+J from a diff row: sync the edit cursor to the
 // row's buffer position and reuse the whole jump ladder (which reads m.edit).
 // Del rows refuse — their text no longer exists in the buffer, so an LSP
 // position on the successor line would silently query the wrong identifier.
 func (m Model) diffJumpToReference() (tea.Model, tea.Cmd) {
-	if len(m.diffRows) == 0 {
+	if len(m.diffDocument.rows) == 0 {
 		return m, nil // still loading
 	}
-	row := m.diffRows[input.Clamp(m.diffCursor, 0, len(m.diffRows)-1)]
+	row := m.diffDocument.rows[input.Clamp(m.diffPosition.row, 0, len(m.diffDocument.rows)-1)]
 	if row.kind == diffDel {
 		m.errText = "cannot jump from a removed line"
 		return m, nil
 	}
 	m.edit.cy = input.Clamp(row.bufLine, 0, len(m.edit.lines)-1)
-	m.edit.cx = m.diffCx
+	m.edit.cx = m.diffPosition.column
 	m.edit.clampCursor()
 	return m.jumpToReference()
 }

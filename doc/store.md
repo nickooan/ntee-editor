@@ -51,11 +51,24 @@ The key layout is a flat namespace with prefixes:
 
 Op-commands (the Ctrl+R shell command templates) are the one *global* record: they live in their own ntee-db at `~/.ntee-editor/global/`, shared by every project, outside the `Backend` interface. They sit behind a separate `OpCommandStore` interface, which `GlobalOpCommands` (on disk) and `MemoryOpCommands` (tests and fallback) both implement. Records are `OpCommand` (name, file types, command template, updated-at) under `opcmd:<Key()>`. `FileTypes` is the normalized TYPE spec (`go,rb`, or `*` for every file). `Key()` is `name` for a `*` command, which is exactly the key records had before file types existed, and `name@types` otherwise, so one name can exist once per file-type spec. `*` is always written explicitly: `PutOpCommand` stores `"fileTypes":"*"` when the type is empty, and `LoadOpCommands` fills in `*` for records saved before the field existed.
 
-- `GlobalOpCommands` — every editor instance shares this store, and ntee-db allows one writer process. So instead of holding the store open, it opens it per call (`withDB`) and closes it right away. On `ErrLocked` (another instance is mid-read or mid-write) it retries a few times with a short backoff, then returns the error to the status bar. Callers run it on `tea.Cmd` goroutines.
+- `GlobalOpCommands` — every editor instance shares this store, and ntee-db allows one writer process. So instead of holding the store open, it opens it per call (`withDBAt`, percall.go) and closes it right away. Callers run it on `tea.Cmd` goroutines.
 - `LoadOpCommands` — prefix-scans `opcmd:` and returns the commands sorted by name, then file types with `*` first, for a predictable table and picker order.
 - `PutOpCommand(previousKey, command)` — saves one command under `command.Key()`. A rename or a TYPE change (`previousKey` differs from the new key) deletes the old entry in the same open. `DeleteOpCommand` also takes the key.
 
 *Plus: `GlobalDir` (the store path), `DeleteOpCommand`, `withDefaults` (empty type → `*`), the `MemoryOpCommands` mirror (mutex-guarded, since loads and saves run on Cmd goroutines), and `sortOpCommands`.*
+
+### percall.go
+
+- `withDBAt` — opens an ntee-db directory for one call and closes it right after, for stores shared across editor instances (op-commands, external settings, external history) rather than holding the single-writer flock for a session. On `ErrLocked` (another instance is mid-read or mid-write) it retries a few times with a short backoff, then returns the error. A process-wide mutex per directory (`directoryLocks`) keeps two stores over the same directory in this process — op-commands and external settings share the global db — from contending for its flock. The index set passed must be the same on every open of a directory, since an index left out is soft-dropped.
+
+### external.go
+
+The persistence behind external messages (see [extmsg.md](extmsg.md)).
+
+- `ExternalSettings` (`Enabled`, `HistoryLimit`) is a *global* record under `extmsg:settings` in the global db, so a toggle in one window applies to all. Both fields are always written (`withDefaults`: an unset limit becomes 10, and the limit is clamped to 1–100), and a missing record loads as `DefaultExternalSettings` — off, 10. `GlobalExternalSettings` and `MemoryExternalSettings` implement `ExternalSettingsStore`.
+- `ExternalHistory` keeps one project's latest requests in its own ntee-db under `ExternalDir` (`~/.ntee-editor/external/<project hash>/history`, next to the socket). Records (`ExternalRecord`: command, args, workspace-relative paths, raw text, receive time, status, note) are keyed `msg:<zero-padded nanos>` so the lowest key is the oldest. Every record carries the same value of one secondary index, so ntee-db's `MaxPerValue` cap *is* the history limit: an append past it evicts the oldest record natively. The cap is set at open, which is why this store opens per call — a changed limit applies on the very next write — and `TrimExternal` trims at once when the user lowers it. `UpdateExternalStatus` rewrites a record's status in place (overwriting a key never evicts).
+
+*Plus: `ExternalSocketPath`, `NewExternalRecordKey`, `ClampExternalHistoryLimit`, the `ExternalStatus` values, `MemoryExternalHistory`, `sortExternalNewestFirst`, and `projectDir` (store.go — the one per-project hash every per-project directory shares).*
 
 ### scoped.go
 

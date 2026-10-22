@@ -67,7 +67,7 @@ func (m Model) enterBlame() (tea.Model, tea.Cmd) {
 // identifiable as stale.
 func (m Model) clearBlameState() Model {
 	m.blameRows = nil
-	m.blameCursor, m.blameCx, m.blameScrollY = 0, 0, 0
+	m.blamePosition.row, m.blamePosition.column, m.blamePosition.scrollY = 0, 0, 0
 	m.blameAuthorW = 0
 	m.blameNewFile = false
 	m.blameLoading = false
@@ -243,16 +243,16 @@ func (m Model) handleBlameReady(msg blameReadyMsg) (tea.Model, tea.Cmd) {
 		// Ctrl+O return: restore the remembered position, clamped — the
 		// buffer may have shrunk while we were away.
 		m.blameHasPending = false
-		m.blameCursor = input.Clamp(m.blamePendingCursor, 0, len(m.blameRows)-1)
-		m.blameScrollY = input.Clamp(m.blamePendingScroll, 0, max(0, len(m.blameRows)-h))
+		m.blamePosition.row = input.Clamp(m.blamePendingCursor, 0, len(m.blameRows)-1)
+		m.blamePosition.scrollY = input.Clamp(m.blamePendingScroll, 0, max(0, len(m.blameRows)-h))
 	} else {
 		// Fresh entry: stay at the current place — same buffer line, same
 		// on-screen row. The exact inverse of the Esc mapping in exitBlame.
 		screenRow := m.edit.cy - fileViewportTop(m.edit.cy, m.fileScrollY, h, len(m.edit.lines))
-		m.blameCursor = input.Clamp(m.edit.cy, 0, len(m.blameRows)-1)
-		m.blameScrollY = input.Clamp(m.blameCursor-screenRow, 0, max(0, len(m.blameRows)-h))
+		m.blamePosition.row = input.Clamp(m.edit.cy, 0, len(m.blameRows)-1)
+		m.blamePosition.scrollY = input.Clamp(m.blamePosition.row-screenRow, 0, max(0, len(m.blameRows)-h))
 	}
-	m.blameCx = input.Clamp(m.edit.cx, 0, len([]rune(m.blameRowText(m.blameCursor))))
+	m.blamePosition.column = input.Clamp(m.edit.cx, 0, len([]rune(m.blameRowText(m.blamePosition.row))))
 	return m, nil
 }
 

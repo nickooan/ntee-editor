@@ -263,6 +263,7 @@ func (m Model) armRemoveConfirm(rel string) (tea.Model, tea.Cmd) {
 	}
 	m.confirmRm = rel
 	m.confirmRmDir = info.IsDir()
+	m.choice = removePathChoice(rel, m.confirmRmDir)
 	return m, nil
 }
 

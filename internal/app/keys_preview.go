@@ -7,6 +7,7 @@ import (
 
 	"github.com/nickooan/ntee-editor/internal/input"
 	"github.com/nickooan/ntee-editor/internal/keymap"
+	"github.com/nickooan/ntee-editor/internal/view"
 )
 
 // handlePreviewKey drives the OpenAPI/GraphQL document preview. Like diff
@@ -18,7 +19,7 @@ func (m Model) handlePreviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.mode = modeQuery
 		return m.clearPreviewState(), nil
 	}
-	if m.preview.searching {
+	if m.preview.search.active {
 		return m.handlePreviewSearchKey(msg)
 	}
 
@@ -26,143 +27,45 @@ func (m Model) handlePreviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.keys.Matches(keymap.Find, k) {
 		k = "/"
 	}
+	if position, handled := handleRowNavigationKey(k, m.preview.position, m.previewSpan()); handled {
+		m.preview.position = position
+		return m.syncPreviewSel(), nil
+	}
 	switch k {
 	case "esc":
 		return m.exitPreview(), nil
-
-	case "up":
-		return m.movePreviewCursor(-1), nil
-	case "down":
-		return m.movePreviewCursor(1), nil
-	case "pgup":
-		return m.pagePreview(-1), nil
-	case "pgdown":
-		return m.pagePreview(1), nil
-	case "home":
-		m.preview.cursor, m.preview.scrollY = 0, 0
-		return m.syncPreviewSel(), nil
-	case "end":
-		total := len(m.preview.lines)
-		if total > 0 {
-			h := m.contentHeight() + 1
-			m.preview.cursor = total - 1
-			m.preview.scrollY = max(0, total-h)
-		}
-		return m.syncPreviewSel(), nil
-
 	case "shift+up":
-		if len(m.preview.outline) > 0 {
-			m.preview.sel = input.Clamp(m.preview.sel-1, 0, len(m.preview.outline)-1)
-		}
-		return m, nil
+		m.preview.selection = m.preview.selection.moved(-1, len(m.preview.outline))
 	case "shift+down":
-		if len(m.preview.outline) > 0 {
-			m.preview.sel = input.Clamp(m.preview.sel+1, 0, len(m.preview.outline)-1)
-		}
-		return m, nil
+		m.preview.selection = m.preview.selection.moved(1, len(m.preview.outline))
 	case "enter":
 		return m.jumpPreviewOutline(), nil
-
 	case "/":
-		m.preview.searching = true
-		m.preview.search = ""
-		m.preview.focused = 0
-		return m, nil
+		m.preview.search = documentSearch{active: true}
 	}
 	return m, nil
 }
 
-// handlePreviewSearchKey drives the in-preview search bar: live query typing,
-// ↑/↓ cycling matches, Enter committing the landing. Deliberately no replace
-// or search-exec — the document is read-only.
+// handlePreviewSearchKey drives the in-preview search bar (documentSearch);
+// a landing moves the document cursor ~30% from the top, so an Esc right
+// after a search jumps to the found content's source.
 func (m Model) handlePreviewSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	k := msg.String()
-	if m.keys.Matches(keymap.Find, k) {
-		k = "down"
-	}
-	switch k {
-	case "esc":
-		m.preview.searching = false
-		m.preview.search = ""
-		m.preview.focused = 0
-	case "enter":
-		m = m.landPreviewMatch()
-		m.preview.searching = false
-		m.preview.search = ""
-		m.preview.focused = 0
-	case "up":
-		m = m.cyclePreviewMatch(-1)
-	case "down":
-		m = m.cyclePreviewMatch(1)
-	case "backspace":
-		if runes := []rune(m.preview.search); len(runes) > 0 {
-			m.preview.search = string(runes[:len(runes)-1])
-			m = m.focusPreviewMatch()
-		}
-	case "space":
-		m.preview.search += " "
-		m = m.focusPreviewMatch()
-	default:
-		if t := keyText(msg); t != "" {
-			m.preview.search += t
-			m = m.focusPreviewMatch()
-		}
-	}
-	return m, nil
+	return m.landPreviewSearch(m.preview.search.handleKey(msg, m.keys.Matches(keymap.Find, msg.String()), m.previewMatchesFor, m.preview.position.row)), nil
 }
 
-// focusPreviewMatch focuses the first match at/after the document cursor
-// (wrapping to the first match) and scrolls to it — typed searches start near
-// where the user is looking, like edit-mode search.
-func (m Model) focusPreviewMatch() Model {
-	matches := m.previewMatches()
-	m.preview.focused = 0
-	for i, mt := range matches {
-		if mt.LineIndex >= m.preview.cursor {
-			m.preview.focused = i
-			break
-		}
-	}
-	return m.landPreviewMatch()
+// previewMatchesFor is the match set of a query over the rendered document.
+func (m Model) previewMatchesFor(query string) []view.SearchMatch {
+	return m.previewMC.get(m.preview.corpus, query)
 }
 
-// cyclePreviewMatch moves the focused match with wraparound and follows it.
-func (m Model) cyclePreviewMatch(dir int) Model {
-	n := len(m.previewMatches())
-	if n == 0 {
-		return m
+// landPreviewSearch stores a search-bar step and follows its landing.
+func (m Model) landPreviewSearch(search documentSearch, landRow int, land bool) Model {
+	m.preview.search = search
+	if land {
+		m.preview.position = m.preview.position.anchoredAt(landRow, m.previewSpan())
+		m = m.syncPreviewSel()
 	}
-	m.preview.focused = ((m.preview.focused+dir)%n + n) % n
-	return m.landPreviewMatch()
-}
-
-// landPreviewMatch moves the document cursor onto the focused match and
-// anchors it ~30% from the top, so an Esc right after a search jumps to the
-// found content's source.
-func (m Model) landPreviewMatch() Model {
-	matches := m.previewMatches()
-	if len(matches) == 0 || m.preview.focused >= len(matches) {
-		return m
-	}
-	line := input.Clamp(matches[m.preview.focused].LineIndex, 0, max(0, len(m.preview.lines)-1))
-	m.preview.cursor = line
-	m.preview.scrollY = anchorScroll(line, m.contentHeight()+1, len(m.preview.lines))
-	return m.syncPreviewSel()
-}
-
-// pagePreview pages the document with a one-line overlap, cursor keeping its
-// on-screen row — the preview mirror of pageDiff.
-func (m Model) pagePreview(dir int) Model {
-	total := len(m.preview.lines)
-	if total == 0 {
-		return m
-	}
-	h := m.contentHeight() + 1
-	step := max(1, h-1)
-	top := fileViewportTop(m.preview.cursor, m.preview.scrollY, h, total)
-	m.preview.cursor = input.Clamp(m.preview.cursor+dir*step, 0, total-1)
-	m.preview.scrollY = input.Clamp(top+dir*step, 0, max(0, total-h))
-	return m.syncPreviewSel()
+	return m
 }
 
 // syncPreviewSel tracks the outline selection to the document cursor: the
@@ -173,8 +76,8 @@ func (m Model) syncPreviewSel() Model {
 	if len(o) == 0 {
 		return m
 	}
-	i := sort.Search(len(o), func(i int) bool { return o[i].LineIdx > m.preview.cursor }) - 1
-	m.preview.sel = max(0, i)
+	i := sort.Search(len(o), func(i int) bool { return o[i].LineIdx > m.preview.position.row }) - 1
+	m.preview.selection.index = max(0, i)
 	return m
 }
 
@@ -185,9 +88,8 @@ func (m Model) jumpPreviewOutline() Model {
 	if len(o) == 0 {
 		return m
 	}
-	e := o[input.Clamp(m.preview.sel, 0, len(o)-1)]
-	m.preview.cursor = input.Clamp(e.LineIdx, 0, max(0, len(m.preview.lines)-1))
-	m.preview.scrollY = anchorScroll(m.preview.cursor, m.contentHeight()+1, len(m.preview.lines))
+	e := o[input.Clamp(m.preview.selection.index, 0, len(o)-1)]
+	m.preview.position = m.preview.position.anchoredAt(e.LineIdx, m.previewSpan())
 	return m
 }
 
@@ -196,7 +98,7 @@ func (m Model) jumpPreviewOutline() Model {
 // merged sibling schema) opens that file (jumpToLocation pushes a Ctrl+O
 // frame either way).
 func (m Model) exitPreview() Model {
-	src := m.previewSrcAt(m.preview.cursor)
+	src := m.previewSrcAt(m.preview.position.row)
 	m = m.clearPreviewState()
 	m.mode = modeEdit
 	if src.File == "" || src.Line <= 0 {

@@ -6,9 +6,9 @@
 
 Three design rules shape almost every function here:
 
-- **The Model is a value.** Handlers receive a `Model` copy, mutate the copy, and return it. There is no shared mutable model — except for a few caches that deliberately ride behind pointer fields (`searchMC`/`previewMC` match caches, the `frames` frame cache, `grepPreviewRC`) so every copy shares the same memo. That's safe because Update and View both run on the program goroutine.
-- **Anything slow runs as a `tea.Cmd`.** Git status polls, diff/blame computation, corpus walks, grep scans, LSP lookups, document rendering — all run off the UI goroutine and come back as messages. Every async family carries a generation counter (`diffGen`, `blameGen`, `grepGen`/`grepSearchGen`, `preview.gen`) plus usually the file's rel path; the handler drops any result whose generation or file no longer matches, so a user who Esc'd or switched files never sees a stale answer land.
-- **Modes are read-only by closed key switches.** Diff review, blame, conflict solving, and the document previews are made read-only not by guards on every edit path but by their key handlers only listing the keys they accept — anything unlisted falls through inert, so typing simply cannot reach the buffer.
+- **The Model is a value.** Handlers receive a `Model` copy, mutate the copy, and return it. There is no shared mutable model — except for a few caches that deliberately ride behind pointer fields (`searchMC`/`previewMC`/`reviewMC` match caches, the `frames` frame cache, `grepPreviewRC`) so every copy shares the same memo. That's safe because Update and View both run on the program goroutine.
+- **Anything slow runs as a `tea.Cmd`.** Git status polls, diff/blame computation, corpus walks, grep scans, LSP lookups, document rendering — all run off the UI goroutine and come back as messages. Every async family carries a generation counter (`diffGen`, `blameGen`, `grepGen`/`grepSearchGen`, `preview.gen`, `review.gen`, `externalHistoryGen`) plus usually the file's rel path; the handler drops any result whose generation or file no longer matches, so a user who Esc'd or switched files never sees a stale answer land.
+- **Modes are read-only by closed key switches.** Diff review, blame, conflict solving, the document previews, and review mode are made read-only not by guards on every edit path but by their key handlers only listing the keys they accept — anything unlisted falls through inert, so typing simply cannot reach the buffer.
 
 ## Architecture
 
@@ -29,14 +29,16 @@ Three design rules shape almost every function here:
 | `modeConflict` | interactive merge-conflict resolution over the live buffer (`git scf`) |
 | `modeOpenAPI` / `modeGraphQL` | read-only rendered document previews (`openapi` / `graphql`) |
 | `modeBlame` | read-only git-blame annotation (`git blame`) |
+| `modeReview` | read-only multi-file change review (an external `review` request) |
+| `modeExternalHistory` | the saved external-message history (Ctrl+T › external › history) |
 
-**The Update/View loop.** `Update` first bumps the frame cache's sequence (per-message memos go stale), then handles non-key messages (window size, LSP diagnostics, async results, git status ticks, mouse, paste). For key presses it peels overlays in priority order — Ctrl+C (always quit), a pending keybind capture (so the capture can take any chord, quit included), the bound quit key, splash, message overlay, `:rm` confirm, fuzzy finder, definition picker, grep, the Ctrl+R op overlay — then the global action chords (Ctrl+W/P/U/G/T/R, Shift+Tab, all suppressed while a text bar has focus via `inBarMode`), and finally dispatches on `m.mode` to the per-mode handler.
+**The Update/View loop.** `Update` first bumps the frame cache's sequence (per-message memos go stale), then handles non-key messages (window size, LSP diagnostics, async results, git status ticks, mouse, paste). For key presses it peels overlays in priority order — Ctrl+C (always quit), a pending keybind capture (so the capture can take any chord, quit included), the bound quit key, splash, the choice overlay (`:rm` confirm, external-request confirm), message overlay, fuzzy finder, definition picker, grep, the Ctrl+R op overlay — then the two list + detail views (review, message history), which own every key so the project-wide chords can't open files underneath them, then the global action chords (Ctrl+W/P/U/G/T/R, Shift+Tab, all suppressed while a text bar has focus via `inBarMode`), and finally dispatches on `m.mode` to the per-mode handler.
 
 **Keys are bound, not hardcoded.** Every rebindable chord is matched through `m.keys` (an `internal/keymap.Keymap` resolved in `New` from `cfg.Keybinds`, with any warnings appended to the startup notice): `m.keys.ActionFor(k)` / `m.keys.Matches(action, k)` instead of `k == "ctrl+p"`. Key names in this document are the defaults. Navigation and text primitives (arrows, Enter, Esc, Tab, Backspace) and overlay-local chords (grep's Ctrl+J newline, the op inputs' Ctrl+A/Ctrl+E, the op table's Ctrl+S) stay fixed. Status-bar hints and notices that name a chord read it from the keymap too (`actionHints` in render.go). `View` (render.go) assembles header + sidebar pane + main pane + status rows, choosing the main body by the same overlay-then-mode priority.
 
 **How async results land.** Each worker Cmd captures everything it needs by value (including a copy of the buffer lines where relevant), does its work, and returns a message tagged with `gen` and usually `rel`. The `handleXReady` handler compares `gen` against the Model's current counter, `rel` against the open file, and often the mode too; a mismatch means the result is stale and it is silently dropped. Generations stay monotonic across state clears precisely so in-flight results remain identifiable.
 
-**How the files divide the work.** `app.go` is the hub: Model, `New`/`Init`/`Update`, corpus and git-status upkeep, file opening, highlight caches. `edit.go` is the pure editor struct; `keys_edit.go` its key handler; `history.go`/`drafts.go`/`tabs.go` the undo/draft/tab machinery. Each extra mode gets a `*_mode.go` (state + async compute), a `keys_*.go` (key handler), and usually a `render_*.go`. `render.go` holds View, the shared line renderers, and the whole color palette. `sidebarlist.go` is the one left-pane list: each mode supplies rows, and that file windows, paints, and hit-tests them. `jump.go` and `complete.go` are the LSP consumers; `keys_grep.go` and parts of `keys_command.go` are the overlays; `mouse.go` maps clicks back through the same layout math the renderers use.
+**How the files divide the work.** `app.go` is the hub: Model, `New`/`Init`/`Update`, corpus and git-status upkeep, file opening, highlight caches. `edit.go` is the pure editor struct; `keys_edit.go` its key handler; `history.go`/`drafts.go`/`tabs.go` the undo/draft/tab machinery. Each extra mode gets a `*_mode.go` (state + async compute), a `keys_*.go` (key handler), and usually a `render_*.go`. `render.go` holds View, the shared line renderers, and the whole color palette. `sidebarlist.go` is the one left-pane list: each mode supplies rows, and that file windows, paints, and hit-tests them. The read-only views share their moving parts instead of each carrying a copy — see *Shared read-only view building blocks* below. `jump.go` and `complete.go` are the LSP consumers; `keys_grep.go` and parts of `keys_command.go` are the overlays; `mouse.go` maps clicks back through the same layout math the renderers use.
 
 ## Functions
 
@@ -56,7 +58,10 @@ Three design rules shape almost every function here:
 - `maybeGitRefresh` is the single gate for spawning `git status` — no-op outside a repo or while one is in flight, so Ctrl+S, `:refresh`, and the 3s poller can't stack child processes. `refreshGitStatusCmd` runs the spawn; the `gitStatusTickMsg` branch of Update pauses polling when the editor is idle (60s without input) or unfocused.
 - `treeEntries` builds the sidebar entries — a stat per expanded directory plus gitignore matching — memoized per message through the shared `frameCache`, so the key handler, the sidebar renderer, and the query popup all reuse one walk per Update+View cycle. `invalidateTreeEntries` drops the memo when a handler mutates the filesystem mid-message (`:touch`/`:mkdir`/`:rm`); `enterRoot` drops it too, since the same text under a new root means different rows.
 - `sidebarCommand` and `highlightedSidebarCommand` encode the query bar's three-way state split: the confirmed selection drives directory *expansion*, keyboard/popup navigation drives only the *highlight*, and an open fuzzy finder overrides both.
-- `openFileAt` is the one deliberate-open path: stat-first (a missing file errors instead of becoming a tab), stashes the outgoing buffer as a draft, closes/opens LSP documents, clears any diff/conflict/preview state, starts a fresh edit session, restores a stashed draft and the remembered cursor, and lands in edit mode.
+- `openFileAt` is the one deliberate-open path: stat-first (a missing file errors instead of becoming a tab), then `showOpenedFile` does the rest — stashes the outgoing buffer as a draft, closes/opens LSP documents, clears any diff/conflict/preview state, starts a fresh edit session, restores a stashed draft and the remembered cursor, and lands in edit mode.
+- `openNewFileAt` opens a path that doesn't exist yet as an empty buffer through the same `showOpenedFile` (jailed like every open); the save path creates the file on the first Ctrl+S, like vim.
+- `WithOnlyFile` (only_file.go) is single-file mode for `ntee <file>`: the sidebar tree (`filetree.BuildPathTreeEntries` over the one path), the search index behind Ctrl+P / Ctrl+G / Ctrl+U and the query popup all hold just that file. The index is set up front and `onlyFileCorpusCmd` keeps it so on rebuilds, so the folder is never walked and no nested-repo scan runs; Ctrl+W is refused. `cmd/ntee` also gives the file its own store (keyed by its path) so the folder's tabs and session never appear, and skips the external-message socket.
+- `WithStartFile` is the `ntee <file>[#L<n>]` startup open: `openFileAtLine` for an existing file, `openNewFileAt` for a missing one. `SplitLineAnchor` exports the anchor parser so the command line reads `#L<n>` exactly like the query bar.
 - `gitScopeFor` is the read counterpart for running git on a file: it returns the folder to run git in and the path relative to that repo. When the current root is a repo (opened directly, or rooted there by Ctrl+W) it returns the root and the unchanged path; rooted at a workspace it picks the deepest nested repo containing the file. An empty repo list that has not been scanned yet reports `loading` so callers can say "still loading" instead of "not a repository". It reads only the in-memory repo list, never the disk. `repoRelativePath` wraps it for the copy commands, and `gitScopeError` maps the failure to its status message.
 - `refreshFileHighlights` rebuilds the line and syntax-highlight caches from the buffer (chroma is stateful across lines, so it's whole-buffer work — run at burst boundaries, never per keystroke); files over `MaxHighlightKB` render plain. It skips the whole rescan when the same file content is already highlighted, keyed by `hlPath` + a content hash (hash, not `edit.rev` — `newEditor` resets rev on reopen, so a rev compare could false-hit), so a save right after a flushed burst or an Esc with no edits costs nothing. `hlMarkLine`/`hlInsertLine`/`hlInsertLines`/`hlRemoveLine` keep the per-line cache index-aligned between full rescans. `invalidateHighlightCaches` clears the content key first (same bytes, new colors) and recomputes everything after a theme switch.
 - `handlePaste` routes bracketed-paste text to whichever input has focus, collapsing newlines for the single-line bars; the read-only modes take no paste at all.
@@ -125,7 +130,7 @@ The undo timeline is a list of snapshot seqs plus a cursor; the content lives in
 
 Every opened file becomes a tab; the list, active index, and per-tab cursors persist on every mutation.
 
-- `activateTab` opens the i-th tab through `openFileAt` (so stash/restore happen for free) and lazily drops tabs whose files have vanished. It serves Shift+Tab cycling, the `tab <name>` command, and tab-strip clicks alike.
+- `activateTab` opens the i-th tab through `openFileAt` (so stash/restore happen for free) and lazily drops tabs whose files have vanished — except a never-saved new file that still has a stashed draft, which reopens through `openNewFileAt` so its work isn't lost. It serves Shift+Tab cycling, the `tab <name>` command, and tab-strip clicks alike.
 - `closeTabsSide` implements `tab cl`/`cr`: closes the clean tabs on one side, but unsaved tabs refuse to close and stay red.
 - `tabDirty` decides the red rendering: the active tab from the live buffer's dirty flag, inactive ones from having a stashed draft.
 
@@ -187,11 +192,11 @@ Every opened file becomes a tab; the list, active index, and per-tab cursors per
 #### keys_inspect.go
 
 - `enterInspect` (Ctrl+T) opens the dashboard and fires `fetchDBInfoCmd` — store statistics involve real I/O (`BlobUsage` does per-record preads), so they load async.
-- `runInspectCommand` dispatches the `@inspection >` bar: `db compact|relieve` (run via `maintCmd` in the background, guarded by `inspectBusy` against duplicates; completion re-fetches stats), `lsp enable|disable <lang|all>`, `syscolor <style>`, and `keybind …` (keys_keybinds.go).
+- `runInspectCommand` dispatches the `@inspection >` bar: `db compact|relieve` (run via `maintCmd` in the background, guarded by `inspectBusy` against duplicates; completion re-fetches stats), `lsp enable|disable <lang|all>`, `syscolor <style>`, `keybind …` (keys_keybinds.go), and `ext …` (keys_inspect_external.go).
 - `inspectLSPCommand` persists the config change *first* (nothing half-applied on a failed write) and then applies it live through the registry — `m.cfg` itself is never mutated because its Languages map is shared with server goroutines.
 - `inspectSyscolorCommand` validates against the curated style list, persists, applies via `syntax.SetStyle`, and invalidates every highlight cache so the new colors show immediately.
 
-- `handleInspectKey` hands every key to whichever right-hand panel has focus: the op-commands table, the style picker, the lsp picker or the keybind picker. `→` at the end of the bar input moves focus into the panel on the op-commands, system, lsp and keybinds sections.
+- `handleInspectKey` hands every key to whichever right-hand panel has focus: the op-commands table, the style picker, the lsp picker, the keybind picker or the external picker. `→` at the end of the bar input moves focus into the panel on the op-commands, system, lsp, keybinds and external sections. `enterInspect` also loads the external settings and history count.
 - The lsp verbs come in two kinds. `start`, `stop` and `restart` act on this session only and never touch the config: start is the registry's `Enable`, stop is `Stop` (the server starts again on demand), and restart is both. `enable` and `disable` also save the language's enable flag. `applyLSPAction` runs one verb for one language, and both the `lsp <verb> <lang|all>` bar command and the picker use it.
 - `setLSPEnabled` is the persisting path behind enable/disable. It writes the config first, then calls the registry's `Enable`/`Disable`, and reports whether it was applied, so the bar is only cleared on success.
 - The lsp picker (`lspPickerState`) is the lsp panel's language list:
@@ -240,17 +245,44 @@ The inspect dashboard's op-commands table: a KEY / TYPE / COMMAND list of saved 
 
 *Plus small helpers: `startOpEdit`, `switchOpEditField`, `opEditPaste`, `describeFileTypes`, `opCommandLabel` (`test (go)`), `handleOpCommandsLoaded`, `handleOpCommandSaved`.*
 
+### Shared read-only view building blocks
+
+Diff, blame, the document previews, review mode and the message history are all "a list of rows you move through without editing". Their common parts live in one place each, so a fix or a new key lands everywhere at once.
+
+#### row_cursor.go
+
+- `rowCursor` (`row`, `column`, `scrollY`) is the cursor and viewport of a read-only row view, and `rowSpan` is what the view tells it about itself: row count, visible height, and — for views with a column cursor — each row's rune length. Every method is a pure value transform and a no-op on an empty span (still loading): `moved`, `paged` (one-line overlap, keeping the on-screen row), `toStart`/`toEnd`, `anchoredAt` (lands ~30% from the top, like every jump), `blockJump` (diff hunks, blame commit groups, review changes — the view supplies the block-start rule), `scrolled` (viewport-only paging for text panels), and `clickedAt` (mouse.go: the edit view's click anchoring).
+- `handleRowNavigationKey` applies the navigation keys every such view shares — ↑/↓, PgUp/PgDn, and ←/→/Home/End within the row when there is a column cursor, or Home/End to the document's ends when there isn't. Each view calls it first; its own closed switch then handles only what is special (Esc, Shift+↑/↓, Ctrl+J).
+
+*Plus small helpers: `clampColumn`, `viewportTop`, `screenRow` — column clamping and viewport math (the same window `fileViewportTop` gives the renderers).*
+
+#### diff_document.go
+
+- `diffDocument` is one file's unified diff — rows plus the new side's lines and highlight cache, add/del counts, and new-file/deleted-file flags. Git diff mode holds one over the live buffer; review mode holds one per file.
+- `buildDiffRows` converts the Myers edit script into rows: ctx/add rows index into the new side (no text duplication), del rows carry the removed text and point at their successor line — the anchor Esc and Ctrl+J use. `diffRowForBufLine` maps a line back to its row by binary search (bufLine is non-decreasing by construction).
+- `computeDiffDocument` is the one place a working-tree side is diffed against a git base (it runs git, so off the UI goroutine): the base defaults to HEAD (an unborn HEAD means everything is new, not an error), a path absent in the base makes an all-green new file, and a path gone from the working tree makes an all-red deleted file.
+
+*Plus small helpers: `rowText`, `rowWidth`, `rowHighlights`, `isHunkStart`, `firstChangeRow`, `span`, `diffRowBufLine` — row lookups and the cursor span.*
+
+#### document_search.go
+
+- `documentSearch` is the in-view search bar of a read-only document (previews, review): typing lands on the first match at/after the cursor, ↑/↓ (or the find key) cycle with wraparound, Enter commits, Esc closes. `handleKey` and `typed` (also used for paste) return the row to land on; the owning view supplies the match set from its own `matchCache` and moves its cursor. No replace — the documents are read-only. `renderDocumentSearchStatus` is the shared status row.
+
+*Plus small helpers: `focusedFrom`, `cycled`, `focusedRow`.*
+
+#### choice_overlay.go
+
+- `choiceOverlay` is the editor's one modal decision box: title, styled body lines (`overlayLine`: plain, strong, dim, or a highlighted line the user must not miss), and choice buttons. ←/→ or Tab move, Enter picks, y/n pick the first/last, Esc picks the last (the safe choice); everything else is swallowed. Its keys come first in Update, and it counts in `overlayOpen` and the paste guard.
+- `handleChoiceKey` closes it and dispatches on its `kind`: the `:rm` confirmation (`removePathChoice`, payload in `confirmRm`) or an external request (`resolveExternalChoice`).
+
 ### Git views
 
 #### diff_mode.go
 
 - `enterDiff` (from `git diff [rev]`) validates the revision (rejecting `-`-prefixed input that would reach git's argv as an option), bumps `diffGen`, and switches to diff mode while `computeDiffCmd` works. The file's own repo is resolved with `gitScopeFor`, so a file inside a nested repo of a workspace diffs against *its* repo, not the opened directory.
-- `computeDiffCmd` snapshots the buffer lines and, off the UI goroutine, runs git from the file's repo folder with the repo-relative path (`show rev:path`), then runs the Myers diff; a repo with no commits or a path absent in the base becomes a "new file" (everything added) rather than an error.
+- `computeDiffCmd` snapshots the buffer lines and, off the UI goroutine, calls the shared `computeDiffDocument` from the file's repo folder with the repo-relative path; a repo with no commits or a path absent in the base becomes a "new file" (everything added) rather than an error. The stored document drops its line snapshot: `liveDiffDocument` binds the rows to the live buffer and highlight cache at use, valid because diff mode blocks edits.
 - `handleDiffReady` lands the result behind the gen/rel/mode guard. A fresh entry keeps the user's exact place (same buffer line, same on-screen row — the exact inverse of `exitDiff`'s mapping); a Ctrl+O return restores the remembered review position instead.
-- `buildDiffRows` converts the edit script into display rows: ctx/add rows index into the live buffer (no text duplication), del rows carry the removed text and point at their successor buffer line — the anchor Esc and Ctrl+J use.
-- `diffRowForBufLine` maps buffer line → display row by binary search (bufLine is non-decreasing by construction).
-
-*Plus small helpers: `clearDiffState`, `diffRowBufLine`, `diffRowText`, `splitBufferLines`, `firstStderrLine` — state reset, row/text lookups, and git error extraction.*
+*Plus small helpers: `clearDiffState`, `diffSpan`, `splitBufferLines`, `firstStderrLine` — state reset, the cursor span, and git error extraction.*
 
 #### blame_mode.go
 
@@ -282,17 +314,15 @@ Pure functions over line slices — no Model involved, which keeps them independ
 
 #### keys_diff.go
 
-- `handleDiffKey` is the closed read-only switch: arrows move the review cursor, Shift+↑/↓ jump hunks, the bound jump/back keys (Ctrl+J/O) join the jump ladder, Esc exits — everything else is inert.
+- `handleDiffKey` is the closed read-only switch: `handleRowNavigationKey` moves the review cursor, Shift+↑/↓ jump hunks (`rowCursor.blockJump` with `isHunkStart`), the bound jump/back keys (Ctrl+J/O) join the jump ladder, Esc exits — everything else is inert.
 - `exitDiff` maps the cursor row back to its buffer line while preserving its on-screen row, so the page doesn't shift even when del rows compress away.
 - `diffJumpToReference` syncs the edit cursor to the row's buffer position and reuses the whole jump ladder; del rows refuse (their text no longer exists in the buffer, so an LSP query there would silently resolve the wrong identifier).
-
-*Plus small helpers: `moveDiffCursor`, `jumpDiffHunk`, `pageDiff` — cursor movement, hunk jumping, and paging (each the diff twin of an edit-mode function).*
 
 #### keys_blame.go
 
 - `handleBlameKey`, `exitBlame`, and `blameJumpToReference` mirror the diff versions but with the identity row↔line mapping (blame rows are buffer lines), which makes exit and jump trivial.
 
-*Plus small helpers: `moveBlameCursor`, `jumpBlameGroup`, `pageBlame` — movement, commit-group jumping, and paging.*
+*Plus small helpers: `blameSpan`, `isBlameGroupStart` — the cursor span and the commit-group rule its Shift+↑/↓ `blockJump` uses.*
 
 #### keys_conflict.go
 
@@ -314,15 +344,15 @@ The shared engine for the OpenAPI and GraphQL previews. The two modes were byte-
 - `handlePreviewReady` lands the rendered document (guarded by mode+gen+rel, since both kinds share one generation counter) and positions the cursor on the row nearest the edit cursor's source line — so entering and Esc'ing straight back roughly round-trips.
 - Every rendered row carries a `{file, line}` source anchor — including rows that came from cross-file `$ref`s or sibling schema files — which is what makes Esc a real source jump.
 
-*Plus small helpers: `previewDesc`, `clearPreviewState`, `previewRowForSource`, `previewSrcAt`, `previewMatches`, `movePreviewCursor` — descriptor lookup, state reset, and anchor/match/cursor plumbing.*
+*Plus small helpers: `previewDesc`, `clearPreviewState`, `previewRowForSource`, `previewSrcAt`, `previewMatches`, `previewSpan` — descriptor lookup, state reset, and anchor/match/cursor plumbing.*
 
 #### keys_preview.go
 
-- `handlePreviewKey`: the closed read-only switch — cursor movement, Shift+↑/↓ over the outline, Enter jumping to the selected outline entry, `/` or the bound find key opening the in-preview search.
+- `handlePreviewKey`: the closed read-only switch — `handleRowNavigationKey` for cursor movement, Shift+↑/↓ over the outline (`listSelection`), Enter jumping to the selected outline entry, `/` or the bound find key opening the in-preview search.
 - `exitPreview` (Esc) jumps to the source of the row under the cursor via `jumpToLocation` — content from another file opens that file, and a Ctrl+O frame is pushed either way.
-- `handlePreviewSearchKey` is a search-only bar (no replace — the document is read-only); `syncPreviewSel` keeps the outline selection tracking the document cursor by binary search.
+- `handlePreviewSearchKey` runs the shared `documentSearch` bar over the rendered rows and `landPreviewSearch` follows its landing; `syncPreviewSel` keeps the outline selection tracking the document cursor by binary search.
 
-*Plus small helpers: `focusPreviewMatch`, `cyclePreviewMatch`, `landPreviewMatch`, `pagePreview`, `jumpPreviewOutline` — match focusing/cycling/landing, paging, and the outline jump.*
+*Plus small helpers: `previewMatchesFor`, `jumpPreviewOutline` — the search's match source and the outline jump.*
 
 #### openapi_mode.go
 
@@ -340,6 +370,49 @@ The shared engine for the OpenAPI and GraphQL previews. The two modes were byte-
 
 *Plus: `renderPreviewStatus` — the search-or-position status row.*
 
+### Review mode & external messages
+
+#### review_mode.go / keys_review.go / render_review.go
+
+Review mode shows a set of files — possibly spanning nested repos of the workspace — as a list on the left and the selected file's diff on the right. It is built from the shared blocks: `diffDocument` per file, `rowCursor`, `listSelection`, `documentSearch`, and the scoped grep/finder. It never touches `m.root`, the open file, or the edit session, which is why Esc can restore exactly where the user was and why no repo switch is ever needed.
+
+- `enterReview` backs out to edit/query (`leaveToEditOrQuery`), remembers that mode, and fires `reviewPrepareCmd`: repo resolution touches the disk (`filetree.FindRepoRoot`), so it runs off the UI goroutine and returns the list in the left pane's tree order (`inTreeOrder`), so Shift+↑/↓ walks files exactly as they are shown.
+- `reviewLoadBatchCmd` computes diffs in batches of 8, each handler scheduling the next (the grep-batch pattern, guarded by `review.gen`). `loadReviewFile` reads the working tree through the *workspace* file jail (`filetree.ReadContainedFile`, so every nested repo is reachable and a missing file is a deletion, not an error), diffs it with `computeDiffDocument` in the file's own repo, and highlights it. Binary or >2 MB files get a placeholder; a file in no repo shows as all added. After the diff, `expandDocumentTabs` turns tabs into 4 spaces in the document's text and highlights (display only — the diff compared the real content), so tab-indented code fits the rune-based row windowing instead of being cut by the pane guard.
+- The left pane is a folder tree laid out like the main file tree by `filetree.BuildPathTreeEntries` from the reviewed paths alone (no disk reads). `refreshReviewTree` rebuilds its rows, the row/file maps, and folded directories' hidden-file counts only when the file set or the fold state changes — never per frame. `toggleReviewFold` (a click on a directory row) replaces the `collapsed` map rather than mutating it, since Model copies share it.
+- `selectReviewFile` (Shift+↑/↓, a click, the scoped Ctrl+P) reopens any folded directory above the file (`unfoldReviewAncestors`), so folding hides rows but never strands the keyboard, and lands on the file's first change; a file still loading is fetched ahead of the chain (`reviewLoadSelectedCmd`), and `handleReviewLoaded` keeps the first result so the cursor never jumps.
+- `handleReviewKey` takes every key (no global chord reaches the project underneath): navigation, Shift+↑/↓ files, `n`/`p` change blocks, the find key for `documentSearch`, Ctrl+P over the review files (`fuzzyPromptReview`), and Ctrl+G over their rows — removed lines included (`reviewGrepFiles`, `openGrepOver`).
+- `renderReview` draws a one-line header (status badge, path, repo, counts) over `renderDiffDocument`. `reviewSidebarList` draws the cached tree: directories with the main tree's `↓`/`→` markers (a folded one followed by how many reviewed files it hides), files with their status badge in the marker column, a space, then the name and its change counts (`+n` green, `−n` red, like the diff). `reviewSelectedRow` highlights the selected file, or its nearest visible folder while that is folded; `activateReviewRow` folds a clicked directory or selects a clicked file.
+
+*Plus small helpers: `leaveToEditOrQuery`, `selectReviewPath`, `reviewGoToGrepHit`, `reviewFuzzyCandidates`, `reviewSpan`, `reviewRowsHeight`, `exitReview`, `reviewBadge`, `reviewRepoName`, `reviewMatchesFor`, `landReviewSearch`, `renderReviewStatus`.*
+
+#### external_receiver.go
+
+- `ExternalReceiver` is the socket server's handler (see [extmsg.md](extmsg.md)); it runs on connection goroutines. `Handle` checks the global switch per message (so a toggle in another window applies), parses, resolves each path to workspace-relative with `resolvePath` (absolute or relative, symlink spellings retried by `relativeToWorkspace`, the file jail enforced with `filetree.IsContained`; an `open` target must be an existing file), records the request as `pending` in the project history, and queues it for the UI. It then waits up to 3 s for the UI's outcome so the sender learns "opened …" or "waiting for the user to confirm" — never blocking on the user's answer itself.
+- `SetSink` starts the single dispatcher goroutine that forwards queued requests to `program.Send` in arrival order; a full queue makes the sender hear "busy" instead of piling up goroutines.
+
+#### external.go
+
+- `handleExternalMessage` resolves the request (`resolveExternal`: for `open`, the file stays reachable from the current root when it lies under it, otherwise the editor re-roots at the deepest nested repo holding it) and acts at once only from the plain query view. Anywhere else — editing, a bar, a special view, an overlay — it opens the choice overlay (`externalChoice`: the target, a highlighted `switches repo: a/ → b/` line, the draft note for a dirty buffer, a warning for a running op-command). A newer request supersedes an unanswered one; an unanswered `:rm` is cancelled, never confirmed.
+- `carryOutExternal` backs out to edit/query, switches repo with `switchRoot` when needed, then `openFileAtLine` — or enters review. `saveExternalStatusCmd` records the outcome (`opened`, `reviewed`, `ignored`, `superseded`, `error`); replays from the history view leave the stored record alone.
+
+*Plus small helpers: `WithExternal`, `deepestRepoFor`, `externalOutcome`, `resolveExternalChoice`, `repoDisplayName`, `sendExternalReply`.*
+
+#### external_history.go
+
+- The history view (`modeExternalHistory`) is the review layout over records: `externalHistorySidebarList` lists them newest first as status-colored command badges, and the right pane is an `infoPanel` (`externalDetailLines`) with the command, time, status and note, the numbered paths, and the raw message, scrolled with `rowCursor.scrolled`. Enter replays the selected message through `handleExternalMessage` (from this view the user is busy, so it confirms first).
+- `loadExternalHistoryCmd` reads the history off the UI goroutine for both the view and the Ctrl+T panel's saved count, guarded by `externalHistoryGen`.
+
+*Plus small helpers: `enterExternalHistory`, `exitExternalHistory`, `selectedExternalRecord`, `activateExternalHistoryRow`, `externalStatusColor`, `externalDetailSpan`, `renderExternalHistoryStatus`, `pluralize`.*
+
+#### keys_inspect_external.go / render_inspect_external.go
+
+The Ctrl+T `external` section: the socket's status, the global on/off switch, the history limit, and this project's saved count with the way into the history view.
+
+- `handleExternalPickerKey`: ↑/↓ over the three settable rows; Enter toggles messages, edits the limit in place (`handleExternalLimitKey`: digits only, 1–100, Esc keeps the old value), or opens the history.
+- `saveExternalSettingsCmd` writes the global settings off the UI goroutine; a lowered limit also trims this project's history at once. `inspectExternalCommand` is the bar form: `ext on|off`, `ext limit <n>`, `ext history`. In single-file mode the window never listens, so the panel shows **accept messages** as disabled and both the toggle and `ext on|off` are refused — the global switch, which folder windows share, stays as it was.
+
+*Plus small helpers: `loadExternalSettingsCmd`, `handleExternalSettings`, `setExternalEnabled`, `setExternalHistoryLimit`, `renderInspectExternal`.*
+
 ### Overlays
 
 #### keys_grep.go
@@ -347,11 +420,12 @@ The shared engine for the OpenAPI and GraphQL previews. The two modes were byte-
 Repo-wide content search (Ctrl+G). Everything expensive is async and generation-guarded: the file snapshot streams in per-batch Cmds, and searches are debounced then scanned in the background.
 
 - `openGrep` opens the overlay immediately and starts the snapshot load; it refuses from a dirty edit buffer (Enter on a hit opens another file, which would silently discard edits) and from a cold corpus.
+- `openGrepOver` is the scoped variant: the overlay over an in-memory file set (review mode's rows), searchable at once with no loading. `grepTarget` says where Enter on a hit goes — the project grep opens the file; the review grep hands the hit back to review (`reviewGoToGrepHit`). Both start from `beginGrep`, and `newGrepFile` prepares content for either source.
 - `grepLoadBatchCmd` reads one 512-file batch of the corpus with a bounded worker pool; `handleGrepBatch` appends it (capped at 10k files / 200MB), schedules the next batch, and re-searches the grown prefix when a query is active — completion always fires a final covering search, the guarantee that displayed results span the whole snapshot.
 - `queueGrepSearch` registers a query change: a generation bump invalidates earlier debounce ticks so only the last keystroke's tick (100ms) fires a scan; old results stay displayed until new ones land, so no flicker.
 - `grepSearchCmd` scans the snapshot with a worker pool sharing one compiled regex (regexp pools match state internally since Go 1.12), merging per-worker hits in corpus order.
 - `appendGrepHits` scans whole content instead of line-at-a-time (regexp's literal-prefix fast path), resuming at the next line start after each hit so same-line matches dedupe and empty-width matches still terminate.
-- `handleGrepKey` supports a *multi-line* query (Ctrl+J inserts a newline; ↑/↓ move within the query before falling through to the result list); Enter opens the selected hit at its line.
+- `handleGrepKey` supports a *multi-line* query (Ctrl+J inserts a newline; ↑/↓ move within the query before falling through to the result list); Enter opens the selected hit at its line (or, for a review-scoped grep, lands on it in review).
 - `closeGrep` releases the snapshot — it can hold hundreds of MB.
 - `refreshGrepPreview` keeps the selected hit's preview current: the line split lands synchronously (the preview text must render this frame) and the whole-file tokenize runs in a `tea.Cmd`, landing as `grepPreviewMsg` guarded by `grepGen` + the selected rel — a per-arrow-key synchronous tokenize stalled key handling on large files. Rows render plain until it lands.
 - `grepSelectedFile` resolves the selection via `grepFileIndex` (rel → snapshot index, maintained as batches land) — the renderer calls it every frame, so a linear scan over up to 10k files was per-frame work.
@@ -411,7 +485,7 @@ Clickable links in the run output.
 - `renderFuzzyOverlay`/`renderFuzzyRow` draw the Ctrl+P/Ctrl+U finder (titled by `fuzzyPromptLabel`, which prefixes the Ctrl+U title with the number of uncommitted files listed, e.g. `32 uncommitted`), computing matched-rune bold positions only for the visible rows rather than during filtering, and rendering contiguous matched/unmatched runs in one lipgloss call each (a call per rune was width×rows ANSI emissions per frame).
 - `renderSplash` is the cold-start page: name, version, and an animated indexing spinner while the index builds.
 
-*Plus small helpers: `renderMessageOverlay`, `renderConfirmRmOverlay`, `renderDefPickOverlay` — centered modal boxes.*
+*Plus small helpers: `renderMessageOverlay`, `renderDefPickOverlay` — centered modal boxes. Decisions (`:rm`, external requests) go through the shared choice overlay instead.*
 
 ### LSP integration
 
@@ -454,24 +528,27 @@ Diagnostics themselves land in `Update`'s `lsp.DiagnosticsMsg` branch (app.go), 
 - `renderSearch` draws the search body: scrolls to the focused match (or holds the edit position when there are no matches yet) and, in search-exec mode, splices the live replace preview in. The line split and per-line match buckets come from `matchCache`'s memos rather than being rebuilt per frame.
 - The bottom of the file holds the entire Gruvbox-derived palette and every lipgloss style — the single place colors are defined.
 
+- `fitPaneLines` cuts every line of the sidebar and main pane bodies to the pane's width in terminal cells before the pane is drawn. Row renderers window text by runes, but a tab (drawn as 4 columns) or a wide rune takes more than one cell; an over-wide row would wrap inside the pane and spill its tail into the next row's line-number gutter.
+
 *Plus small helpers: `padStatusRows`, `diagSummary`, `diagAtLine`, `withNotice`, `renderExecSugs`, `renderQueryMain`, `renderQuerySuggestions`, `renderTabStrip` (window math delegated to `tabStripWindow`/`tabLabel`, shared with the tab click hit-test), `fileViewportTop`, `renderContentLine`, `plainWindow`, `plainWindowStyled`, `renderSelectedLine`, `clampByte`, `renderInputLine`, `renderInputLineStyled`, `padTo`, `truncateRunes`, `pad`, `segStyleFor`, `colorFor` — row assembly, windows, input-line drawing, and padding/truncation utilities.*
 
 #### sidebarlist.go
 
 The left pane is one list. File tree, inspection menu, and preview outline each build rows; scrolling, the selection bar, and click-to-row live here so a new sidebar behavior is added once.
 
-- `sidebarListForMode` picks the list: `inspectSidebarList` (the menu names), `previewSidebarList` (group headers, or a colored badge plus a tail), or `fileTreeSidebarList` (tree labels and the uncommitted / open / dimmed / directory colors). `selectedIndex` is whatever that mode already chose — the typed-path highlight, `inspectMenu`, or `preview.sel`.
+- `sidebarListForMode` picks the list: `inspectSidebarList` (the menu names), `previewSidebarList` (group headers, or a colored badge plus a tail), `reviewSidebarList` (the reviewed files' folder tree), `externalHistorySidebarList` (command badges plus times), or `fileTreeSidebarList` (tree labels and the uncommitted / open / dimmed / directory colors). `selectedIndex` is whatever that mode already chose — the typed-path highlight, `inspectMenu`, or a `listSelection`.
+- `sidebarHeaderRow` and `sidebarBadgeRow` build the two row shapes every two-pane view uses (a group header; an indent, a colored badge in a column sized to leave a gap, then a tail), and `listSelection` is the left-list selection those views move with Shift+↑/↓.
 - `renderSidebarList` draws the visible window. A selected row is one selection-bar label; an unselected row keeps each segment's own style, and the last segment fills the remaining width.
-- `sidebarListClickIndex` maps a cell to a row with `sidebarWindowStart`, the same centering the renderer uses (a negative index starts at the top). `activateSidebarRow` then acts: query and edit open a file or expand a directory (popup stays hidden; a directory click from edit stashes the draft), inspection selects that menu row, and a preview jumps via `jumpPreviewOutline`. Diff, blame, search, conflict, and the command bars draw the file tree but leave the click as a miss.
+- `sidebarListClickIndex` maps a cell to a row with `sidebarWindowStart`, the same centering the renderer uses (a negative index starts at the top). `activateSidebarRow` then acts: query and edit open a file or expand a directory (popup stays hidden; a directory click from edit stashes the draft), inspection selects that menu row, a preview jumps via `jumpPreviewOutline`, review folds a clicked folder or selects a clicked file (`activateReviewRow`), and the history view selects the clicked message. Diff, blame, search, conflict, and the command bars draw the file tree but leave the click as a miss.
 
 *Plus small helpers: `sidebarWindowStart`, `renderSidebarRow`, `sidebarRowPlain`, `sidebarSegmentText`, `fileTreeEntryStyle`, `activateFileTreeRow` — window math, row painting, tree colors, and the file-tree click itself.*
 
 #### render_diff.go
 
-- `renderDiff` draws the unified review: buffer line numbers that advance only past ctx/add rows, `+`/`-` markers in the gutter spacer column, green/red row tints, and ctx/add rows reusing the edit session's highlight cache (valid because diff mode blocks edits).
+- `renderDiffDocument` draws any `diffDocument` — git diff mode's and each review file's: new-side line numbers that advance only past ctx/add rows, `+`/`-` markers in the gutter spacer column, green/red row tints, ctx/add rows from the document's highlight cache, and (through `diffSearchOverlay`) a document search's matches. `renderDiff` passes it the live buffer's document.
 - `renderDiffCursorLine` is the cursor-row renderer shared with blame and conflict modes: renderEditLine's window walk in three style runs, with the row's own tint instead of an unconditional cursor-line repaint.
 
-*Plus small helpers: `renderDiffBufLine`, `diffCursorRowStyle`, `renderDiffStatus` — cached-vs-plain row drawing, cursor fill choice, and the status row.*
+*Plus small helpers: `renderHighlightedLine`, `renderDiffBufLine` (the same over the edit session's cache, for blame and conflict), `diffGutterWidth` (shared with click hit-testing), `diffCursorRowStyle`, `renderDiffStatus` — cached-vs-plain row drawing, gutter width, cursor fill choice, and the status row.*
 
 #### render_blame.go
 
@@ -550,13 +627,13 @@ The op-commands panel in the inspect dashboard.
 #### mouse.go
 
 - `handleMouse` routes mouse input: left-click (and Ctrl+click = jump-to-definition) places the cursor; the vertical wheel scrolls. Drags, releases, and horizontal wheel are deliberately ignored so a trackpad swipe never moves the cursor. Overlays own their own navigation and swallow everything. Tab-strip and sidebar clicks are checked first (they sit above the mode-specific content handlers); misses fall through untouched.
-- `editClickTarget` maps a terminal cell to a buffer position by mirroring View/renderFile's exact layout math — header, borders, tab strip, `sidebarWidth` (the single source of truth shared with View so click math can't drift), gutter, viewport, and the cursor line's horizontal window. `diffClickTarget` and `blameClickTarget` are the same math over their own rows and gutters.
-- `handleEditClick` anchors the viewport explicitly so a click never drags the view: an ordinary click freezes the window, clicking the top visible line pages up, the bottom visible line pages down. `handleDiffClick`/`handleBlameClick` reuse the same anchoring.
+- `editClickTarget` maps a terminal cell to a buffer position by mirroring View/renderFile's exact layout math — header, borders, tab strip, `sidebarWidth` (the single source of truth shared with View so click math can't drift), gutter, viewport, and the cursor line's horizontal window. `rowViewClickTarget` is the same math for every read-only row view (diff, blame, review), given the view's cursor span, gutter width, and the rows drawn above it.
+- `handleEditClick` anchors the viewport explicitly so a click never drags the view: an ordinary click freezes the window, clicking the top visible line pages up, the bottom visible line pages down. `rowCursor.clickedAt` is the same anchoring for the row views (`handleDiffClick`, `handleBlameClick`, `handleReviewClick`).
 - `handleSidebarClick` asks `sidebarListClickIndex` which row was hit, then `activateSidebarRow` (both in sidebarlist.go). Rows start at y=2 with no tab offset — the strip lives in the main pane — and the window is the same one the list was drawn with. A miss falls through to the main-pane handler.
 - `tabClickTarget` maps a cell on the strip row to a tab index via `tabStripWindow`, honoring the sliding window and treating the trailing fill as a miss; `handleTabStripClick` switches through `activateTab` (draft stash/restore, so unsaved tabs stay red) and swallows a click on the already-active tab.
 - `wheelScroll` dispatches a wheel notch per mode — moving the cursor where the viewport follows it (edit/diff/blame/preview/conflict), nudging the scroll offset in the query view.
 
-*Plus the shared layout constants — `sidebarWidth`, `statusRowCount`/`bodyHeight`/`sidebarInnerHeight` (a pinned test keeps `statusRowCount` agreeing with `renderStatusLine`), `overlayOpen`, and `tabStripVisible` — one source of truth each for render() and the hit-testers.*
+*Plus the shared layout constants — `sidebarWidth`, `statusRowCount`/`bodyHeight`/`sidebarInnerHeight` (a pinned test keeps `statusRowCount` agreeing with `renderStatusLine`), `overlayOpen`, and `tabStripVisible` (hidden in the list + detail views) — one source of truth each for render() and the hit-testers.*
 
 ### Persistence & lifecycle
 

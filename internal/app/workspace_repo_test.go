@@ -298,8 +298,8 @@ func TestWorkspaceGitDiffUsesFileRepo(t *testing.T) {
 	}
 	res, _ := m.Update(cmd())
 	m = res.(Model)
-	if m.diffNewFile || m.diffAdds != 1 || m.diffDels != 1 || m.errText != "" {
-		t.Fatalf("workspace diff: newFile=%v adds=%d dels=%d err=%q", m.diffNewFile, m.diffAdds, m.diffDels, m.errText)
+	if m.diffDocument.newFile || m.diffDocument.adds != 1 || m.diffDocument.dels != 1 || m.errText != "" {
+		t.Fatalf("workspace diff: newFile=%v adds=%d dels=%d err=%q", m.diffDocument.newFile, m.diffDocument.adds, m.diffDocument.dels, m.errText)
 	}
 }
 
@@ -313,8 +313,8 @@ func TestRepoRootGitDiffAndBlame(t *testing.T) {
 	m = next.(Model)
 	res, _ := m.Update(cmd())
 	m = res.(Model)
-	if m.diffNewFile || m.diffAdds != 1 || m.diffDels != 1 || m.errText != "" {
-		t.Fatalf("repo-root diff: newFile=%v adds=%d dels=%d err=%q", m.diffNewFile, m.diffAdds, m.diffDels, m.errText)
+	if m.diffDocument.newFile || m.diffDocument.adds != 1 || m.diffDocument.dels != 1 || m.errText != "" {
+		t.Fatalf("repo-root diff: newFile=%v adds=%d dels=%d err=%q", m.diffDocument.newFile, m.diffDocument.adds, m.diffDocument.dels, m.errText)
 	}
 
 	m = m.exitDiff()

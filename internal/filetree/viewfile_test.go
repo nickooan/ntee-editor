@@ -130,3 +130,37 @@ func TestWriteViewFileFollowsInRootSymlink(t *testing.T) {
 		t.Error("the link itself should survive a save")
 	}
 }
+
+func TestReadContainedFileKeepsErrorsAndJail(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "bin"), []byte{0, 1, 2}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "escape")); err != nil {
+		t.Fatal(err)
+	}
+
+	if data, binary, err := ReadContainedFile(root, "a.txt"); err != nil || binary || string(data) != "hi" {
+		t.Fatalf("read = %q %v %v", data, binary, err)
+	}
+	if _, binary, err := ReadContainedFile(root, "bin"); err != nil || !binary {
+		t.Fatalf("binary sniff: %v %v", binary, err)
+	}
+	if _, _, err := ReadContainedFile(root, "gone.txt"); !os.IsNotExist(err) {
+		t.Fatalf("a missing file reports not-exist: %v", err)
+	}
+	if _, _, err := ReadContainedFile(root, "../x"); err == nil || os.IsNotExist(err) {
+		t.Fatalf("an escape is refused, not reported missing: %v", err)
+	}
+
+	if !IsContained(root, "gone/deeper.txt") || !IsContained(root, "a.txt") {
+		t.Fatal("paths inside the root are contained, existing or not")
+	}
+	if IsContained(root, "../x") || IsContained(root, "escape/file") {
+		t.Fatal("lexical and symlink escapes are not contained")
+	}
+}

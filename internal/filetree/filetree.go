@@ -5,6 +5,7 @@ package filetree
 
 import (
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -459,6 +460,73 @@ func BuildFileTreeEntries(root string, expanded map[string]bool, ignore []string
 	}
 
 	appendDir("", 0, false, rootChain)
+	return entries
+}
+
+// BuildPathTreeEntries lays out a fixed set of slash paths (files) as the
+// sidebar tree — directories first, then files, by name at every level: the
+// order and FileTreeEntry shape BuildFileTreeEntries gives the real tree —
+// without touching the disk. Directories are expanded unless collapsed holds
+// them; a collapsed directory's subtree is left out. Review mode lays out its
+// file set with it.
+func BuildPathTreeEntries(paths []string, collapsed map[string]bool) []FileTreeEntry {
+	children := map[string][]dirChild{}
+	seen := map[string]bool{}
+	for _, rawPath := range paths {
+		cleaned := strings.Trim(path.Clean("/"+rawPath), "/")
+		if cleaned == "" || seen[cleaned] {
+			continue
+		}
+		parts := strings.Split(cleaned, "/")
+		parent := ""
+		for index, part := range parts {
+			rel := part
+			if parent != "" {
+				rel = parent + "/" + part
+			}
+			isDir := index < len(parts)-1
+			if !seen[rel] {
+				seen[rel] = true
+				children[parent] = append(children[parent], dirChild{name: part, isDir: isDir, isFile: !isDir})
+			}
+			parent = rel
+		}
+	}
+	for _, list := range children {
+		sort.Slice(list, func(i, j int) bool {
+			if list[i].isDir != list[j].isDir {
+				return list[i].isDir
+			}
+			return list[i].name < list[j].name
+		})
+	}
+
+	entries := make([]FileTreeEntry, 0, len(seen))
+	var appendDir func(dirPath string, depth int)
+	appendDir = func(dirPath string, depth int) {
+		for _, child := range children[dirPath] {
+			rel := child.name
+			if dirPath != "" {
+				rel = dirPath + "/" + child.name
+			}
+			if child.isDir {
+				expanded := !collapsed[rel]
+				entries = append(entries, FileTreeEntry{
+					Name: child.name, RelativePath: rel, CommandValue: rel + "/",
+					Depth: depth, Type: "directory", IsExpanded: expanded,
+				})
+				if expanded {
+					appendDir(rel, depth+1)
+				}
+				continue
+			}
+			entries = append(entries, FileTreeEntry{
+				Name: child.name, RelativePath: rel, CommandValue: rel,
+				Depth: depth, Type: "file",
+			})
+		}
+	}
+	appendDir("", 0)
 	return entries
 }
 

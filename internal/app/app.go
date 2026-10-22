@@ -6,6 +6,7 @@ package app
 import (
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -48,22 +49,31 @@ const (
 	modeEdit
 	modeSearch
 	modeCommand
-	modeExec       // "@exec >" editor-command bar (Ctrl+E from edit mode)
-	modeSearchExec // "@search … >" replace-command bar (Ctrl+E from search mode)
-	modeInspect    // "@inspection >" dashboard (Ctrl+T): store stats + lsp control
-	modeDiff       // read-only git-diff review of the open file ("git diff" in @exec)
-	modeConflict   // interactive conflict resolution over the live buffer ("git scf" in @exec)
-	modeOpenAPI    // read-only OpenAPI v3 preview of the open spec file ("openapi" in @exec)
-	modeBlame      // read-only git-blame annotation of the open file ("git blame" in @exec)
-	modeGraphQL    // read-only GraphQL SDL schema preview ("graphql" in @exec)
+	modeExec            // "@exec >" editor-command bar (Ctrl+E from edit mode)
+	modeSearchExec      // "@search … >" replace-command bar (Ctrl+E from search mode)
+	modeInspect         // "@inspection >" dashboard (Ctrl+T): store stats + lsp control
+	modeDiff            // read-only git-diff review of the open file ("git diff" in @exec)
+	modeConflict        // interactive conflict resolution over the live buffer ("git scf" in @exec)
+	modeOpenAPI         // read-only OpenAPI v3 preview of the open spec file ("openapi" in @exec)
+	modeBlame           // read-only git-blame annotation of the open file ("git blame" in @exec)
+	modeGraphQL         // read-only GraphQL SDL schema preview ("graphql" in @exec)
+	modeReview          // read-only multi-file change review (an external "review" request)
+	modeExternalHistory // the external-message history (Ctrl+T › external › history)
 )
+
+// inListDetailView reports whether the screen is a two-pane list + detail
+// view that owns both panes (review, message history): the tab strip hides
+// and the left pane is the view's own list.
+func (m Model) inListDetailView() bool {
+	return m.mode == modeReview || m.mode == modeExternalHistory
+}
 
 // inBarMode reports whether keystrokes are feeding a text-input bar, where
 // the global action chords (goto, grep, inspect, …) must not fire.
 func (m Model) inBarMode() bool {
 	return m.mode == modeCommand || m.mode == modeSearch || m.mode == modeExec ||
 		m.mode == modeSearchExec || m.mode == modeInspect ||
-		((m.mode == modeOpenAPI || m.mode == modeGraphQL) && m.preview.searching)
+		((m.mode == modeOpenAPI || m.mode == modeGraphQL) && m.preview.search.active)
 }
 
 type Model struct {
@@ -82,6 +92,7 @@ type Model struct {
 	root            string
 	db              store.Backend
 	workspaceRoot   string // absolute directory the editor was opened on
+	onlyFile        string // single-file mode (`ntee <file>`): the one root-relative file the editor shows
 	workspaceDB     store.Backend
 	workspaceIsRepo bool // the opened directory is itself a git repository
 	rootGen         int
@@ -135,6 +146,19 @@ type Model struct {
 	// by enter/y (delete) or esc/n (cancel). "" = closed.
 	confirmRm    string
 	confirmRmDir bool
+	choice       choiceOverlay // the open modal decision box, if any
+
+	// External messages (a per-project unix socket, Ctrl+T › external):
+	// the stores and socket status, the history view, and the request
+	// waiting for confirmation. externalHistoryGen drops superseded loads.
+	external           externalState
+	externalHistory    externalHistoryState
+	externalHistoryGen int
+	externalPicker     externalPickerState
+
+	// Review mode (an external "review" request): read-only diffs of a file
+	// set that may span nested repos.
+	review reviewState
 
 	// Query input bar (home mode). Three-way state split, ported from
 	// r1quest: `command` is the editable typed text; `selectedCommand` is the
@@ -172,19 +196,15 @@ type Model struct {
 	edit editor
 
 	// Diff review mode ("git diff [hash]" in the @exec bar): a read-only
-	// unified view of the edit buffer vs a git base. diffRows is the display
-	// model (ctx/add rows index into edit.lines; del rows carry the removed
-	// text); it is computed once per entry by an async computeDiffCmd and
-	// guarded against staleness by diffGen. diffPending* carry a Ctrl+O
-	// restore position, applied when the recomputed diff lands.
-	diffRows          []diffRow
-	diffCursor        int // index into diffRows
-	diffCx            int // rune column within the cursor row (Ctrl+J targeting)
-	diffScrollY       int
-	diffBase          string // "" = HEAD; else the user-typed revision
-	diffNewFile       bool   // base has no such path: the whole file is added
-	diffAdds          int
-	diffDels          int
+	// unified view of the edit buffer vs a git base. diffDocument is the
+	// display model (ctx/add rows index into edit.lines, which
+	// liveDiffDocument binds at use; del rows carry the removed text); it is
+	// computed once per entry by an async computeDiffCmd and guarded against
+	// staleness by diffGen. diffPending* carry a Ctrl+O restore position,
+	// applied when the recomputed diff lands.
+	diffDocument      diffDocument
+	diffPosition      rowCursor // column is the rune column within the cursor row (Ctrl+J targeting)
+	diffBase          string    // "" = HEAD; else the user-typed revision
 	diffLoading       bool
 	diffGen           int
 	diffPendingCursor int
@@ -197,11 +217,9 @@ type Model struct {
 	// computeBlameCmd and guarded against staleness by blameGen.
 	// blamePending* carry a Ctrl+O restore position.
 	blameRows          []blameRow
-	blameCursor        int // index into blameRows == buffer line
-	blameCx            int // rune column within the cursor row (Ctrl+J targeting)
-	blameScrollY       int
-	blameAuthorW       int  // author column width: min(longest author, blameAuthorCap)
-	blameNewFile       bool // untracked path or empty repo: everything uncommitted
+	blamePosition      rowCursor // row == buffer line; column is the rune column (Ctrl+J targeting)
+	blameAuthorW       int       // author column width: min(longest author, blameAuthorCap)
+	blameNewFile       bool      // untracked path or empty repo: everything uncommitted
 	blameLoading       bool
 	blameGen           int
 	blamePendingCursor int
@@ -211,7 +229,7 @@ type Model struct {
 	// Document preview modes ("openapi"/"graphql" in the @exec bar): one
 	// read-only rendered document shared by both modes (they are mutually
 	// exclusive; the active previewKind descriptor derives from m.mode).
-	// preview.cursor is the highlighted document row — the Esc source-jump
+	// preview.position.row is the highlighted document row — the Esc source-jump
 	// target; every rendered row carries a {file, line} anchor back into its
 	// source, including rows from cross-file $refs / sibling schema files.
 	preview previewState
@@ -246,6 +264,7 @@ type Model struct {
 	// for search mode and the openapi/graphql preview searches.
 	searchMC      *matchCache
 	previewMC     *matchCache
+	reviewMC      *matchCache
 	frames        *frameCache
 	grepPreviewRC *regexCache
 
@@ -398,6 +417,7 @@ type Model struct {
 	// grepSearchGen). grepResultsGen == grepSearchGen means the displayed
 	// results are current.
 	grepOpen       bool
+	grepTarget     grepTarget // where Enter on a hit goes
 	grepQuery      string
 	grepCursor     int // rune offset into grepQuery
 	grepIndex      int
@@ -433,6 +453,7 @@ func New(cfg config.Config, db store.Backend, root, notice string, reg lsp.Regis
 		openBrowser:     browser.Open,
 		searchMC:        &matchCache{},
 		previewMC:       &matchCache{},
+		reviewMC:        &matchCache{},
 		frames:          &frameCache{},
 		grepPreviewRC:   &regexCache{},
 		opStore:         store.NewMemoryOpCommands(),
@@ -644,7 +665,7 @@ func (m Model) Init() tea.Cmd {
 	// workspace, a cold start discovers them inside the corpus rebuild; a warm
 	// start, or a start rooted inside a repo (whose walk never covers the
 	// workspace), scans for them now.
-	if !m.workspaceIsRepo && (m.activeRepo != "" || !m.corpusBuiltAt.IsZero()) {
+	if !m.workspaceIsRepo && m.onlyFile == "" && (m.activeRepo != "" || !m.corpusBuiltAt.IsZero()) {
 		cmds = append(cmds, m.scanWorkspaceReposCmd())
 	}
 	return tea.Batch(cmds...)
@@ -836,6 +857,9 @@ func (m Model) ensureCorpus() (Model, tea.Cmd) {
 // the corpus. Safe to run concurrently: dirCache is mutex-guarded and the
 // captured root/ignore are read-only.
 func (m Model) rebuildCorpusCmd() tea.Cmd {
+	if m.onlyFile != "" {
+		return m.onlyFileCorpusCmd()
+	}
 	root, rootGen := m.root, m.rootGen
 	ignore := m.cfg.Tree.Ignore
 	maxFiles := m.cfg.Tree.MaxIndexFiles
@@ -1043,6 +1067,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case previewReadyMsg:
 		return m.handlePreviewReady(msg)
 
+	case reviewPreparedMsg:
+		return m.handleReviewPrepared(msg)
+
+	case reviewLoadedMsg:
+		return m.handleReviewLoaded(msg)
+
+	case externalMessageMsg:
+		return m.handleExternalMessage(msg)
+
+	case externalStatusSavedMsg:
+		if msg.err != nil {
+			m.errText = "external history: " + msg.err.Error()
+		}
+		if m.mode == modeExternalHistory || m.mode == modeInspect {
+			return m.loadExternalHistoryCmd()
+		}
+		return m, nil
+
+	case externalHistoryLoadedMsg:
+		return m.handleExternalHistoryLoaded(msg)
+
+	case externalSettingsMsg:
+		return m.handleExternalSettings(msg)
+
 	case grepBatchMsg:
 		return m.handleGrepBatch(msg)
 
@@ -1103,6 +1151,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.notice = ""
 		m.errText = ""
 
+		if m.choice.open() {
+			return m.handleChoiceKey(k)
+		}
 		if m.messageOverlay != "" {
 			if k == "enter" || k == "esc" {
 				m.messageOverlay = ""
@@ -1110,20 +1161,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		if m.confirmRm != "" {
-			// The :rm confirmation modal: enter/y deletes, esc/n cancels,
-			// everything else is swallowed (the messageOverlay contract).
-			rel := m.confirmRm
-			switch k {
-			case "enter", "y":
-				m.confirmRm, m.confirmRmDir = "", false
-				return m.queryRemove(rel)
-			case "esc", "n":
-				m.confirmRm, m.confirmRmDir = "", false
-				m.notice = "rm cancelled"
-			}
-			return m, nil
-		}
 		if m.fuzzyOpen {
 			return m.handleFuzzyKey(msg)
 		}
@@ -1135,6 +1172,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.opMode.open {
 			return m.handleOpKey(msg)
+		}
+		// The list + detail views own every key: the project-wide chords would
+		// open files or switch repos underneath them (review scopes its own
+		// Ctrl+P / Ctrl+G to the reviewed files).
+		switch m.mode {
+		case modeReview:
+			return m.handleReviewKey(msg)
+		case modeExternalHistory:
+			return m.handleExternalHistoryKey(msg)
 		}
 		if action, bound := m.keys.ActionFor(k); bound && !m.inBarMode() {
 			switch action {
@@ -1188,7 +1234,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // Only the grep query and the edit buffer are multi-line — the single-line
 // bars take the paste with newlines collapsed to spaces.
 func (m Model) handlePaste(text string) (tea.Model, tea.Cmd) {
-	if m.messageOverlay != "" || m.defPickOpen || m.confirmRm != "" {
+	if m.messageOverlay != "" || m.defPickOpen || m.choice.open() {
 		return m, nil
 	}
 	if m.fuzzyOpen {
@@ -1237,9 +1283,12 @@ func (m Model) handlePaste(text string) (tea.Model, tea.Cmd) {
 			m.inspectInput, m.inspectCursor = input.InsertAtCursor(m.inspectInput, m.inspectCursor, pasteLine(text))
 		}
 	case modeOpenAPI, modeGraphQL:
-		if m.preview.searching {
-			m.preview.search += pasteLine(text)
-			m = m.focusPreviewMatch()
+		if m.preview.search.active {
+			m = m.landPreviewSearch(m.preview.search.typed(pasteLine(text), m.previewMatchesFor, m.preview.position.row))
+		}
+	case modeReview:
+		if m.review.search.active {
+			m = m.landReviewSearch(m.review.search.typed(pasteLine(text), m.reviewMatchesFor, m.review.position.row))
 		}
 	}
 	return m, nil
@@ -1440,6 +1489,14 @@ func (m Model) treeEntries() []filetree.FileTreeEntry {
 	if f != nil && f.treeOk && f.treeSeq == f.seq && f.treeKey == key {
 		return f.entries
 	}
+	if m.onlyFile != "" {
+		// Single-file mode: the tree is that file alone.
+		entries := filetree.BuildPathTreeEntries([]string{m.onlyFile}, nil)
+		if f != nil {
+			f.treeOk, f.treeSeq, f.treeKey, f.entries = true, f.seq, key, entries
+		}
+		return entries
+	}
 	entries := filetree.BuildFileTreeEntries(
 		m.root,
 		filetree.BuildExpandedDirectoryPaths(key),
@@ -1503,6 +1560,30 @@ func (m Model) openFileAt(rel string) Model {
 		m.messageOverlay = f.FileName + " looks like a binary file."
 		return m
 	}
+	return m.showOpenedFile(rel, f)
+}
+
+// openNewFileAt opens rel — a path that does not exist yet — as an empty
+// buffer, like vim: the save path creates the file on the first Ctrl+S. A
+// stashed draft (the user switched away before saving) is restored by
+// showOpenedFile. The path is jailed like every other open.
+func (m Model) openNewFileAt(rel string) Model {
+	if !filetree.IsContained(m.root, rel) {
+		m.errText = "cannot open " + rel
+		return m
+	}
+	m = m.showOpenedFile(rel, filetree.OpenViewFile{
+		FileName: path.Base(rel),
+		Path:     filepath.Join(m.root, filepath.FromSlash(rel)),
+	})
+	m.notice = "new file — saved on first " + m.keys.Label(keymap.Save)
+	return m
+}
+
+// showOpenedFile puts a loaded file in front of the user: the buffer being
+// left is stashed, the new one gets an edit session, its draft, a tab, and
+// its remembered cursor. Shared by openFileAt and openNewFileAt.
+func (m Model) showOpenedFile(rel string, f filetree.OpenViewFile) Model {
 	m = m.recordCursor()      // remember where we were in the file being left
 	m = m.stashDraftIfDirty() // the old buffer's unsaved edits become a draft
 	if m.openFile != nil && m.openFile.Path != f.Path {
@@ -1553,9 +1634,13 @@ func (m Model) refreshFileHighlights() Model {
 	// Search, diff-review, and conflict-solving modes always sit on top of a
 	// live edit session, so the buffer — not the on-disk snapshot — is the
 	// truth there too (conflict mode even mutates it in place). The inspection
-	// dashboard only pauses whatever mode it opened over.
+	// dashboard, the external-message history over it, and review mode only
+	// pause whatever mode they opened over.
 	md := m.mode
-	if md == modeInspect {
+	switch md {
+	case modeReview:
+		md = m.review.previousMode
+	case modeInspect, modeExternalHistory:
 		md = m.inspectPrevMode
 	}
 	var hash string

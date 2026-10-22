@@ -548,11 +548,11 @@ func TestSidebarClickJumpsPreviewOutline(t *testing.T) {
 		{Label: "GET /pets", Depth: 1, Badge: "GET", Tail: "/pets", LineIdx: 4},
 	}
 	m.preview.lines = make([]previewLine, 8)
-	m.preview.sel = 0
-	m.preview.cursor = 0
+	m.preview.selection.index = 0
+	m.preview.position.row = 0
 	m = click(m, 2, 3)
-	if m.preview.sel != 1 || m.preview.cursor != 4 {
-		t.Fatalf("outline click: sel=%d cursor=%d, want 1 and 4", m.preview.sel, m.preview.cursor)
+	if m.preview.selection.index != 1 || m.preview.position.row != 4 {
+		t.Fatalf("outline click: sel=%d cursor=%d, want 1 and 4", m.preview.selection.index, m.preview.position.row)
 	}
 }
 

@@ -1,6 +1,9 @@
 package app
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 )
@@ -22,6 +25,22 @@ func splitLineAnchor(text string) (pathText string, line int) {
 		line, _ = strconv.Atoi(text[match[2]:match[3]])
 	}
 	return text[:match[0]], line
+}
+
+// SplitLineAnchor is splitLineAnchor for the command line (`ntee file#L42`),
+// so the CLI and the editor read anchors the same way.
+func SplitLineAnchor(text string) (pathText string, line int) {
+	return splitLineAnchor(text)
+}
+
+// WithStartFile opens rel (root-relative) at startup — `ntee <file>` — at a
+// 1-based line (0 = the remembered position). A path that doesn't exist yet
+// opens as a new, empty file, created on the first save.
+func (m Model) WithStartFile(rel string, line int) Model {
+	if _, err := os.Stat(filepath.Join(m.root, filepath.FromSlash(rel))); errors.Is(err, os.ErrNotExist) {
+		return m.openNewFileAt(rel)
+	}
+	return m.openFileAtLine(rel, line)
 }
 
 // jumpCursorToLine moves the cursor to a 1-based line (clamped to the buffer)

@@ -1,48 +1,22 @@
 package app
 
 import (
-	"bytes"
 	"errors"
 	"os/exec"
-	"sort"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/nickooan/ntee-editor/internal/diff"
-	"github.com/nickooan/ntee-editor/internal/gitcmd"
 	"github.com/nickooan/ntee-editor/internal/input"
 )
-
-// diffRowKind classifies one display row of the diff review view.
-type diffRowKind uint8
-
-const (
-	diffCtx diffRowKind = iota // unchanged: normal background, numbered
-	diffAdd                    // added: green background, numbered
-	diffDel                    // removed: red background, blank gutter
-)
-
-// diffRow is one rendered line of the unified diff. Ctx/add rows point into
-// m.edit.lines (no text duplication); del rows carry the removed text and
-// point at the buffer line the deletion sits before (its successor, clamped),
-// which is what Esc and Ctrl+J map a del row to. bufLine is non-decreasing
-// down the slice, so buffer-line lookups can binary-search.
-type diffRow struct {
-	kind    diffRowKind
-	bufLine int
-	text    string // del rows only
-}
 
 // diffReadyMsg delivers a computed diff from the worker goroutine. err is a
 // user-facing message ("" on success); gen/rel guard against stale results.
 type diffReadyMsg struct {
-	gen        int
-	rel, base  string
-	rows       []diffRow
-	adds, dels int
-	newFile    bool
-	err        string
+	gen       int
+	rel, base string
+	document  diffDocument
+	err       string
 }
 
 // enterDiff switches to diff review mode and kicks off the async diff
@@ -75,17 +49,30 @@ func (m Model) enterDiff(base string) (tea.Model, tea.Cmd) {
 
 // clearDiffState drops the diff view model and resets every diff field except
 // diffGen, which stays monotonic so in-flight results remain identifiable as
-// stale. Freeing diffRows releases the del rows' text copies.
+// stale. Freeing the document releases the del rows' text copies.
 func (m Model) clearDiffState() Model {
-	m.diffRows = nil
-	m.diffCursor, m.diffCx, m.diffScrollY = 0, 0, 0
+	m.diffDocument = diffDocument{}
+	m.diffPosition = rowCursor{}
 	m.diffBase = ""
-	m.diffNewFile = false
-	m.diffAdds, m.diffDels = 0, 0
 	m.diffLoading = false
 	m.diffHasPending = false
 	m.diffPendingCursor, m.diffPendingScroll = 0, 0
 	return m
+}
+
+// liveDiffDocument binds the diff rows to the edit session they index into:
+// the buffer lines and its highlight cache. Valid because diff mode blocks
+// edits — the buffer is exactly what the rows were computed against.
+func (m Model) liveDiffDocument() diffDocument {
+	document := m.diffDocument
+	document.lines, document.highlights = m.edit.lines, m.hlLines
+	return document
+}
+
+// diffSpan is the diff view's cursor span: the rendered rows below a
+// single-line status, like edit mode.
+func (m Model) diffSpan() rowSpan {
+	return m.liveDiffDocument().span(m.contentHeight() + 1)
 }
 
 // computeDiffCmd snapshots the buffer and runs git + Myers off the UI
@@ -94,48 +81,15 @@ func (m Model) clearDiffState() Model {
 func (m Model) computeDiffCmd() tea.Cmd {
 	gen, rel, base := m.diffGen, m.openRel, m.diffBase
 	root, repoRel, _, _ := m.gitScopeFor(rel)
-	cur := append([]string(nil), m.edit.lines...)
+	current := append([]string(nil), m.edit.lines...)
 	return func() tea.Msg {
-		msg := diffReadyMsg{gen: gen, rel: rel, base: base}
-		rev := base
-		if rev == "" {
-			rev = "HEAD"
+		document, err := computeDiffDocument(root, base, repoRel, current, true)
+		if err != "" {
+			return diffReadyMsg{gen: gen, rel: rel, base: base, err: "git diff: " + err}
 		}
-		if _, err := gitcmd.Out(root, "rev-parse", "--verify", "--end-of-options", rev+"^{commit}"); err != nil {
-			if base != "" {
-				msg.err = "git diff: bad revision: " + base
-				if line := firstStderrLine(err); line != "" {
-					msg.err = "git diff: " + line
-				}
-				return msg
-			}
-			// A bare HEAD that doesn't resolve = a repo with no commits yet:
-			// not an error, everything is new.
-			msg.newFile = true
-		}
-		var old []string
-		if !msg.newFile {
-			out, err := gitcmd.Out(root, "show", rev+":"+repoRel)
-			switch {
-			case err != nil:
-				msg.newFile = true // path absent in that revision: new file
-			case bytes.IndexByte(out, 0) >= 0:
-				msg.err = "git diff: old version is binary"
-				return msg
-			default:
-				old = splitBufferLines(string(out))
-			}
-		}
-		if msg.newFile {
-			msg.rows = make([]diffRow, len(cur))
-			for i := range cur {
-				msg.rows[i] = diffRow{kind: diffAdd, bufLine: i}
-			}
-			msg.adds = len(cur)
-			return msg
-		}
-		msg.rows, msg.adds, msg.dels = buildDiffRows(old, cur)
-		return msg
+		// The rows index the live buffer (liveDiffDocument); drop the snapshot.
+		document.lines = nil
+		return diffReadyMsg{gen: gen, rel: rel, base: base, document: document}
 	}
 }
 
@@ -150,99 +104,31 @@ func (m Model) handleDiffReady(msg diffReadyMsg) (tea.Model, tea.Cmd) {
 		m.mode = modeEdit
 		return m.clearDiffState(), nil
 	}
-	if msg.adds == 0 && msg.dels == 0 {
+	if msg.document.adds == 0 && msg.document.dels == 0 {
 		m.notice = "git diff: no changes"
 		m.mode = modeEdit
 		return m.clearDiffState(), nil
 	}
 	m.diffLoading = false
-	m.diffRows = msg.rows
-	m.diffAdds, m.diffDels = msg.adds, msg.dels
-	m.diffNewFile = msg.newFile
+	m.diffDocument = msg.document
+	rows := m.diffDocument.rows
 	h := m.contentHeight() + 1 // rendered rows: single-line status, like edit mode
 	if m.diffHasPending {
 		// Ctrl+O return: restore the remembered review position, clamped —
 		// the re-derived diff may have fewer rows than when we left.
 		m.diffHasPending = false
-		m.diffCursor = input.Clamp(m.diffPendingCursor, 0, len(m.diffRows)-1)
-		m.diffScrollY = input.Clamp(m.diffPendingScroll, 0, max(0, len(m.diffRows)-h))
+		m.diffPosition.row = input.Clamp(m.diffPendingCursor, 0, len(rows)-1)
+		m.diffPosition.scrollY = input.Clamp(m.diffPendingScroll, 0, max(0, len(rows)-h))
 	} else {
 		// Fresh entry: stay at the current place — same buffer line, same
 		// on-screen row. The exact inverse of the Esc mapping in exitDiff.
 		screenRow := m.edit.cy - fileViewportTop(m.edit.cy, m.fileScrollY, h, len(m.edit.lines))
-		m.diffCursor = diffRowForBufLine(m.diffRows, m.edit.cy)
-		m.diffScrollY = input.Clamp(m.diffCursor-screenRow, 0, max(0, len(m.diffRows)-h))
+		m.diffPosition.row = diffRowForBufLine(rows, m.edit.cy)
+		m.diffPosition.scrollY = input.Clamp(m.diffPosition.row-screenRow, 0, max(0, len(rows)-h))
 	}
-	m.diffCx = input.Clamp(m.edit.cx, 0, len([]rune(m.diffRowText(m.diffCursor))))
+	m.diffPosition.column = m.edit.cx
+	m.diffPosition = m.diffPosition.clampColumn(m.diffSpan())
 	return m, nil
-}
-
-// buildDiffRows converts the Myers edit script into display rows and fills
-// each del row's bufLine with its successor ctx/add row's line (clamped at
-// EOF), walking backwards once.
-func buildDiffRows(old, cur []string) (rows []diffRow, adds, dels int) {
-	ops := diff.Lines(old, cur)
-	rows = make([]diffRow, 0, len(ops))
-	for _, op := range ops {
-		switch op.Kind {
-		case diff.Equal:
-			rows = append(rows, diffRow{kind: diffCtx, bufLine: op.BIdx})
-		case diff.Insert:
-			rows = append(rows, diffRow{kind: diffAdd, bufLine: op.BIdx})
-			adds++
-		case diff.Delete:
-			rows = append(rows, diffRow{kind: diffDel, bufLine: -1, text: old[op.AIdx]})
-			dels++
-		}
-	}
-	next := max(0, len(cur)-1)
-	for i := len(rows) - 1; i >= 0; i-- {
-		if rows[i].kind == diffDel {
-			rows[i].bufLine = next
-		} else {
-			next = rows[i].bufLine
-		}
-	}
-	return rows, adds, dels
-}
-
-// diffRowBufLine maps a display row to its buffer line (del rows map to their
-// successor), clamped so callers can feed any cursor value.
-func diffRowBufLine(rows []diffRow, i int) int {
-	if len(rows) == 0 {
-		return 0
-	}
-	return rows[input.Clamp(i, 0, len(rows)-1)].bufLine
-}
-
-// diffRowForBufLine maps a buffer line to its ctx/add display row. Every
-// buffer line has exactly one such row, and bufLine is non-decreasing, so a
-// binary search plus a skip over the preceding del run lands exactly.
-func diffRowForBufLine(rows []diffRow, line int) int {
-	if len(rows) == 0 {
-		return 0
-	}
-	i := sort.Search(len(rows), func(i int) bool { return rows[i].bufLine >= line })
-	for i < len(rows) && rows[i].kind == diffDel {
-		i++
-	}
-	return input.Clamp(i, 0, len(rows)-1)
-}
-
-// diffRowText is the display text of a row: the live buffer line for ctx/add,
-// the removed copy for del.
-func (m Model) diffRowText(i int) string {
-	if len(m.diffRows) == 0 {
-		return ""
-	}
-	row := m.diffRows[input.Clamp(i, 0, len(m.diffRows)-1)]
-	if row.kind == diffDel {
-		return row.text
-	}
-	if row.bufLine >= 0 && row.bufLine < len(m.edit.lines) {
-		return m.edit.lines[row.bufLine]
-	}
-	return ""
 }
 
 // splitBufferLines splits file content exactly like newEditor does, so the

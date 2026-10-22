@@ -5,7 +5,6 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/nickooan/ntee-editor/internal/input"
 	"github.com/nickooan/ntee-editor/internal/view"
 )
 
@@ -75,12 +74,9 @@ type previewState struct {
 	outline   []previewOutlineEntry
 	plain     []string // per-row plain text (search + match overlay)
 	corpus    string   // plain rows joined with \n (the search corpus)
-	scrollY   int
-	cursor    int
-	sel       int // outline selection index
-	searching bool
-	search    string
-	focused   int // focused match index
+	position  rowCursor
+	selection listSelection // outline selection
+	search    documentSearch
 	loading   bool
 	gen       int
 	title     string
@@ -142,9 +138,9 @@ func (m Model) handlePreviewReady(msg previewReadyMsg) (tea.Model, tea.Cmd) {
 	m.preview.title = msg.title
 	// Land on the rendered row nearest the edit cursor's source line, so
 	// entering and Esc'ing straight back roughly round-trips the position.
-	m.preview.cursor = previewRowForSource(msg.lines, msg.rel, m.edit.cy+1)
+	m.preview.position.row = previewRowForSource(msg.lines, msg.rel, m.edit.cy+1)
 	h := m.contentHeight() + 1
-	m.preview.scrollY = anchorScroll(m.preview.cursor, h, len(m.preview.lines))
+	m.preview.position.scrollY = anchorScroll(m.preview.position.row, h, len(m.preview.lines))
 	return m.syncPreviewSel(), nil
 }
 
@@ -182,15 +178,11 @@ func (m Model) previewSrcAt(idx int) previewSrc {
 // previewMatches is the live match set of the current query over the rendered
 // document's plain text.
 func (m Model) previewMatches() []view.SearchMatch {
-	return m.previewMC.get(m.preview.corpus, m.preview.search)
+	return m.previewMatchesFor(m.preview.search.query)
 }
 
-// movePreviewCursor moves the document cursor by dy rows; the viewport
-// follows via fileViewportTop at render time.
-func (m Model) movePreviewCursor(dy int) Model {
-	if len(m.preview.lines) == 0 {
-		return m // still loading
-	}
-	m.preview.cursor = input.Clamp(m.preview.cursor+dy, 0, len(m.preview.lines)-1)
-	return m.syncPreviewSel()
+// previewSpan is the document's cursor span: rows below a single-line
+// status, no column cursor.
+func (m Model) previewSpan() rowSpan {
+	return rowSpan{total: len(m.preview.lines), height: m.contentHeight() + 1}
 }

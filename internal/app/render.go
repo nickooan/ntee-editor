@@ -43,7 +43,7 @@ func (m Model) render() string {
 	// terminal-default background against the themed panes.
 	mainWidth := max(3, m.width-sidebarWidth)
 
-	sidebarBody := renderSidebarList(m.sidebarListForMode(sidebarWidth-4), sidebarWidth-4, bodyHeight-2)
+	sidebarBody := fitPaneLines(renderSidebarList(m.sidebarListForMode(sidebarWidth-4), sidebarWidth-4, bodyHeight-2), sidebarWidth-4)
 	// lipgloss v2: Width/Height include the border, so the panes take the
 	// full slot (v1 set the inner size and the border grew them by 2).
 	sidebar := paneStyle.Width(sidebarWidth).Height(bodyHeight).Render(sidebarBody)
@@ -57,12 +57,12 @@ func (m Model) render() string {
 
 	var mainBody string
 	switch {
+	case m.choice.open():
+		mainBody = m.choice.render(mainWidth-4, bodyHeight-2)
 	case m.fuzzyOpen:
 		mainBody = m.renderFuzzyOverlay(mainWidth-4, bodyHeight-2)
 	case m.messageOverlay != "":
 		mainBody = m.renderMessageOverlay(mainWidth-4, bodyHeight-2)
-	case m.confirmRm != "":
-		mainBody = m.renderConfirmRmOverlay(mainWidth-4, bodyHeight-2)
 	case m.defPickOpen:
 		mainBody = m.renderDefPickOverlay(mainWidth-4, bodyHeight-2)
 	case m.grepOpen:
@@ -83,6 +83,10 @@ func (m Model) render() string {
 		mainBody = m.renderConflict(mainWidth-4, innerH)
 	case m.mode == modeOpenAPI, m.mode == modeGraphQL:
 		mainBody = m.renderPreview(mainWidth-4, innerH)
+	case m.mode == modeReview:
+		mainBody = m.renderReview(mainWidth-4, innerH)
+	case m.mode == modeExternalHistory:
+		mainBody = m.renderExternalHistory(mainWidth-4, innerH)
 	case m.openFile != nil:
 		mainBody = m.renderFile(mainWidth-4, innerH)
 	default:
@@ -92,10 +96,27 @@ func (m Model) render() string {
 		divider := tabDividerStyle.Render(strings.Repeat("─", max(0, mainWidth-4)))
 		mainBody = m.renderTabStrip(mainWidth-4) + "\n" + divider + "\n" + mainBody
 	}
-	mainPane := paneStyle.Width(mainWidth).Height(bodyHeight).Render(mainBody)
+	mainPane := paneStyle.Width(mainWidth).Height(bodyHeight).Render(fitPaneLines(mainBody, mainWidth-4))
 
 	body := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, mainPane)
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, status)
+}
+
+// fitPaneLines cuts every line of a pane body to width terminal cells. Row
+// renderers window text by runes, but a tab (drawn as 4 spaces) or a wide
+// rune takes more than one cell; an over-wide line would wrap inside the pane
+// and spill its tail into the next row's gutter.
+func fitPaneLines(body string, width int) string {
+	if width < 1 {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	for i, line := range lines {
+		if ansi.StringWidth(line) > width {
+			lines[i] = ansi.Truncate(line, width, "")
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // padStatusRows extends each status row to the full terminal width so the
@@ -184,6 +205,10 @@ func (m Model) renderStatusLine() string {
 		return m.renderConflictStatus()
 	case modeOpenAPI, modeGraphQL:
 		return m.renderPreviewStatus()
+	case modeReview:
+		return m.renderReviewStatus()
+	case modeExternalHistory:
+		return m.renderExternalHistoryStatus()
 	case modeInspect:
 		bar := execPromptStyle.Render("@inspection >") +
 			m.renderInspectInput() +

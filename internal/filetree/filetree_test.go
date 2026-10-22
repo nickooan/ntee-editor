@@ -1,6 +1,9 @@
 package filetree
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func entriesFixture() []FileTreeEntry {
 	return []FileTreeEntry{
@@ -86,5 +89,44 @@ func TestResolveSidebarCommand(t *testing.T) {
 	}
 	if got := ResolveSidebarCommand(":w", "sel"); got != "sel" {
 		t.Fatalf("colon command falls back: %q", got)
+	}
+}
+
+func TestBuildPathTreeEntries(t *testing.T) {
+	paths := []string{"internal/app/b.go", "README.md", "internal/app/a.go", "internal/store/s.go", "cmd/main.go", "internal/z.go", "README.md"}
+	label := func(entries []FileTreeEntry) []string {
+		var out []string
+		for _, entry := range entries {
+			out = append(out, strings.TrimRight(FormatFileTreeEntryLabel(entry, 80), " "))
+		}
+		return out
+	}
+	got := label(BuildPathTreeEntries(paths, nil))
+	want := []string{
+		"↓ cmd",
+		"    main.go",
+		"↓ internal",
+		"  ↓ app",
+		"      a.go",
+		"      b.go",
+		"  ↓ store",
+		"      s.go",
+		"    z.go",
+		"  README.md",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("tree:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+
+	collapsed := BuildPathTreeEntries(paths, map[string]bool{"internal/app": true})
+	got = label(collapsed)
+	if got[3] != "  → app" || got[4] != "  ↓ store" || len(got) != 8 {
+		t.Fatalf("a collapsed directory hides its subtree:\n%s", strings.Join(got, "\n"))
+	}
+	if collapsed[3].Type != "directory" || collapsed[3].IsExpanded || collapsed[3].RelativePath != "internal/app" || collapsed[3].CommandValue != "internal/app/" {
+		t.Fatalf("directory entry = %+v", collapsed[3])
+	}
+	if entries := BuildPathTreeEntries([]string{"/a//b.go", "", "."}, nil); len(entries) != 2 || entries[1].RelativePath != "a/b.go" {
+		t.Fatalf("paths are cleaned and blanks dropped: %+v", entries)
 	}
 }

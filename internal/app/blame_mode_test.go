@@ -170,11 +170,11 @@ func TestBlameEntryStaysAtCurrentPlace(t *testing.T) {
 	m = res.(Model)
 
 	// Rows map 1:1: the cursor stays on the same line and column.
-	if m.blameCursor != 6 || m.blameCx != 2 {
-		t.Fatalf("cursor = (%d, %d), want (6, 2)", m.blameCursor, m.blameCx)
+	if m.blamePosition.row != 6 || m.blamePosition.column != 2 {
+		t.Fatalf("cursor = (%d, %d), want (6, 2)", m.blamePosition.row, m.blamePosition.column)
 	}
-	if m.blameScrollY != 0 {
-		t.Fatalf("blameScrollY = %d", m.blameScrollY)
+	if m.blamePosition.scrollY != 0 {
+		t.Fatalf("blameScrollY = %d", m.blamePosition.scrollY)
 	}
 }
 
@@ -228,18 +228,18 @@ func TestBlameModeIsReadOnly(t *testing.T) {
 
 func TestBlameNavigationAndEsc(t *testing.T) {
 	m, _ := blameFixture(t)
-	m.blameCursor, m.blameCx, m.blameScrollY = 0, 0, 0
+	m.blamePosition.row, m.blamePosition.column, m.blamePosition.scrollY = 0, 0, 0
 	for i := 0; i < 6; i++ {
 		m = key(m, keyPress(tea.KeyDown))
 	}
-	if m.blameCursor != 6 {
-		t.Fatalf("cursor = %d, want 6", m.blameCursor)
+	if m.blamePosition.row != 6 {
+		t.Fatalf("cursor = %d, want 6", m.blamePosition.row)
 	}
-	m.blameCx = 99
+	m.blamePosition.column = 99
 	m = key(m, keyPress(tea.KeyDown))
 	m = key(m, keyPress(tea.KeyUp))
-	if m.blameCx > len([]rune("l6")) {
-		t.Fatalf("blameCx = %d, not clamped", m.blameCx)
+	if m.blamePosition.column > len([]rune("l6")) {
+		t.Fatalf("blameCx = %d, not clamped", m.blamePosition.column)
 	}
 
 	m = key(m, keyPress(tea.KeyEsc))
@@ -256,37 +256,37 @@ func TestBlameNavigationAndEsc(t *testing.T) {
 
 func TestBlameShiftJumpsBetweenGroups(t *testing.T) {
 	m, _ := blameFixture(t) // group starts: rows 0, 5, 8
-	m.blameCursor, m.blameCx, m.blameScrollY = 0, 0, 0
+	m.blamePosition.row, m.blamePosition.column, m.blamePosition.scrollY = 0, 0, 0
 
 	m = key(m, shiftKey(tea.KeyDown))
-	if m.blameCursor != 5 {
-		t.Fatalf("shift+down: cursor = %d, want group 1 start (5)", m.blameCursor)
+	if m.blamePosition.row != 5 {
+		t.Fatalf("shift+down: cursor = %d, want group 1 start (5)", m.blamePosition.row)
 	}
 	m = key(m, shiftKey(tea.KeyDown))
-	if m.blameCursor != 8 {
-		t.Fatalf("shift+down: cursor = %d, want group 2 start (8)", m.blameCursor)
+	if m.blamePosition.row != 8 {
+		t.Fatalf("shift+down: cursor = %d, want group 2 start (8)", m.blamePosition.row)
 	}
 	m = key(m, shiftKey(tea.KeyDown)) // no group below: inert
-	if m.blameCursor != 8 {
-		t.Fatalf("shift+down past the last group moved to %d", m.blameCursor)
+	if m.blamePosition.row != 8 {
+		t.Fatalf("shift+down past the last group moved to %d", m.blamePosition.row)
 	}
 	m = key(m, shiftKey(tea.KeyUp))
-	if m.blameCursor != 5 {
-		t.Fatalf("shift+up: cursor = %d, want group 1 start (5)", m.blameCursor)
+	if m.blamePosition.row != 5 {
+		t.Fatalf("shift+up: cursor = %d, want group 1 start (5)", m.blamePosition.row)
 	}
 	// From inside a group, shift+up lands on its own start.
-	m.blameCursor = 7
+	m.blamePosition.row = 7
 	m = key(m, shiftKey(tea.KeyUp))
-	if m.blameCursor != 5 {
-		t.Fatalf("shift+up inside a group: cursor = %d, want its start (5)", m.blameCursor)
+	if m.blamePosition.row != 5 {
+		t.Fatalf("shift+up inside a group: cursor = %d, want its start (5)", m.blamePosition.row)
 	}
 
 	// Inert while the blame is still loading.
 	m.blameRows = nil
-	m.blameCursor = 0
+	m.blamePosition.row = 0
 	m = key(m, shiftKey(tea.KeyDown))
-	if m.blameCursor != 0 {
-		t.Fatalf("shift+down while loading moved to %d", m.blameCursor)
+	if m.blamePosition.row != 0 {
+		t.Fatalf("shift+down while loading moved to %d", m.blamePosition.row)
 	}
 }
 
@@ -310,7 +310,7 @@ func TestBlameEscWhileLoading(t *testing.T) {
 func TestRenderBlameSmoke(t *testing.T) {
 	m, rows := blameFixture(t)
 	for _, cursor := range []int{0, 5, 8, len(rows) - 1} {
-		m.blameCursor = cursor
+		m.blamePosition.row = cursor
 		frame := ansi.Strip(m.render())
 		for _, want := range []string{"@blame", "ann", "bob", "2026-01-02", "2026-03-04", blameUncommittedLabel} {
 			if !strings.Contains(frame, want) {
@@ -335,31 +335,31 @@ func TestRenderBlameSmoke(t *testing.T) {
 // 2-digit line-number gutter.
 func TestBlameClickPlacesCursor(t *testing.T) {
 	m, _ := blameFixture(t)
-	m.blameCursor, m.blameCx, m.blameScrollY = 0, 0, 0
+	m.blamePosition.row, m.blamePosition.column, m.blamePosition.scrollY = 0, 0, 0
 	// testTextX is edit mode's content start (gutter 2+3); rebase it onto the
 	// blame gutter.
 	blameTextX := testTextX - (2 + 3) + m.blameGutterWidth() + 3
 
 	m = click(m, blameTextX+1, testTextY+6)
-	if m.blameCursor != 6 || m.blameCx != 1 {
-		t.Fatalf("cursor = (%d, %d), want (6, 1)", m.blameCursor, m.blameCx)
+	if m.blamePosition.row != 6 || m.blamePosition.column != 1 {
+		t.Fatalf("cursor = (%d, %d), want (6, 1)", m.blamePosition.row, m.blamePosition.column)
 	}
 	if m.mode != modeBlame {
 		t.Fatalf("mode = %v", m.mode)
 	}
 	// A gutter click lands on the row at column 0; columns clamp to row end.
 	m = click(m, blameTextX-4, testTextY+3)
-	if m.blameCursor != 3 || m.blameCx != 0 {
-		t.Fatalf("gutter click = (%d, %d), want (3, 0)", m.blameCursor, m.blameCx)
+	if m.blamePosition.row != 3 || m.blamePosition.column != 0 {
+		t.Fatalf("gutter click = (%d, %d), want (3, 0)", m.blamePosition.row, m.blamePosition.column)
 	}
 	m = click(m, blameTextX+30, testTextY+1)
-	if m.blameCursor != 1 || m.blameCx != len([]rune("l1")) {
-		t.Fatalf("beyond-EOL click = (%d, %d), want clamped to line end", m.blameCursor, m.blameCx)
+	if m.blamePosition.row != 1 || m.blamePosition.column != len([]rune("l1")) {
+		t.Fatalf("beyond-EOL click = (%d, %d), want clamped to line end", m.blamePosition.row, m.blamePosition.column)
 	}
 	// A click below the last row is a no-op.
-	before := m.blameCursor
+	before := m.blamePosition.row
 	m = click(m, blameTextX, testTextY+20)
-	if m.blameCursor != before {
+	if m.blamePosition.row != before {
 		t.Fatal("click below the blame rows must not move the cursor")
 	}
 }
@@ -412,7 +412,7 @@ func TestBlameJumpAndCtrlOReturnsToBlame(t *testing.T) {
 	}
 
 	// Cursor on the comment row, column inside "lib/util.ts".
-	m.blameCursor, m.blameCx = 1, 10
+	m.blamePosition.row, m.blamePosition.column = 1, 10
 	m = key(m, ctrlKey('j'))
 	if m.openRel != "lib/util.ts" || m.mode != modeEdit {
 		t.Fatalf("jump failed: open=%q mode=%v err=%q", m.openRel, m.mode, m.errText)
@@ -420,7 +420,7 @@ func TestBlameJumpAndCtrlOReturnsToBlame(t *testing.T) {
 	if len(m.blameRows) != 0 {
 		t.Fatal("landing a jump must clear the blame view model")
 	}
-	if len(m.jumpStack) != 1 || !m.jumpStack[0].inBlame || m.jumpStack[0].blameCursor != 1 {
+	if len(m.jumpStack) != 1 || !m.jumpStack[0].inBlame || m.jumpStack[0].blamePosition.row != 1 {
 		t.Fatalf("jump frame = %+v", m.jumpStack)
 	}
 
@@ -436,8 +436,8 @@ func TestBlameJumpAndCtrlOReturnsToBlame(t *testing.T) {
 	// The recomputed blame lands: the position comes back (clamped).
 	res, _ = m.Update(blameReadyMsg{gen: m.blameGen, rel: m.openRel, rows: rows, authorW: 3})
 	m = res.(Model)
-	if m.blameCursor != 1 {
-		t.Fatalf("blameCursor = %d, want restored 1", m.blameCursor)
+	if m.blamePosition.row != 1 {
+		t.Fatalf("blameCursor = %d, want restored 1", m.blamePosition.row)
 	}
 }
 

@@ -51,7 +51,11 @@ func (m Model) activateTab(i int) Model {
 	}
 	i = min(max(i, 0), len(m.tabs)-1)
 	rel := m.tabs[i]
-	if _, err := os.Stat(filepath.Join(m.root, rel)); err != nil {
+	if _, err := os.Stat(filepath.Join(m.root, rel)); err != nil && m.draftSet[rel] {
+		// A new file switched away from before its first save: its work lives
+		// in the draft, so reopen it as new rather than dropping the tab.
+		return m.closeCompletion().openNewFileAt(rel)
+	} else if err != nil {
 		m.tabs = append(m.tabs[:i], m.tabs[i+1:]...)
 		if m.tabActive >= len(m.tabs) {
 			m.tabActive = max(0, len(m.tabs)-1)

@@ -43,6 +43,8 @@ The files divide the work cleanly:
 
 `chainIgnored` asks a shallow-to-deep chain of directory-scoped matchers whether a path is ignored; a deeper file's opinion wins, including `!` re-includes. `loadNestedGitignore` compiles a directory's own `.gitignore` through the mtime-keyed cache, and `extendChain` appends it to the chain — using a full-slice-expression append so sibling recursions can't clobber each other's backing array. `hasGitignore` lets the walk skip all of that for the vast majority of directories that have no `.gitignore` at all.
 
+`BuildPathTreeEntries` lays out a fixed set of paths as the same tree — identical order (directories first, then files, by name) and `FileTreeEntry` shape, so `FormatFileTreeEntryLabel` draws it — from the paths alone, without touching the disk. Directories start expanded; a collapsed one leaves its subtree out. Review mode's left pane is built with it.
+
 `FindRepoRoot` walks up from a file to the nearest `.git` (bounded by the editor root); `FindProjectRoot` does the same for language-project markers (`go.mod`, `package.json`, `Cargo.toml`, …) so a language server in a monorepo scopes to the sub-project, not the whole repo. `FindNestedGitRepos` lists every directory under a workspace root that contains a `.git` entry (the root itself excluded), using the same cached listings as the tree — this is what Ctrl+W offers.
 
 `BuildExpandedDirectoryPaths` turns a typed command path into the set of directories to expand — every ancestor, plus the last segment when the path ends in `/`. `FindFileTreeMatchIndex` picks the entry a typed input refers to (exact full path beats exact name beats prefix beats substring — so a root-level `main.go` is not shadowed by an earlier nested `web/main.go`), and `ResolveHighlightedEntry` falls back to the nearest expanded ancestor directory when nothing matches.
@@ -61,7 +63,7 @@ The files divide the work cleanly:
 
 ### viewfile.go
 
-`ReadViewFile` loads a file for viewing/editing through the jail. Read errors surface *as the file content* (the caller just displays them), and `looksBinary` — the classic NUL-byte-in-the-first-8KB heuristic — flags native files so the editor doesn't render garbage.
+`ReadViewFile` loads a file for viewing/editing through the jail. Read errors surface *as the file content* (the caller just displays them), and `looksBinary` — the classic NUL-byte-in-the-first-8KB heuristic — flags native files so the editor doesn't render garbage. `ReadContainedFile` is the same jailed read for callers that must tell outcomes apart — review mode treats a missing file as a deletion — so it returns the error instead (`fs.ErrNotExist` for a missing file, `fs.ErrInvalid` for a jail escape). `IsContained` is the jail check alone, for paths named by outside callers (external messages) whether or not they exist yet.
 
 `WriteViewFile` is the atomic save: temp file in the target's directory, content written, permissions copied from the existing file (0644 for new ones), then a rename over the target. Saving through an in-root symlink replaces the resolved file and leaves the link intact.
 

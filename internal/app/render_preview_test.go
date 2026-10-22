@@ -20,7 +20,7 @@ func TestRenderPreviewSidebarRows(t *testing.T) {
 
 	m.mode = modeOpenAPI
 	m.preview.outline = outline
-	m.preview.sel = 0
+	m.preview.selection.index = 0
 	got := ansi.Strip(renderSidebarList(m.previewSidebarList(), 30, 5))
 	rows := strings.Split(got, "\n")
 	if len(rows) != 2 {
@@ -47,7 +47,7 @@ func TestRenderPreviewSidebarRows(t *testing.T) {
 	}
 
 	// Selected entry renders badge+tail as one highlighted label.
-	m.preview.sel = 1
+	m.preview.selection.index = 1
 	got = ansi.Strip(renderSidebarList(m.previewSidebarList(), 30, 5))
 	rows = strings.Split(got, "\n")
 	if !strings.HasPrefix(rows[1], "  type  User") {

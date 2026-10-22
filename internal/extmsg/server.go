@@ -93,6 +93,10 @@ func serve(conn net.Conn, handler Handler) {
 	case len(data) == 0 && err == nil:
 		return // a liveness probe (Discover, a second instance): connect, close
 	case len(data) > MaxMessageBytes:
+		// Drain the rest (still under the read deadline) before answering:
+		// closing with unread input would fail the sender's in-flight write
+		// and it would never see this reply.
+		_, _ = io.Copy(io.Discard, conn)
 		reply = ErrorReply("message too large")
 	case err != nil:
 		reply = ErrorReply("message not completed within the read timeout — close the write side when done")

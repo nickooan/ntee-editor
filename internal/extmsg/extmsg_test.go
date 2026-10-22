@@ -172,3 +172,29 @@ func TestDiscoverWalksUpToARunningEditor(t *testing.T) {
 		t.Fatalf("Discover = %q %q %v", root, found, err)
 	}
 }
+
+// TestSendReadsAnEarlyReply pins the client side of an early answer: a server
+// that replies and closes without reading the whole request (the oversize
+// refusal) fails the client's write, and the reply must still come through.
+func TestSendReadsAnEarlyReply(t *testing.T) {
+	socketPath := filepath.Join(shortSocketDir(t), "early.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		buffer := make([]byte, 16)
+		_, _ = conn.Read(buffer) // read a little, then answer and hang up
+		_, _ = conn.Write([]byte("error message too large\n"))
+		conn.Close()
+	}()
+	reply, err := Send(socketPath, strings.Repeat("x", 8<<20))
+	if err != nil || reply != "error message too large" {
+		t.Fatalf("reply = %q, %v", reply, err)
+	}
+}

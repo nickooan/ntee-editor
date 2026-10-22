@@ -25,20 +25,29 @@ func Send(socketPath, text string) (string, error) {
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(replyTimeout))
+	writeErr := writeRequest(conn, text)
+	reply, readErr := io.ReadAll(io.LimitReader(conn, 64<<10))
+	// The editor may answer and close before reading everything (a refused
+	// oversize request): the write then fails, but its reply is still there.
+	if line := strings.TrimSpace(string(reply)); line != "" {
+		return line, nil
+	}
+	if writeErr != nil {
+		return "", writeErr
+	}
+	return "", readErr
+}
+
+// writeRequest sends the request and half-closes — the end-of-request marker
+// the server reads up to.
+func writeRequest(conn net.Conn, text string) error {
 	if _, err := io.WriteString(conn, text); err != nil {
-		return "", err
+		return err
 	}
-	// The half-close is the end-of-request marker the server reads up to.
 	if unixConn, ok := conn.(*net.UnixConn); ok {
-		if err := unixConn.CloseWrite(); err != nil {
-			return "", err
-		}
+		return unixConn.CloseWrite()
 	}
-	reply, err := io.ReadAll(io.LimitReader(conn, 64<<10))
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(reply)), nil
+	return nil
 }
 
 // Discover finds the editor serving startDir: the nearest ancestor (startDir

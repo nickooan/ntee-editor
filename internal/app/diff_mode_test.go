@@ -100,10 +100,10 @@ func diffFixture(t *testing.T) (Model, []diffRow) {
 	if cmd == nil || m.mode != modeDiff || !m.diffLoading {
 		t.Fatalf("enterDiff: mode=%v loading=%v cmd=%v", m.mode, m.diffLoading, cmd)
 	}
-	res, _ := m.Update(diffReadyMsg{gen: m.diffGen, rel: m.openRel, rows: rows, adds: adds, dels: dels})
+	res, _ := m.Update(diffReadyMsg{gen: m.diffGen, rel: m.openRel, document: diffDocument{rows: rows, adds: adds, dels: dels}})
 	m = res.(Model)
-	if m.diffLoading || len(m.diffRows) != len(rows) {
-		t.Fatalf("diff did not land: loading=%v rows=%d", m.diffLoading, len(m.diffRows))
+	if m.diffLoading || len(m.diffDocument.rows) != len(rows) {
+		t.Fatalf("diff did not land: loading=%v rows=%d", m.diffLoading, len(m.diffDocument.rows))
 	}
 	return m, rows
 }
@@ -118,19 +118,19 @@ func TestDiffEntryStaysAtCurrentPlace(t *testing.T) {
 	m.edit.cy, m.edit.cx = 6, 2
 	next, _ := m.enterDiff("")
 	m = next.(Model)
-	res, _ := m.Update(diffReadyMsg{gen: m.diffGen, rel: m.openRel, rows: rows, adds: adds, dels: dels})
+	res, _ := m.Update(diffReadyMsg{gen: m.diffGen, rel: m.openRel, document: diffDocument{rows: rows, adds: adds, dels: dels}})
 	m = res.(Model)
 
 	// Buffer line 6 sits after one add and one del row: its diff row is 7.
-	if m.diffCursor != 7 {
-		t.Fatalf("diffCursor = %d, want 7 (buffer line 6)", m.diffCursor)
+	if m.diffPosition.row != 7 {
+		t.Fatalf("diffCursor = %d, want 7 (buffer line 6)", m.diffPosition.row)
 	}
-	if m.diffCx != 2 {
-		t.Fatalf("diffCx = %d, want the edit column", m.diffCx)
+	if m.diffPosition.column != 2 {
+		t.Fatalf("diffCx = %d, want the edit column", m.diffPosition.column)
 	}
 	// Everything fits in one page here, so the on-screen row math clamps to 0.
-	if m.diffScrollY != 0 {
-		t.Fatalf("diffScrollY = %d", m.diffScrollY)
+	if m.diffPosition.scrollY != 0 {
+		t.Fatalf("diffScrollY = %d", m.diffPosition.scrollY)
 	}
 }
 
@@ -162,9 +162,9 @@ func TestDiffReadyErrorReturnsToEdit(t *testing.T) {
 
 func TestDiffReadyStaleGenDropped(t *testing.T) {
 	m, rows := diffFixture(t)
-	res, _ := m.Update(diffReadyMsg{gen: m.diffGen - 1, rel: m.openRel, rows: rows[:1], adds: 1})
+	res, _ := m.Update(diffReadyMsg{gen: m.diffGen - 1, rel: m.openRel, document: diffDocument{rows: rows[:1], adds: 1}})
 	m = res.(Model)
-	if len(m.diffRows) != len(rows) {
+	if len(m.diffDocument.rows) != len(rows) {
 		t.Fatal("stale diffReadyMsg must not replace the landed rows")
 	}
 }
@@ -194,19 +194,19 @@ func TestDiffModeIsReadOnly(t *testing.T) {
 
 func TestDiffNavigationAndEsc(t *testing.T) {
 	m, rows := diffFixture(t)
-	m.diffCursor, m.diffCx, m.diffScrollY = 0, 0, 0
+	m.diffPosition.row, m.diffPosition.column, m.diffPosition.scrollY = 0, 0, 0
 	for i := 0; i < 6; i++ {
 		m = key(m, keyPress(tea.KeyDown))
 	}
-	if m.diffCursor != 6 || m.diffRows[6].kind != diffDel {
-		t.Fatalf("cursor = %d (kind %d), want the del row", m.diffCursor, m.diffRows[m.diffCursor].kind)
+	if m.diffPosition.row != 6 || m.diffDocument.rows[6].kind != diffDel {
+		t.Fatalf("cursor = %d (kind %d), want the del row", m.diffPosition.row, m.diffDocument.rows[m.diffPosition.row].kind)
 	}
 	// diffCx clamps to the del row's text ("gone").
-	m.diffCx = 99
+	m.diffPosition.column = 99
 	m = key(m, keyPress(tea.KeyDown))
 	m = key(m, keyPress(tea.KeyUp))
-	if m.diffCx > len([]rune("gone")) {
-		t.Fatalf("diffCx = %d, not clamped", m.diffCx)
+	if m.diffPosition.column > len([]rune("gone")) {
+		t.Fatalf("diffCx = %d, not clamped", m.diffPosition.column)
 	}
 
 	m = key(m, keyPress(tea.KeyEsc))
@@ -217,7 +217,7 @@ func TestDiffNavigationAndEsc(t *testing.T) {
 	if m.edit.cy != 6 {
 		t.Fatalf("edit.cy = %d, want 6", m.edit.cy)
 	}
-	if len(m.diffRows) != 0 || m.diffBase != "" {
+	if len(m.diffDocument.rows) != 0 || m.diffBase != "" {
 		t.Fatal("esc should clear diff state")
 	}
 	_ = rows
@@ -225,49 +225,49 @@ func TestDiffNavigationAndEsc(t *testing.T) {
 
 func TestDiffShiftJumpsBetweenHunks(t *testing.T) {
 	m, _ := diffFixture(t) // hunk starts: row 3 (add), row 6 (del)
-	m.diffCursor, m.diffCx, m.diffScrollY = 0, 0, 0
+	m.diffPosition.row, m.diffPosition.column, m.diffPosition.scrollY = 0, 0, 0
 
 	m = key(m, shiftKey(tea.KeyDown))
-	if m.diffCursor != 3 {
-		t.Fatalf("shift+down: cursor = %d, want hunk 1 start (3)", m.diffCursor)
+	if m.diffPosition.row != 3 {
+		t.Fatalf("shift+down: cursor = %d, want hunk 1 start (3)", m.diffPosition.row)
 	}
 	m = key(m, shiftKey(tea.KeyDown))
-	if m.diffCursor != 6 {
-		t.Fatalf("shift+down: cursor = %d, want hunk 2 start (6)", m.diffCursor)
+	if m.diffPosition.row != 6 {
+		t.Fatalf("shift+down: cursor = %d, want hunk 2 start (6)", m.diffPosition.row)
 	}
 	m = key(m, shiftKey(tea.KeyDown)) // no hunk below: inert
-	if m.diffCursor != 6 {
-		t.Fatalf("shift+down past the last hunk moved to %d", m.diffCursor)
+	if m.diffPosition.row != 6 {
+		t.Fatalf("shift+down past the last hunk moved to %d", m.diffPosition.row)
 	}
 	m = key(m, shiftKey(tea.KeyUp))
-	if m.diffCursor != 3 {
-		t.Fatalf("shift+up: cursor = %d, want hunk 1 start (3)", m.diffCursor)
+	if m.diffPosition.row != 3 {
+		t.Fatalf("shift+up: cursor = %d, want hunk 1 start (3)", m.diffPosition.row)
 	}
 	m = key(m, shiftKey(tea.KeyUp)) // no hunk above: inert
-	if m.diffCursor != 3 {
-		t.Fatalf("shift+up past the first hunk moved to %d", m.diffCursor)
+	if m.diffPosition.row != 3 {
+		t.Fatalf("shift+up past the first hunk moved to %d", m.diffPosition.row)
 	}
 
 	// A del+add run is one hunk: rows ctx del del add add ctx, start at 1.
 	// From inside it, shift+up lands on its own start.
 	rows, _, _ := buildDiffRows([]string{"a", "x", "y", "d"}, []string{"a", "b", "c", "d"})
-	m.diffRows = rows
-	m.diffCursor = 3
+	m.diffDocument.rows = rows
+	m.diffPosition.row = 3
 	m = key(m, shiftKey(tea.KeyUp))
-	if m.diffCursor != 1 {
-		t.Fatalf("shift+up inside a hunk: cursor = %d, want its start (1)", m.diffCursor)
+	if m.diffPosition.row != 1 {
+		t.Fatalf("shift+up inside a hunk: cursor = %d, want its start (1)", m.diffPosition.row)
 	}
 	m = key(m, shiftKey(tea.KeyDown)) // the same hunk's tail is not a new hunk
-	if m.diffCursor != 1 {
-		t.Fatalf("shift+down with no hunk below moved to %d", m.diffCursor)
+	if m.diffPosition.row != 1 {
+		t.Fatalf("shift+down with no hunk below moved to %d", m.diffPosition.row)
 	}
 
 	// Inert while the diff is still loading.
-	m.diffRows = nil
-	m.diffCursor = 0
+	m.diffDocument.rows = nil
+	m.diffPosition.row = 0
 	m = key(m, shiftKey(tea.KeyDown))
-	if m.diffCursor != 0 {
-		t.Fatalf("shift+down while loading moved to %d", m.diffCursor)
+	if m.diffPosition.row != 0 {
+		t.Fatalf("shift+down while loading moved to %d", m.diffPosition.row)
 	}
 }
 
@@ -286,12 +286,12 @@ func TestDiffEscWhileLoading(t *testing.T) {
 
 func TestDiffCtrlJOnDelRowRefuses(t *testing.T) {
 	m, _ := diffFixture(t)
-	m.diffCursor = 6 // the del row
+	m.diffPosition.row = 6 // the del row
 	m = key(m, ctrlKey('j'))
 	if m.errText != "cannot jump from a removed line" {
 		t.Fatalf("errText = %q", m.errText)
 	}
-	if m.mode != modeDiff || len(m.diffRows) == 0 {
+	if m.mode != modeDiff || len(m.diffDocument.rows) == 0 {
 		t.Fatal("refused jump must keep the review intact")
 	}
 }
@@ -307,21 +307,21 @@ func TestDiffJumpAndCtrlOReturnsToDiff(t *testing.T) {
 	next, _ := m.enterDiff("abc123")
 	m = next.(Model)
 	rows, adds, dels := buildDiffRows([]string{"package main", "func main() {}", ""}, m.edit.lines)
-	res, _ := m.Update(diffReadyMsg{gen: m.diffGen, rel: m.openRel, rows: rows, adds: adds, dels: dels})
+	res, _ := m.Update(diffReadyMsg{gen: m.diffGen, rel: m.openRel, document: diffDocument{rows: rows, adds: adds, dels: dels}})
 	m = res.(Model)
 	if m.mode != modeDiff {
 		t.Fatalf("fixture: mode = %v, err=%q", m.mode, m.errText)
 	}
 
 	// Review cursor on the added comment row, column inside "lib/util.ts".
-	m.diffCursor = diffRowForBufLine(m.diffRows, 1)
-	m.diffCx = 10
-	savedCursor := m.diffCursor
+	m.diffPosition.row = diffRowForBufLine(m.diffDocument.rows, 1)
+	m.diffPosition.column = 10
+	savedCursor := m.diffPosition.row
 	m = key(m, ctrlKey('j'))
 	if m.openRel != "lib/util.ts" || m.mode != modeEdit {
 		t.Fatalf("jump failed: open=%q mode=%v err=%q", m.openRel, m.mode, m.errText)
 	}
-	if len(m.diffRows) != 0 {
+	if len(m.diffDocument.rows) != 0 {
 		t.Fatal("landing a jump must clear the diff view model")
 	}
 	if len(m.jumpStack) != 1 || !m.jumpStack[0].inDiff || m.jumpStack[0].diffBase != "abc123" {
@@ -341,10 +341,10 @@ func TestDiffJumpAndCtrlOReturnsToDiff(t *testing.T) {
 		t.Fatalf("diffBase = %q, want the original revision", m.diffBase)
 	}
 	// The recomputed diff lands: the review position comes back (clamped).
-	res, _ = m.Update(diffReadyMsg{gen: m.diffGen, rel: m.openRel, rows: rows, adds: adds, dels: dels})
+	res, _ = m.Update(diffReadyMsg{gen: m.diffGen, rel: m.openRel, document: diffDocument{rows: rows, adds: adds, dels: dels}})
 	m = res.(Model)
-	if m.diffCursor != savedCursor {
-		t.Fatalf("diffCursor = %d, want restored %d", m.diffCursor, savedCursor)
+	if m.diffPosition.row != savedCursor {
+		t.Fatalf("diffCursor = %d, want restored %d", m.diffPosition.row, savedCursor)
 	}
 }
 
@@ -354,7 +354,7 @@ func TestDiffJumpAndCtrlOReturnsToDiff(t *testing.T) {
 func TestRenderDiffSmoke(t *testing.T) {
 	m, rows := diffFixture(t)
 	for _, cursor := range []int{0, 3, 6, len(rows) - 1} {
-		m.diffCursor = cursor
+		m.diffPosition.row = cursor
 		// The cursor row renders per-rune (ANSI between characters), so
 		// assertions go against the stripped frame.
 		frame := ansi.Strip(m.render())
@@ -374,7 +374,7 @@ func TestRenderDiffSmoke(t *testing.T) {
 		}
 	}
 	// While loading there are no rows yet — must still render.
-	m.diffRows, m.diffLoading = nil, true
+	m.diffDocument.rows, m.diffLoading = nil, true
 	if !strings.Contains(ansi.Strip(m.render()), "computing diff…") {
 		t.Fatal("loading placeholder missing")
 	}
@@ -384,29 +384,29 @@ func TestRenderDiffSmoke(t *testing.T) {
 // so like edit mode (see mouse_test.go) content starts at column 31, row 4.
 func TestDiffClickPlacesCursor(t *testing.T) {
 	m, _ := diffFixture(t)
-	m.diffCursor, m.diffCx, m.diffScrollY = 0, 0, 0
+	m.diffPosition.row, m.diffPosition.column, m.diffPosition.scrollY = 0, 0, 0
 
 	// Click the del row (display row 6), rune column 2 of "gone".
 	m = click(m, testTextX+2, testTextY+6)
-	if m.diffCursor != 6 || m.diffCx != 2 {
-		t.Fatalf("cursor = (%d, %d), want (6, 2)", m.diffCursor, m.diffCx)
+	if m.diffPosition.row != 6 || m.diffPosition.column != 2 {
+		t.Fatalf("cursor = (%d, %d), want (6, 2)", m.diffPosition.row, m.diffPosition.column)
 	}
 	if m.mode != modeDiff {
 		t.Fatalf("mode = %v", m.mode)
 	}
 	// A gutter click lands on the row at column 0; columns clamp to row end.
 	m = click(m, testTextX-3, testTextY+3)
-	if m.diffCursor != 3 || m.diffCx != 0 {
-		t.Fatalf("gutter click = (%d, %d), want (3, 0)", m.diffCursor, m.diffCx)
+	if m.diffPosition.row != 3 || m.diffPosition.column != 0 {
+		t.Fatalf("gutter click = (%d, %d), want (3, 0)", m.diffPosition.row, m.diffPosition.column)
 	}
 	m = click(m, testTextX+50, testTextY+1)
-	if m.diffCursor != 1 || m.diffCx != len([]rune("l1")) {
-		t.Fatalf("beyond-EOL click = (%d, %d), want clamped to line end", m.diffCursor, m.diffCx)
+	if m.diffPosition.row != 1 || m.diffPosition.column != len([]rune("l1")) {
+		t.Fatalf("beyond-EOL click = (%d, %d), want clamped to line end", m.diffPosition.row, m.diffPosition.column)
 	}
 	// A click below the last diff row is a no-op.
-	before := m.diffCursor
+	before := m.diffPosition.row
 	m = click(m, testTextX, testTextY+20)
-	if m.diffCursor != before {
+	if m.diffPosition.row != before {
 		t.Fatal("click below the diff must not move the cursor")
 	}
 }
@@ -425,26 +425,26 @@ func TestDiffClickPagesAtEdges(t *testing.T) {
 	next, _ := m.enterDiff("")
 	m = next.(Model)
 	rows, adds, dels := buildDiffRows(append([]string{"old first"}, cur[1:]...), m.edit.lines)
-	res, _ := m.Update(diffReadyMsg{gen: m.diffGen, rel: m.openRel, rows: rows, adds: adds, dels: dels})
+	res, _ := m.Update(diffReadyMsg{gen: m.diffGen, rel: m.openRel, document: diffDocument{rows: rows, adds: adds, dels: dels}})
 	m = res.(Model)
 
 	h := m.contentHeight() + 1
-	m.diffCursor, m.diffScrollY = 40, 30 // viewport [30, 30+h)
+	m.diffPosition.row, m.diffPosition.scrollY = 40, 30 // viewport [30, 30+h)
 	bottom := 30 + h - 1
 	m = click(m, testTextX, testTextY+(bottom-30))
-	if m.diffCursor != bottom || m.diffScrollY != bottom {
-		t.Fatalf("bottom-row click: cursor=%d scroll=%d, want both %d", m.diffCursor, m.diffScrollY, bottom)
+	if m.diffPosition.row != bottom || m.diffPosition.scrollY != bottom {
+		t.Fatalf("bottom-row click: cursor=%d scroll=%d, want both %d", m.diffPosition.row, m.diffPosition.scrollY, bottom)
 	}
 	m = click(m, testTextX, testTextY) // top visible row → page up
 	top := bottom
-	if m.diffCursor != top || m.diffScrollY != max(0, top-h+1) {
-		t.Fatalf("top-row click: cursor=%d scroll=%d, want cursor %d at the bottom", m.diffCursor, m.diffScrollY, top)
+	if m.diffPosition.row != top || m.diffPosition.scrollY != max(0, top-h+1) {
+		t.Fatalf("top-row click: cursor=%d scroll=%d, want cursor %d at the bottom", m.diffPosition.row, m.diffPosition.scrollY, top)
 	}
 }
 
 func TestDiffCtrlClickOnDelRowRefuses(t *testing.T) {
 	m, _ := diffFixture(t)
-	m.diffCursor, m.diffScrollY = 0, 0
+	m.diffPosition.row, m.diffPosition.scrollY = 0, 0
 	next, cmd := ctrlClick(m, testTextX, testTextY+6) // the del row
 	m = next
 	if cmd != nil {
@@ -453,8 +453,8 @@ func TestDiffCtrlClickOnDelRowRefuses(t *testing.T) {
 	if m.errText != "cannot jump from a removed line" {
 		t.Fatalf("errText = %q", m.errText)
 	}
-	if m.diffCursor != 6 {
-		t.Fatalf("the click should still place the cursor, got %d", m.diffCursor)
+	if m.diffPosition.row != 6 {
+		t.Fatalf("the click should still place the cursor, got %d", m.diffPosition.row)
 	}
 }
 
@@ -504,8 +504,8 @@ func TestComputeDiffCmdIntegration(t *testing.T) {
 	m = next.(Model)
 	res, _ := m.Update(cmd())
 	m = res.(Model)
-	if m.mode != modeDiff || m.diffAdds != 1 || m.diffDels != 1 || m.diffNewFile {
-		t.Fatalf("mode=%v adds=%d dels=%d newFile=%v err=%q", m.mode, m.diffAdds, m.diffDels, m.diffNewFile, m.errText)
+	if m.mode != modeDiff || m.diffDocument.adds != 1 || m.diffDocument.dels != 1 || m.diffDocument.newFile {
+		t.Fatalf("mode=%v adds=%d dels=%d newFile=%v err=%q", m.mode, m.diffDocument.adds, m.diffDocument.dels, m.diffDocument.newFile, m.errText)
 	}
 
 	// A bad revision reports git's message and returns to edit mode.
@@ -525,10 +525,10 @@ func TestComputeDiffCmdIntegration(t *testing.T) {
 	m = next.(Model)
 	res, _ = m.Update(cmd())
 	m = res.(Model)
-	if m.mode != modeDiff || !m.diffNewFile || m.diffDels != 0 || m.diffAdds != len(m.edit.lines) {
-		t.Fatalf("untracked: mode=%v newFile=%v adds=%d dels=%d", m.mode, m.diffNewFile, m.diffAdds, m.diffDels)
+	if m.mode != modeDiff || !m.diffDocument.newFile || m.diffDocument.dels != 0 || m.diffDocument.adds != len(m.edit.lines) {
+		t.Fatalf("untracked: mode=%v newFile=%v adds=%d dels=%d", m.mode, m.diffDocument.newFile, m.diffDocument.adds, m.diffDocument.dels)
 	}
-	for _, row := range m.diffRows {
+	for _, row := range m.diffDocument.rows {
 		if row.kind != diffAdd {
 			t.Fatal("untracked file must render all-added")
 		}

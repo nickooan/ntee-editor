@@ -185,29 +185,29 @@ func TestGraphQLReadOnly(t *testing.T) {
 
 func TestGraphQLCursorAndOutlineJump(t *testing.T) {
 	m := graphQLFixture(t)
-	m.preview.cursor, m.preview.scrollY = 0, 0
+	m.preview.position.row, m.preview.position.scrollY = 0, 0
 	m = key(m, keyPress(tea.KeyDown))
 	m = key(m, keyPress(tea.KeyDown))
-	if m.preview.cursor != 2 {
-		t.Fatalf("cursor = %d, want 2", m.preview.cursor)
+	if m.preview.position.row != 2 {
+		t.Fatalf("cursor = %d, want 2", m.preview.position.row)
 	}
 
 	// Select the "user" entry in the outline and jump to it.
-	m.preview.sel = 0
+	m.preview.selection.index = 0
 	m = key(m, shiftKey(tea.KeyDown))
-	if m.preview.sel != 1 {
-		t.Fatalf("outline sel = %d, want 1", m.preview.sel)
+	if m.preview.selection.index != 1 {
+		t.Fatalf("outline sel = %d, want 1", m.preview.selection.index)
 	}
 	m = key(m, keyPress(tea.KeyEnter))
-	if m.preview.cursor != m.preview.outline[1].LineIdx {
-		t.Fatalf("cursor = %d, want anchor %d", m.preview.cursor, m.preview.outline[1].LineIdx)
+	if m.preview.position.row != m.preview.outline[1].LineIdx {
+		t.Fatalf("cursor = %d, want anchor %d", m.preview.position.row, m.preview.outline[1].LineIdx)
 	}
 }
 
 func TestGraphQLSearchCycleAndLand(t *testing.T) {
 	m := graphQLFixture(t)
 	m = key(m, typeRune('/'))
-	if !m.preview.searching {
+	if !m.preview.search.active {
 		t.Fatal("/ must open the search bar")
 	}
 	m = runes(m, "User")
@@ -215,22 +215,22 @@ func TestGraphQLSearchCycleAndLand(t *testing.T) {
 	if len(matches) < 2 {
 		t.Fatalf("matches = %d, want ≥2", len(matches))
 	}
-	if m.preview.cursor != matches[m.preview.focused].LineIndex {
+	if m.preview.position.row != matches[m.preview.search.focused].LineIndex {
 		t.Fatal("typing must land the cursor on the focused match")
 	}
 
-	first := m.preview.focused
+	first := m.preview.search.focused
 	m = key(m, keyPress(tea.KeyDown))
-	if m.preview.focused == first {
+	if m.preview.search.focused == first {
 		t.Fatal("down must advance the focused match")
 	}
 
-	landed := m.preview.cursor
+	landed := m.preview.position.row
 	m = key(m, keyPress(tea.KeyEnter))
-	if m.preview.searching || m.preview.search != "" {
+	if m.preview.search.active || m.preview.search.query != "" {
 		t.Fatal("enter must close the search bar")
 	}
-	if m.preview.cursor != landed {
+	if m.preview.position.row != landed {
 		t.Fatal("enter must keep the cursor on the landed match")
 	}
 
@@ -238,7 +238,7 @@ func TestGraphQLSearchCycleAndLand(t *testing.T) {
 	m = key(m, typeRune('/'))
 	m = runes(m, "x")
 	m = key(m, keyPress(tea.KeyEsc))
-	if m.preview.searching || m.mode != modeGraphQL {
+	if m.preview.search.active || m.mode != modeGraphQL {
 		t.Fatal("first esc closes only the search bar")
 	}
 	m = key(m, keyPress(tea.KeyEsc))
@@ -250,7 +250,7 @@ func TestGraphQLSearchCycleAndLand(t *testing.T) {
 func TestGraphQLExitSameFileSource(t *testing.T) {
 	m := graphQLFixture(t)
 	row := graphQLRow(t, m, "user(id: ID!): User")
-	m.preview.cursor = row
+	m.preview.position.row = row
 	src := m.preview.lines[row].Src
 	if src.File != "schema.graphql" {
 		t.Fatalf("user src = %+v", src)
@@ -273,7 +273,7 @@ func TestGraphQLExitSameFileSource(t *testing.T) {
 func TestGraphQLExitCrossFileSource(t *testing.T) {
 	m := graphQLFixture(t)
 	row := graphQLRow(t, m, "nickname")
-	m.preview.cursor = row
+	m.preview.position.row = row
 	src := m.preview.lines[row].Src
 	if src.File != "extra.graphql" {
 		t.Fatalf("nickname src = %+v", src)
@@ -295,10 +295,10 @@ func TestGraphQLExitCrossFileSource(t *testing.T) {
 
 func TestGraphQLWheelScroll(t *testing.T) {
 	m := graphQLFixture(t)
-	m.preview.cursor, m.preview.scrollY = 0, 0
+	m.preview.position.row, m.preview.position.scrollY = 0, 0
 	m = m.wheelScroll(1)
-	if m.preview.cursor != wheelScrollLines {
-		t.Fatalf("wheel cursor = %d, want %d", m.preview.cursor, wheelScrollLines)
+	if m.preview.position.row != wheelScrollLines {
+		t.Fatalf("wheel cursor = %d, want %d", m.preview.position.row, wheelScrollLines)
 	}
 }
 

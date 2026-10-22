@@ -95,7 +95,24 @@ func (m Model) openGrep() (Model, tea.Cmd) {
 		return m, cmd
 	}
 	m, corpusCmd := m.ensureCorpus()
+	m = m.beginGrep(grepTargetOpenFile)
+	return m, tea.Batch(corpusCmd, m.grepLoadBatchCmd(m.grepGen, 0))
+}
+
+// grepTarget says where Enter on a hit goes: the project grep opens the file
+// in edit mode; a scoped grep over an in-memory set (review mode) hands the
+// hit back to the view that owns the set.
+type grepTarget uint8
+
+const (
+	grepTargetOpenFile grepTarget = iota
+	grepTargetReview
+)
+
+// beginGrep resets the overlay to an empty, loading session.
+func (m Model) beginGrep(target grepTarget) Model {
 	m.grepOpen = true
+	m.grepTarget = target
 	m.grepQuery = ""
 	m.grepCursor = 0
 	m.grepIndex = 0
@@ -110,7 +127,30 @@ func (m Model) openGrep() (Model, tea.Cmd) {
 	m.grepGen++
 	m.grepSearchGen++ // invalidates any tick left over from a prior session
 	m.grepResultsGen = m.grepSearchGen
-	return m, tea.Batch(corpusCmd, m.grepLoadBatchCmd(m.grepGen, 0))
+	return m
+}
+
+// openGrepOver opens the overlay over an in-memory file set instead of the
+// project corpus — nothing to load, so it is searchable at once. The files
+// are taken as given (the caller already normalized and capped them).
+func (m Model) openGrepOver(files []grepFile, target grepTarget) Model {
+	m = m.closeCompletion()
+	m = m.beginGrep(target)
+	m.grepLoading = false
+	m.grepFiles = files
+	m.grepFileIndex = make(map[string]int, len(files))
+	for i, file := range files {
+		m.grepFileIndex[file.rel] = i
+		m.grepLoadBytes += len(file.content)
+	}
+	return m
+}
+
+// newGrepFile prepares content for grepFiles: CRLF-normalized with its line
+// starts indexed.
+func newGrepFile(rel, content string) grepFile {
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	return grepFile{rel: rel, content: content, lineStarts: buildLineStarts(content)}
 }
 
 // closeGrep hides the overlay and releases the snapshot — grepFiles can hold
@@ -159,8 +199,8 @@ func (m Model) grepLoadBatchCmd(gen, start int) tea.Cmd {
 					if sizeCap > 0 && len(f.Content) > sizeCap {
 						continue
 					}
-					content := strings.ReplaceAll(f.Content, "\r\n", "\n")
-					slots[i] = &grepFile{rel: batch[i], content: content, lineStarts: buildLineStarts(content)}
+					file := newGrepFile(batch[i], f.Content)
+					slots[i] = &file
 				}
 			}()
 		}
@@ -393,8 +433,13 @@ func (m Model) handleGrepKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.grepCursor = grepOffsetAt(m.grepQuery, line, -1)
 	case "enter":
 		_, hit, ok := m.grepSelectedFile()
+		target := m.grepTarget
 		m = m.closeGrep()
 		if !ok {
+			break
+		}
+		if target == grepTargetReview {
+			m = m.reviewGoToGrepHit(hit)
 			break
 		}
 		m = m.openFileAt(hit.rel)

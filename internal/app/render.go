@@ -57,12 +57,12 @@ func (m Model) render() string {
 
 	var mainBody string
 	switch {
+	case m.choice.open():
+		mainBody = m.choice.render(mainWidth-4, bodyHeight-2)
 	case m.fuzzyOpen:
 		mainBody = m.renderFuzzyOverlay(mainWidth-4, bodyHeight-2)
 	case m.messageOverlay != "":
 		mainBody = m.renderMessageOverlay(mainWidth-4, bodyHeight-2)
-	case m.confirmRm != "":
-		mainBody = m.renderConfirmRmOverlay(mainWidth-4, bodyHeight-2)
 	case m.defPickOpen:
 		mainBody = m.renderDefPickOverlay(mainWidth-4, bodyHeight-2)
 	case m.grepOpen:
@@ -83,6 +83,10 @@ func (m Model) render() string {
 		mainBody = m.renderConflict(mainWidth-4, innerH)
 	case m.mode == modeOpenAPI, m.mode == modeGraphQL:
 		mainBody = m.renderPreview(mainWidth-4, innerH)
+	case m.mode == modeReview:
+		mainBody = m.renderReview(mainWidth-4, innerH)
+	case m.mode == modeExternalHistory:
+		mainBody = m.renderExternalHistory(mainWidth-4, innerH)
 	case m.openFile != nil:
 		mainBody = m.renderFile(mainWidth-4, innerH)
 	default:
@@ -184,6 +188,10 @@ func (m Model) renderStatusLine() string {
 		return m.renderConflictStatus()
 	case modeOpenAPI, modeGraphQL:
 		return m.renderPreviewStatus()
+	case modeReview:
+		return m.renderReviewStatus()
+	case modeExternalHistory:
+		return m.renderExternalHistoryStatus()
 	case modeInspect:
 		bar := execPromptStyle.Render("@inspection >") +
 			m.renderInspectInput() +

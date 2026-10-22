@@ -3,6 +3,8 @@
 // ntee-db (recent files, undo snapshots, session).
 //
 // Usage: ntee [project-root]   (defaults to the current directory)
+//
+//	ntee --msg <open|review|help> [paths…]   send a request to a running editor
 package main
 
 import (
@@ -19,6 +21,7 @@ import (
 
 	"github.com/nickooan/ntee-editor/internal/app"
 	"github.com/nickooan/ntee-editor/internal/config"
+	"github.com/nickooan/ntee-editor/internal/extmsg"
 	"github.com/nickooan/ntee-editor/internal/lsp"
 	"github.com/nickooan/ntee-editor/internal/lspsetup"
 	"github.com/nickooan/ntee-editor/internal/store"
@@ -30,10 +33,16 @@ func main() {
 	assumeYes := flag.Bool("yes", false, "skip the confirmation prompt for --prepare-lsp")
 	disableLSP := flag.Bool("disable-lsp", false, "disable LSP for the named languages (or 'all'); writes the user config")
 	enableLSP := flag.Bool("enable-lsp", false, "re-enable LSP for the named languages (or 'all'); writes the user config")
+	sendMsg := flag.Bool("msg", false, "send a request to the running editor of this directory: --msg open <file>#L<n> · --msg review <files…> (or paths on stdin) · --msg help")
+	msgRoot := flag.String("msg-root", "", "with --msg: the editor's opened folder (default: the nearest running one above the current directory)")
+	msgBase := flag.String("msg-base", "", "with --msg review: the base revision to diff against (default HEAD)")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println("ntee-editor " + app.Version)
 		return
+	}
+	if *sendMsg {
+		os.Exit(sendMessage(flag.Args(), *msgRoot, *msgBase))
 	}
 	if *disableLSP || *enableLSP {
 		if *disableLSP && *enableLSP {
@@ -107,10 +116,32 @@ func runEditor(absRoot string) int {
 	}
 
 	model := app.New(cfg, db, absRoot, notice, reg)
+	var settingsStore store.ExternalSettingsStore = store.NewMemoryExternalSettings(store.DefaultExternalSettings)
 	if globalDir, err := store.GlobalDir(); err == nil {
 		model = model.WithOpCommandStore(store.NewGlobalOpCommands(globalDir))
+		settingsStore = store.NewGlobalExternalSettings(globalDir)
 	}
+
+	// The socket listens whether or not external messages are enabled, so a
+	// sender always gets an answer ("disabled") instead of a dead socket.
+	var historyStore store.ExternalHistoryStore = store.NewMemoryExternalHistory()
+	if history, err := store.NewExternalHistory(absRoot); err == nil {
+		historyStore = history
+	}
+	receiver := app.NewExternalReceiver(absRoot, settingsStore, historyStore)
+	socketPath, err := store.ExternalSocketPath(absRoot)
+	socketProblem := ""
+	if err != nil {
+		socketProblem = firstLine(err.Error())
+	} else if server, err := extmsg.Listen(socketPath, receiver.Handle); err != nil {
+		socketProblem = firstLine(err.Error())
+	} else {
+		defer server.Close()
+	}
+	model = model.WithExternal(settingsStore, historyStore, socketPath, socketProblem)
+
 	program := tea.NewProgram(model)
+	receiver.SetSink(func(msg any) { program.Send(msg) })
 	if manager != nil {
 		manager.SetSink(func(msg any) { program.Send(msg) })
 		defer manager.ShutdownAll()

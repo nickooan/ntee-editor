@@ -13,6 +13,7 @@ This directory contains one document per internal package. Each follows the same
 | `internal/clipboard` | Writing to the system clipboard (OSC52 + platform tools) | [clipboard.md](clipboard.md) |
 | `internal/config` | YAML config loading and editing, with a trust rule: project-local config can never name executables | [config.md](config.md) |
 | `internal/diff` | Myers line diff with a bounded memory trace — feeds the diff review mode | [diff.md](diff.md) |
+| `internal/extmsg` | The external-message channel: a per-project unix socket, its plain-text request format, and the `ntee --msg` client | [extmsg.md](extmsg.md) |
 | `internal/filetree` | Sidebar tree, project file walk (search corpus), the symlink-aware file jail, atomic saves, gitignore + git status | [filetree.md](filetree.md) |
 | `internal/fuzzy` | The Goto-Anything matcher: subsequence scoring, basename bonuses, directory-browse ordering | [fuzzy.md](fuzzy.md) |
 | `internal/gitcmd` | The single place git is spawned — every call has a hard timeout | [gitcmd.md](gitcmd.md) |
@@ -30,7 +31,7 @@ This directory contains one document per internal package. Each follows the same
 ## How the pieces fit
 
 ```
-cmd/ntee ──▶ config.Load ──▶ store.Open ──▶ lsp.NewManager ──▶ app.New ──▶ Bubble Tea
+cmd/ntee ──▶ config.Load ──▶ store.Open ──▶ lsp.NewManager ──▶ app.New ──▶ extmsg.Listen ──▶ Bubble Tea
 ```
 
 - **`app` is the hub.** Its `Model` is copied by value through every update; long-lived caches ride behind pointer fields so all copies share them. Every keystroke flows through `Update`, every frame through `View`.
@@ -41,4 +42,5 @@ cmd/ntee ──▶ config.Load ──▶ store.Open ──▶ lsp.NewManager ─
 - **Trust boundaries are explicit.** `config` merges defaults ← user config ← project config, but strips anything from the project file that could name an executable — cloning a repo can never hand it code execution. `lspsetup` installs only pinned versions.
 - **Op-commands are user-authored only.** The shell command templates run from Ctrl+R live in a global ntee-db under `~/.ntee-editor/global/` that only the editor writes, on the user's behalf — never in project config — so the config trust rule still holds. Values substituted into a template are shell-quoted (`opcmd`), and runs stream through a cancellable process group.
 - **Keys are configurable, and portable.** Every editor action chord (Ctrl+P goto, Ctrl+S save, …) is looked up through `keymap` rather than hardcoded. Bindings are edited in the Ctrl+T keybinds pane and written to the *user* `config.yaml` — never ntee-db — so they travel with the file; the project config can't override them.
+- **Outside programs can drive the editor, on the user's terms.** Each editor listens on a private per-project unix socket (`extmsg`) for `open <file>#L<n>` and `review <files…>` requests from agents and scripts. Messages are off until the user enables them in Ctrl+T, every named path is jailed to the opened folder, and a busy user is asked before anything moves. Review mode shows the files' diffs across nested repos without touching the user's open file or root.
 - **State survives restarts.** `store` keeps recents, tabs, session, the walk corpus (for instant warm starts), undo snapshots (content-hashed for cheap dedupe), and unsaved drafts, all in a per-project ntee-db.

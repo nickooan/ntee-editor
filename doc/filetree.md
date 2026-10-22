@@ -61,7 +61,7 @@ The files divide the work cleanly:
 
 ### viewfile.go
 
-`ReadViewFile` loads a file for viewing/editing through the jail. Read errors surface *as the file content* (the caller just displays them), and `looksBinary` — the classic NUL-byte-in-the-first-8KB heuristic — flags native files so the editor doesn't render garbage.
+`ReadViewFile` loads a file for viewing/editing through the jail. Read errors surface *as the file content* (the caller just displays them), and `looksBinary` — the classic NUL-byte-in-the-first-8KB heuristic — flags native files so the editor doesn't render garbage. `ReadContainedFile` is the same jailed read for callers that must tell outcomes apart — review mode treats a missing file as a deletion — so it returns the error instead (`fs.ErrNotExist` for a missing file, `fs.ErrInvalid` for a jail escape). `IsContained` is the jail check alone, for paths named by outside callers (external messages) whether or not they exist yet.
 
 `WriteViewFile` is the atomic save: temp file in the target's directory, content written, permissions copied from the existing file (0644 for new ones), then a rename over the target. Saving through an in-root symlink replaces the resolved file and leaves the link intact.
 

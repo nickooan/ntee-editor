@@ -6,6 +6,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/nickooan/ntee-editor/internal/filetree"
+	"github.com/nickooan/ntee-editor/internal/input"
 	"github.com/nickooan/ntee-editor/internal/view"
 )
 
@@ -119,6 +120,10 @@ func (m Model) sidebarListForMode(width int) sidebarList {
 		return m.inspectSidebarList()
 	case modeOpenAPI, modeGraphQL:
 		return m.previewSidebarList()
+	case modeReview:
+		return m.reviewSidebarList()
+	case modeExternalHistory:
+		return m.externalHistorySidebarList()
 	default:
 		return m.fileTreeSidebarList(width)
 	}
@@ -172,25 +177,48 @@ func (m Model) inspectSidebarList() sidebarList {
 func (m Model) previewSidebarList() sidebarList {
 	outline := m.preview.outline
 	if len(outline) == 0 {
-		return sidebarList{
-			rows:          []sidebarRow{{segments: []sidebarSegment{{text: " outline", style: dirStyle}}}},
-			selectedIndex: -1,
-		}
+		return sidebarList{rows: []sidebarRow{sidebarHeaderRow("outline")}, selectedIndex: -1}
 	}
 	kind := m.previewDesc()
 	rows := make([]sidebarRow, len(outline))
 	for index, entry := range outline {
 		if entry.Depth == 0 {
-			rows[index] = sidebarRow{segments: []sidebarSegment{{text: " " + entry.Label, style: dirStyle}}}
+			rows[index] = sidebarHeaderRow(entry.Label)
 			continue
 		}
-		badgeStyle := segStyleFor(view.HighlightSegment{Color: entry.Color, Bold: true})
-		rows[index] = sidebarRow{segments: []sidebarSegment{
-			{text: "  " + padTo(entry.Badge, kind.badgeW), style: badgeStyle, minimumWidth: kind.badgeW + 2},
-			{text: entry.Tail, style: fileStyle},
-		}}
+		rows[index] = sidebarBadgeRow(entry.Badge, kind.badgeW, entry.Color, entry.Tail, fileStyle)
 	}
-	return sidebarList{rows: rows, selectedIndex: m.preview.sel}
+	return sidebarList{rows: rows, selectedIndex: m.preview.selection.index}
+}
+
+// sidebarHeaderRow is a group header of a two-pane view's left list (an
+// outline section, a review repo).
+func sidebarHeaderRow(label string) sidebarRow {
+	return sidebarRow{segments: []sidebarSegment{{text: " " + label, style: dirStyle}}}
+}
+
+// sidebarBadgeRow is an entry of a two-pane view's left list: a bold colored
+// badge padded to badgeWidth, then the tail filling the rest.
+func sidebarBadgeRow(badge string, badgeWidth int, color, tail string, tailStyle lipgloss.Style) sidebarRow {
+	badgeStyle := segStyleFor(view.HighlightSegment{Color: color, Bold: true})
+	return sidebarRow{segments: []sidebarSegment{
+		{text: "  " + padTo(badge, badgeWidth), style: badgeStyle, minimumWidth: badgeWidth + 2},
+		{text: tail, style: tailStyle},
+	}}
+}
+
+// listSelection is the highlighted row of a two-pane view's left list — the
+// preview outline, the review file list, the message history.
+type listSelection struct {
+	index int
+}
+
+// moved moves the selection by dy within count rows (inert when empty).
+func (s listSelection) moved(dy, count int) listSelection {
+	if count > 0 {
+		s.index = input.Clamp(s.index+dy, 0, count-1)
+	}
+	return s
 }
 
 // sidebarListClickIndex maps a terminal cell to a row of the current sidebar
@@ -230,13 +258,18 @@ func (m Model) activateSidebarRow(rowIndex int) (Model, bool) {
 		m.stylePicker.focused = false
 		m.lspPicker = lspPickerState{}
 		m.keybindPicker = keybindPickerState{}
+		m.externalPicker = externalPickerState{}
 		return m, true
 	case modeOpenAPI, modeGraphQL:
 		if rowIndex < 0 || rowIndex >= len(m.preview.outline) {
 			return m, false
 		}
-		m.preview.sel = rowIndex
+		m.preview.selection.index = rowIndex
 		return m.jumpPreviewOutline(), true
+	case modeReview:
+		return m.activateReviewRow(rowIndex)
+	case modeExternalHistory:
+		return m.activateExternalHistoryRow(rowIndex)
 	case modeQuery, modeEdit:
 		return m.activateFileTreeRow(rowIndex)
 	default:

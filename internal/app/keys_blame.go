@@ -23,39 +23,36 @@ func (m Model) handleBlameKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case m.keys.Matches(keymap.JumpBack, k):
 		return m.jumpBack()
 	}
+	span := m.blameSpan()
+	if position, handled := handleRowNavigationKey(k, m.blamePosition, span); handled {
+		m.blamePosition = position
+		return m, nil
+	}
 	switch k {
 	case "esc":
 		return m.exitBlame(), nil
-
-	case "up":
-		return m.moveBlameCursor(-1), nil
-	case "down":
-		return m.moveBlameCursor(1), nil
-
 	case "shift+up":
-		return m.jumpBlameGroup(-1), nil
+		m.blamePosition = m.blamePosition.blockJump(-1, span, m.isBlameGroupStart)
 	case "shift+down":
-		return m.jumpBlameGroup(1), nil
-
-	case "left":
-		m.blameCx = max(0, m.blameCx-1)
-		return m, nil
-	case "right":
-		m.blameCx = min(m.blameCx+1, len([]rune(m.blameRowText(m.blameCursor))))
-		return m, nil
-	case "home":
-		m.blameCx = 0
-		return m, nil
-	case "end":
-		m.blameCx = len([]rune(m.blameRowText(m.blameCursor)))
-		return m, nil
-
-	case "pgup":
-		return m.pageBlame(-1), nil
-	case "pgdown":
-		return m.pageBlame(1), nil
+		m.blamePosition = m.blamePosition.blockJump(1, span, m.isBlameGroupStart)
 	}
 	return m, nil
+}
+
+// blameSpan is the blame view's cursor span: rows are buffer lines, drawn
+// below a single-line status like edit mode.
+func (m Model) blameSpan() rowSpan {
+	return rowSpan{
+		total:    len(m.blameRows),
+		height:   m.contentHeight() + 1,
+		rowWidth: func(row int) int { return len([]rune(m.blameRowText(row))) },
+	}
+}
+
+// isBlameGroupStart reports whether row opens a commit group: a maximal run
+// of rows from the same commit.
+func (m Model) isBlameGroupStart(row int) bool {
+	return row == 0 || m.blameRows[row-1].group != m.blameRows[row].group
 }
 
 // exitBlame returns to edit mode at the annotated position: rows map 1:1 to
@@ -65,74 +62,14 @@ func (m Model) handleBlameKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 func (m Model) exitBlame() Model {
 	if len(m.blameRows) > 0 {
 		h := m.contentHeight() + 1
-		total := len(m.blameRows)
-		screenRow := m.blameCursor - fileViewportTop(m.blameCursor, m.blameScrollY, h, total)
-		m.edit.cy = input.Clamp(m.blameCursor, 0, len(m.edit.lines)-1)
-		m.edit.cx = m.blameCx
+		screenRow := m.blamePosition.screenRow(m.blameSpan())
+		m.edit.cy = input.Clamp(m.blamePosition.row, 0, len(m.edit.lines)-1)
+		m.edit.cx = m.blamePosition.column
 		m.edit.clampCursor()
 		m.fileScrollY = input.Clamp(m.edit.cy-screenRow, 0, max(0, len(m.edit.lines)-h))
 	}
 	m.mode = modeEdit
 	return m.clearBlameState()
-}
-
-// moveBlameCursor moves the annotation cursor by dy rows, keeping the column
-// within the new row's text.
-func (m Model) moveBlameCursor(dy int) Model {
-	if len(m.blameRows) == 0 {
-		return m // still loading
-	}
-	m.blameCursor = input.Clamp(m.blameCursor+dy, 0, len(m.blameRows)-1)
-	m.blameCx = input.Clamp(m.blameCx, 0, len([]rune(m.blameRowText(m.blameCursor))))
-	return m
-}
-
-// jumpBlameGroup moves the cursor to the previous (dir<0) or next (dir>0)
-// commit group's first row, anchored ~30% from the top like hunk jumps. A
-// group is a maximal run of rows from the same commit. No wraparound; inert
-// when there is no group in that direction. From inside a group, jumping up
-// lands on that group's own start.
-func (m Model) jumpBlameGroup(dir int) Model {
-	if len(m.blameRows) == 0 {
-		return m // still loading
-	}
-	target := -1
-	for i, row := range m.blameRows {
-		if i > 0 && m.blameRows[i-1].group == row.group {
-			continue // not a group start
-		}
-		if dir < 0 {
-			if i < m.blameCursor {
-				target = i
-			}
-		} else if i > m.blameCursor {
-			target = i
-			break
-		}
-	}
-	if target == -1 {
-		return m
-	}
-	m.blameCursor = target
-	m.blameCx = input.Clamp(m.blameCx, 0, len([]rune(m.blameRowText(target))))
-	m.blameScrollY = anchorScroll(target, m.contentHeight()+1, len(m.blameRows))
-	return m
-}
-
-// pageBlame pages the view with a one-line overlap, cursor keeping its
-// on-screen row — the blame-mode mirror of pageDiff.
-func (m Model) pageBlame(dir int) Model {
-	total := len(m.blameRows)
-	if total == 0 {
-		return m
-	}
-	h := m.contentHeight() + 1
-	step := max(1, h-1)
-	top := fileViewportTop(m.blameCursor, m.blameScrollY, h, total)
-	m.blameCursor = input.Clamp(m.blameCursor+dir*step, 0, total-1)
-	m.blameCx = input.Clamp(m.blameCx, 0, len([]rune(m.blameRowText(m.blameCursor))))
-	m.blameScrollY = input.Clamp(top+dir*step, 0, max(0, total-h))
-	return m
 }
 
 // blameJumpToReference is Ctrl+J from a blame row: sync the edit cursor to
@@ -142,8 +79,8 @@ func (m Model) blameJumpToReference() (tea.Model, tea.Cmd) {
 	if len(m.blameRows) == 0 {
 		return m, nil // still loading
 	}
-	m.edit.cy = input.Clamp(m.blameCursor, 0, len(m.edit.lines)-1)
-	m.edit.cx = m.blameCx
+	m.edit.cy = input.Clamp(m.blamePosition.row, 0, len(m.edit.lines)-1)
+	m.edit.cx = m.blamePosition.column
 	m.edit.clampCursor()
 	return m.jumpToReference()
 }

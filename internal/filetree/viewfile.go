@@ -55,6 +55,33 @@ func ReadViewFile(root, relativePath string) (OpenViewFile, bool) {
 	return OpenViewFile{FileName: name, Path: lexical, Content: string(data)}, true
 }
 
+// ReadContainedFile reads root/rel under the same jail as ReadViewFile but
+// keeps the error: a missing file reports fs.ErrNotExist (review mode tells
+// a deleted file from a read failure) and a jail escape reports
+// fs.ErrInvalid. binary is the same NUL sniff ReadViewFile uses.
+func ReadContainedFile(root, rel string) (data []byte, binary bool, err error) {
+	if root == "" || rel == "" {
+		return nil, false, fs.ErrInvalid
+	}
+	_, real, ok := containedPath(root, rel)
+	if !ok {
+		return nil, false, fs.ErrInvalid
+	}
+	data, err = os.ReadFile(real)
+	if err != nil {
+		return nil, false, err
+	}
+	return data, looksBinary(data), nil
+}
+
+// IsContained reports whether rel stays inside root — lexically and after
+// symlink resolution — whether or not it exists yet. It is the jail check
+// for paths named by outside callers (external messages).
+func IsContained(root, rel string) bool {
+	_, _, ok := containedPath(root, rel)
+	return ok
+}
+
 // WriteViewFile atomically writes content to root/rel, jailed like
 // ReadViewFile: the content lands in a temp file in the target's directory
 // which is then renamed over the target, so a crash mid-save cannot leave a

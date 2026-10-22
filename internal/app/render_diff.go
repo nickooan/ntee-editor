@@ -9,27 +9,40 @@ import (
 
 	"github.com/nickooan/ntee-editor/internal/input"
 	"github.com/nickooan/ntee-editor/internal/keymap"
+	"github.com/nickooan/ntee-editor/internal/view"
 )
 
-// renderDiff draws the diff review view: a unified GitHub-style listing of
-// the edit buffer vs the git base. Gutter numbers are the buffer's (new-file)
-// line numbers — they advance only past ctx/add rows; del rows show a blank
-// red gutter. Only the visible window of rows is rendered, and ctx/add rows
-// reuse the edit session's highlight cache.
+// renderDiff draws the diff review view: the edit buffer vs the git base,
+// reusing the edit session's highlight cache.
 func (m Model) renderDiff(width, height int) string {
 	if m.diffLoading {
 		return baseStyle.Render("computing diff…")
 	}
-	total := len(m.diffRows)
+	return renderDiffDocument(m.liveDiffDocument(), m.diffPosition, diffSearchOverlay{}, width, height)
+}
+
+// diffSearchOverlay carries a document search's matches into the diff
+// renderer: matched rows draw through renderSearchLine. Zero = no search.
+type diffSearchOverlay struct {
+	byLine  map[int][]view.LineMatch
+	focused int
+}
+
+// renderDiffDocument draws a unified GitHub-style listing of a diff document.
+// Gutter numbers are the new side's line numbers — they advance only past
+// ctx/add rows; del rows show a blank red gutter. Only the visible window of
+// rows is rendered, and ctx/add rows use the document's highlight cache.
+func renderDiffDocument(document diffDocument, position rowCursor, search diffSearchOverlay, width, height int) string {
+	total := len(document.rows)
 	if total == 0 {
 		return ""
 	}
 
-	// Same gutter formula as renderFile, keyed to buffer line count so the
-	// numbers align with what Esc returns to.
-	gutterWidth := len(strconv.Itoa(max(len(m.edit.lines), height)))
+	// Same gutter formula as renderFile, keyed to the new side's line count
+	// so the numbers align with what Esc returns to.
+	gutterWidth := diffGutterWidth(document, height)
 	contentWidth := max(1, width-gutterWidth-3)
-	start := fileViewportTop(m.diffCursor, m.diffScrollY, height, total)
+	start := fileViewportTop(position.row, position.scrollY, height, total)
 
 	out := make([]string, 0, height)
 	for i := start; i < start+height; i++ {
@@ -37,8 +50,8 @@ func (m Model) renderDiff(width, height int) string {
 			out = append(out, "")
 			continue
 		}
-		row := m.diffRows[i]
-		text := m.diffRowText(i)
+		row := document.rows[i]
+		text := document.rowText(i)
 
 		// The +/- marker sits in the spacer column after the number ("117+│ "),
 		// keeping the gutter exactly gutterWidth+3 columns like renderFile.
@@ -55,16 +68,18 @@ func (m Model) renderDiff(width, height int) string {
 		}
 
 		var content string
-		if i == m.diffCursor {
-			content = renderDiffCursorLine(text, m.diffCx, contentWidth, diffCursorRowStyle(row.kind))
+		if matches := search.byLine[i]; len(matches) > 0 {
+			content = renderSearchLine(text, document.rowHighlights(i), matches, nil, search.focused, 0, contentWidth)
+		} else if i == position.row {
+			content = renderDiffCursorLine(text, position.column, contentWidth, diffCursorRowStyle(row.kind))
 		} else {
 			switch row.kind {
 			case diffAdd:
-				content = m.renderDiffBufLine(row.bufLine, text, contentWidth, hexDiffAddBg, diffAddTextStyle)
+				content = renderHighlightedLine(document.highlights, row.bufLine, text, contentWidth, hexDiffAddBg, diffAddTextStyle)
 			case diffDel:
 				content = plainWindowStyled(text, 0, contentWidth, diffDelTextStyle)
 			default:
-				content = m.renderDiffBufLine(row.bufLine, text, contentWidth, hexBg, baseStyle)
+				content = renderHighlightedLine(document.highlights, row.bufLine, text, contentWidth, hexBg, baseStyle)
 			}
 		}
 		out = append(out, number+content)
@@ -72,12 +87,24 @@ func (m Model) renderDiff(width, height int) string {
 	return strings.Join(out, "\n")
 }
 
-// renderDiffBufLine draws a ctx/add row from the highlight cache when its
-// buffer line has a cached row (valid here: diff mode sits on the live edit
-// session and blocks edits), plain in the row's background otherwise.
+// diffGutterWidth is the line-number column width of a diff document drawn
+// in height rows — shared with click hit-testing so both agree.
+func diffGutterWidth(document diffDocument, height int) int {
+	return len(strconv.Itoa(max(len(document.lines), height)))
+}
+
+// renderDiffBufLine draws a buffer line from the edit session's highlight
+// cache (valid in the views that sit on the live edit session and block
+// edits), plain in the row's background otherwise.
 func (m Model) renderDiffBufLine(bufLine int, text string, width int, bg string, style lipgloss.Style) string {
-	if m.hlLines != nil && bufLine >= 0 && bufLine < len(m.hlLines) && m.hlLines[bufLine] != nil {
-		return renderSegmentsBg(m.hlLines[bufLine], 0, width, bg, style)
+	return renderHighlightedLine(m.hlLines, bufLine, text, width, bg, style)
+}
+
+// renderHighlightedLine draws line bufLine from a highlight cache when it has
+// a cached row, plain in the row's background otherwise.
+func renderHighlightedLine(highlights [][]view.HighlightSegment, bufLine int, text string, width int, bg string, style lipgloss.Style) string {
+	if highlights != nil && bufLine >= 0 && bufLine < len(highlights) && highlights[bufLine] != nil {
+		return renderSegmentsBg(highlights[bufLine], 0, width, bg, style)
 	}
 	return plainWindowStyled(text, 0, width, style)
 }
@@ -147,16 +174,16 @@ func (m Model) renderDiffStatus() string {
 		base = "HEAD"
 	}
 	line := promptStyle.Render("@diff") + statusTextStyle.Render(" "+name+"   base "+base)
-	if m.diffNewFile {
+	if m.diffDocument.newFile {
 		line += statusTextStyle.Render("   ") + noticeStyle.Render("new file")
 	}
 	if m.diffLoading {
 		line += statusTextStyle.Render("   ") + editingStyle.Render("computing…")
 	} else {
 		line += statusTextStyle.Render("   ") +
-			noticeStyle.Render(fmt.Sprintf("+%d", m.diffAdds)) + statusTextStyle.Render(" ") +
-			errStyle.Render(fmt.Sprintf("-%d", m.diffDels)) +
-			statusTextStyle.Render(fmt.Sprintf("   Ln %d/%d", m.diffCursor+1, len(m.diffRows)))
+			noticeStyle.Render(fmt.Sprintf("+%d", m.diffDocument.adds)) + statusTextStyle.Render(" ") +
+			errStyle.Render(fmt.Sprintf("-%d", m.diffDocument.dels)) +
+			statusTextStyle.Render(fmt.Sprintf("   Ln %d/%d", m.diffPosition.row+1, len(m.diffDocument.rows)))
 	}
 	if m.notice != "" {
 		line += statusTextStyle.Render("   ") + noticeStyle.Render(m.notice)

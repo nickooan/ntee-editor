@@ -39,12 +39,12 @@ func (m Model) sidebarInnerHeight() int {
 // overlayOpen reports whether a whole-pane overlay owns the screen — overlays
 // run their own navigation, so mouse routing and the tab strip both yield.
 func (m Model) overlayOpen() bool {
-	return m.fuzzyOpen || m.messageOverlay != "" || m.defPickOpen || m.grepOpen || m.confirmRm != "" || m.opMode.open
+	return m.fuzzyOpen || m.messageOverlay != "" || m.defPickOpen || m.grepOpen || m.choice.open() || m.opMode.open
 }
 
 // tabStripVisible mirrors render()'s decision to draw the tab strip.
 func (m Model) tabStripVisible() bool {
-	return len(m.tabs) > 0 && !m.overlayOpen() && m.mode != modeInspect
+	return len(m.tabs) > 0 && !m.overlayOpen() && m.mode != modeInspect && !m.inListDetailView()
 }
 
 // editClickTarget maps a terminal cell (x, y) to a buffer position in edit
@@ -137,6 +137,10 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				}
 				return next, nil
 			}
+			if m.mode == modeReview {
+				next, _ := m.handleReviewClick(mo.X, mo.Y)
+				return next, nil
+			}
 			if m.mode == modeBlame {
 				next, hit := m.handleBlameClick(mo.X, mo.Y)
 				if hit && ctrl {
@@ -204,24 +208,21 @@ func (m Model) handleEditClick(x, y int) (Model, bool) {
 	return m.sigCheckCursor(), true
 }
 
-// diffClickTarget maps a terminal cell (x, y) to a diff display row and rune
-// column — editClickTarget's math over diffRows instead of buffer lines: same
-// chrome offsets, same gutter formula as renderDiff, and the horizontal
-// window applies only to the review cursor's row.
-func (m Model) diffClickTarget(x, y int) (int, int, bool) {
-	height := m.contentHeight() + 1 // rendered rows: single-line status, like edit mode
-	total := len(m.diffRows)
-	if total == 0 {
+// rowViewClickTarget maps a terminal cell (x, y) to a row and rune column of
+// a read-only row view in the main pane — editClickTarget's math over the
+// view's rows: same chrome offsets, a gutter of gutterWidth+3 columns, and
+// topRows lines (tab strip, view header) drawn above the rows. The horizontal
+// window applies only to the cursor's row, like the renderers.
+func (m Model) rowViewClickTarget(x, y int, position rowCursor, span rowSpan, gutterWidth, topRows int) (int, int, bool) {
+	if span.total == 0 {
 		return 0, 0, false
 	}
-
-	paneRow := y - 2 - m.tabRows()
-	if paneRow < 0 || paneRow >= height {
+	paneRow := y - 2 - topRows
+	if paneRow < 0 || paneRow >= span.height {
 		return 0, 0, false
 	}
-	start := fileViewportTop(m.diffCursor, m.diffScrollY, height, total)
-	row := start + paneRow
-	if row >= total {
+	row := position.viewportTop(span) + paneRow
+	if row >= span.total {
 		return 0, 0, false // pane background below the last row
 	}
 
@@ -231,115 +232,67 @@ func (m Model) diffClickTarget(x, y int) (int, int, bool) {
 	if paneCol < 0 || paneCol >= mainWidth-2 {
 		return 0, 0, false
 	}
-	gutterWidth := len(strconv.Itoa(max(len(m.edit.lines), height)))
+	if span.rowWidth == nil {
+		return row, 0, true
+	}
 	contentCol := max(0, paneCol-(gutterWidth+3)) // gutter click → column 0
 
-	text := []rune(m.diffRowText(row))
+	width := span.rowWidth(row)
 	off := 0
-	if row == m.diffCursor {
+	if row == position.row {
 		contentWidth := max(1, (mainWidth-4)-gutterWidth-3)
-		if at := input.Clamp(m.diffCx, 0, len(text)); at >= contentWidth {
+		if at := input.Clamp(position.column, 0, width); at >= contentWidth {
 			off = at - contentWidth + 1
 		}
 	}
-	col := input.Clamp(off+contentCol, 0, len(text))
-	return row, col, true
+	return row, input.Clamp(off+contentCol, 0, width), true
 }
 
-// handleDiffClick moves the review cursor to a clicked diff row, with
+// clickedAt moves the cursor to a clicked row and column with
 // handleEditClick's viewport anchoring: an ordinary click freezes the window,
 // clicking the top visible row pages up, the bottom visible row pages down.
+func (c rowCursor) clickedAt(row, column int, span rowSpan) rowCursor {
+	top := c.viewportTop(span)
+	bottom := min(top+span.height-1, span.total-1)
+	switch {
+	case row == top && top > 0:
+		c.scrollY = max(0, row-span.height+1)
+	case row == bottom && bottom < span.total-1:
+		c.scrollY = row
+	default:
+		c.scrollY = top
+	}
+	c.row, c.column = row, column
+	return c
+}
+
+// handleDiffClick moves the review cursor to a clicked diff row.
 func (m Model) handleDiffClick(x, y int) (Model, bool) {
 	if m.mode != modeDiff || m.openFile == nil {
 		return m, false
 	}
-	row, col, ok := m.diffClickTarget(x, y)
+	span := m.diffSpan()
+	gutterWidth := diffGutterWidth(m.liveDiffDocument(), span.height)
+	row, column, ok := m.rowViewClickTarget(x, y, m.diffPosition, span, gutterWidth, m.tabRows())
 	if !ok {
 		return m, false
 	}
-	h := m.contentHeight() + 1
-	total := len(m.diffRows)
-	top := fileViewportTop(m.diffCursor, m.diffScrollY, h, total)
-	bottom := min(top+h-1, total-1)
-	switch {
-	case row == top && top > 0:
-		m.diffScrollY = max(0, row-h+1)
-	case row == bottom && bottom < total-1:
-		m.diffScrollY = row
-	default:
-		m.diffScrollY = top
-	}
-	m.diffCursor = row
-	m.diffCx = col
+	m.diffPosition = m.diffPosition.clickedAt(row, column, span)
 	return m, true
 }
 
-// blameClickTarget maps a terminal cell (x, y) to a blame row and rune
-// column — diffClickTarget's math with the author+date gutter instead of
-// line numbers, and rows are buffer lines directly.
-func (m Model) blameClickTarget(x, y int) (int, int, bool) {
-	height := m.contentHeight() + 1 // rendered rows: single-line status, like edit mode
-	total := len(m.blameRows)
-	if total == 0 {
-		return 0, 0, false
-	}
-
-	paneRow := y - 2 - m.tabRows()
-	if paneRow < 0 || paneRow >= height {
-		return 0, 0, false
-	}
-	start := fileViewportTop(m.blameCursor, m.blameScrollY, height, total)
-	row := start + paneRow
-	if row >= total {
-		return 0, 0, false // pane background below the last row
-	}
-
-	sidebar := m.sidebarWidth()
-	mainWidth := max(3, m.width-sidebar)
-	paneCol := x - (sidebar + 1)
-	if paneCol < 0 || paneCol >= mainWidth-2 {
-		return 0, 0, false
-	}
-	gutterWidth := m.blameGutterWidth()
-	contentCol := max(0, paneCol-(gutterWidth+3)) // gutter click → column 0
-
-	text := []rune(m.blameRowText(row))
-	off := 0
-	if row == m.blameCursor {
-		contentWidth := max(1, (mainWidth-4)-gutterWidth-3)
-		if at := input.Clamp(m.blameCx, 0, len(text)); at >= contentWidth {
-			off = at - contentWidth + 1
-		}
-	}
-	col := input.Clamp(off+contentCol, 0, len(text))
-	return row, col, true
-}
-
-// handleBlameClick moves the blame cursor to a clicked row, with
-// handleEditClick's viewport anchoring: an ordinary click freezes the window,
-// clicking the top visible row pages up, the bottom visible row pages down.
+// handleBlameClick moves the blame cursor to a clicked row; the gutter is the
+// author+date annotation instead of line numbers.
 func (m Model) handleBlameClick(x, y int) (Model, bool) {
 	if m.mode != modeBlame || m.openFile == nil {
 		return m, false
 	}
-	row, col, ok := m.blameClickTarget(x, y)
+	span := m.blameSpan()
+	row, column, ok := m.rowViewClickTarget(x, y, m.blamePosition, span, m.blameGutterWidth(), m.tabRows())
 	if !ok {
 		return m, false
 	}
-	h := m.contentHeight() + 1
-	total := len(m.blameRows)
-	top := fileViewportTop(m.blameCursor, m.blameScrollY, h, total)
-	bottom := min(top+h-1, total-1)
-	switch {
-	case row == top && top > 0:
-		m.blameScrollY = max(0, row-h+1)
-	case row == bottom && bottom < total-1:
-		m.blameScrollY = row
-	default:
-		m.blameScrollY = top
-	}
-	m.blameCursor = row
-	m.blameCx = col
+	m.blamePosition = m.blamePosition.clickedAt(row, column, span)
 	return m, true
 }
 
@@ -352,11 +305,16 @@ func (m Model) wheelScroll(dir int) Model {
 	case m.mode == modeEdit && m.openFile != nil:
 		return m.moveEditCursor(0, dir*wheelScrollLines)
 	case m.mode == modeDiff && m.openFile != nil:
-		return m.moveDiffCursor(dir * wheelScrollLines)
+		m.diffPosition = m.diffPosition.moved(dir*wheelScrollLines, m.diffSpan())
 	case m.mode == modeBlame && m.openFile != nil:
-		return m.moveBlameCursor(dir * wheelScrollLines)
+		m.blamePosition = m.blamePosition.moved(dir*wheelScrollLines, m.blameSpan())
 	case (m.mode == modeOpenAPI || m.mode == modeGraphQL) && m.openFile != nil:
-		return m.movePreviewCursor(dir * wheelScrollLines)
+		m.preview.position = m.preview.position.moved(dir*wheelScrollLines, m.previewSpan())
+		return m.syncPreviewSel()
+	case m.mode == modeReview:
+		m.review.position = m.review.position.moved(dir*wheelScrollLines, m.reviewSpan())
+	case m.mode == modeExternalHistory:
+		m.externalHistory.selection = m.externalHistory.selection.moved(dir, len(m.externalHistory.records))
 	case m.mode == modeConflict && m.openFile != nil:
 		return m.moveConflictCursor(0, dir*wheelScrollLines)
 	case (m.mode == modeQuery || m.mode == modeCommand) && m.openFile != nil:

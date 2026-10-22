@@ -59,27 +59,11 @@ func (m Model) renderMessageOverlay(width, height int) string {
 		lipgloss.WithWhitespaceStyle(whitespaceStyle))
 }
 
-// renderConfirmRmOverlay centers the :rm confirmation box in the main pane —
-// the wording distinguishes a recursive directory delete from a single file.
-func (m Model) renderConfirmRmOverlay(width, height int) string {
-	title := "remove file " + m.confirmRm + "?"
-	if m.confirmRmDir {
-		title = "remove directory " + m.confirmRm + " and its contents?"
-	}
-	hint := "[enter] remove · [esc] cancel"
-	boxWidth := input.Clamp(max(len([]rune(title)), len([]rune(hint)))+4, 20, max(20, width-2))
-	box := modalStyle.Width(boxWidth + 2).Render(
-		modalTitleStyle.Render(title) + "\n\n" + overlayHintStyle.Render(hint),
-	)
-	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box,
-		lipgloss.WithWhitespaceStyle(whitespaceStyle))
-}
-
 // fuzzyPromptLabel is the overlay title. The uncommitted finder leads with how
 // many files it lists ("32 uncommitted "), the whole list rather than the
 // filtered matches, so it reads as the size of the change set.
 func (m Model) fuzzyPromptLabel() string {
-	if m.fuzzyPrompt == fuzzyPromptUncommitted {
+	if m.fuzzyPrompt == fuzzyPromptUncommitted || m.fuzzyPrompt == fuzzyPromptReview {
 		return strconv.Itoa(len(m.fuzzyCorpus)) + " " + m.fuzzyPrompt
 	}
 	return m.fuzzyPrompt

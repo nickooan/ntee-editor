@@ -2,7 +2,6 @@ package store
 
 import (
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -56,11 +55,6 @@ type OpCommandStore interface {
 
 const opCommandPrefix = "opcmd:"
 
-const (
-	globalLockRetries = 5
-	globalLockBackoff = 25 * time.Millisecond
-)
-
 // GlobalDir is the store directory shared by every project.
 func GlobalDir() (string, error) {
 	home, err := os.UserHomeDir()
@@ -72,41 +66,18 @@ func GlobalDir() (string, error) {
 
 // GlobalOpCommands is the ntee-db-backed OpCommandStore. Every editor instance
 // shares this one store and ntee-db allows a single writer process, so it opens
-// the db per call and closes it right after rather than holding the flock.
+// the db per call (withDBAt) and closes it right after rather than holding the
+// flock.
 type GlobalOpCommands struct {
 	dir string
-	mu  sync.Mutex // serializes this process's opens so they never contend for the flock
 }
 
 func NewGlobalOpCommands(dir string) *GlobalOpCommands {
 	return &GlobalOpCommands{dir: dir}
 }
 
-// withDB opens the store, retrying briefly while another instance holds the
-// lock for its own short read or write.
 func (g *GlobalOpCommands) withDB(run func(db *nteedb.DB) error) error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if err := os.MkdirAll(g.dir, 0o755); err != nil {
-		return err
-	}
-	var db *nteedb.DB
-	var err error
-	for attempt := 0; attempt < globalLockRetries; attempt++ {
-		db, err = nteedb.Open(nteedb.Options{Dir: g.dir})
-		if !errors.Is(err, nteedb.ErrLocked) {
-			break
-		}
-		time.Sleep(globalLockBackoff * time.Duration(attempt+1))
-	}
-	if err != nil {
-		return err
-	}
-	runErr := run(db)
-	if closeErr := db.Close(); runErr == nil {
-		runErr = closeErr
-	}
-	return runErr
+	return withDBAt(nteedb.Options{Dir: g.dir}, run)
 }
 
 func (g *GlobalOpCommands) LoadOpCommands() ([]OpCommand, error) {

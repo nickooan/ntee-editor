@@ -31,7 +31,7 @@ func (m Model) renderBlame(width, height int) string {
 
 	gutterWidth := m.blameGutterWidth()
 	contentWidth := max(1, width-gutterWidth-3)
-	start := fileViewportTop(m.blameCursor, m.blameScrollY, height, total)
+	start := fileViewportTop(m.blamePosition.row, m.blamePosition.scrollY, height, total)
 
 	out := make([]string, 0, height)
 	for i := start; i < start+height; i++ {
@@ -53,8 +53,8 @@ func (m Model) renderBlame(width, height int) string {
 		}
 
 		var content string
-		if i == m.blameCursor {
-			content = renderDiffCursorLine(text, m.blameCx, contentWidth, cursorLineStyle)
+		if i == m.blamePosition.row {
+			content = renderDiffCursorLine(text, m.blamePosition.column, contentWidth, cursorLineStyle)
 		} else {
 			content = m.renderDiffBufLine(i, text, contentWidth, hexBg, baseStyle)
 		}
@@ -77,7 +77,7 @@ func (m Model) renderBlameStatus() string {
 	if m.blameLoading {
 		line += statusTextStyle.Render("   ") + editingStyle.Render("computing…")
 	} else {
-		line += statusTextStyle.Render(fmt.Sprintf("   Ln %d/%d", m.blameCursor+1, len(m.blameRows)))
+		line += statusTextStyle.Render(fmt.Sprintf("   Ln %d/%d", m.blamePosition.row+1, len(m.blameRows)))
 	}
 	if m.notice != "" {
 		line += statusTextStyle.Render("   ") + noticeStyle.Render(m.notice)

@@ -32,6 +32,10 @@ undo history, and session all survive relaunch.
 - **Op-commands** — save shell command templates once (`terraform plan
   -var-file={$1}`, `go test {$fpath}`) and run them on the open file with
   `Ctrl+R`, output streaming live.
+- **Driven by your coding agent** — `ntee --msg open file.go#L42` jumps the
+  running editor to a line, and `ntee --msg review <files>` opens a
+  multi-file, multi-repo diff review of what the agent just changed
+  ([below](#external-messages--review)).
 
 ## Install
 
@@ -94,7 +98,7 @@ select, exec) can be rebound — see [Custom keybindings](#custom-keybindings).
 | `Ctrl+U` | Goto **uncommitted** file — same finder, limited to git-dirty paths |
 | `Ctrl+W` | **Workspace repo** — re-root the editor at a nested git repo under the opened directory (pick the top `name/` row to go back to the whole workspace). The file tree, query bar, `Ctrl+P`/`Ctrl+U`/`Ctrl+G`, change highlights, and git views then cover that repo only, as if you had opened it directly; the title bar shows `working repo: …` in orange next to the path. Each repo remembers its own tabs, open file, and tree position (also across relaunch), and switching stashes unsaved edits as a draft. Refused when the opened directory is already a git repo |
 | `Ctrl+G` | **Grep the repo** — colored preview on top, results below; `↑/↓` + `Enter` jumps |
-| `Ctrl+T` | **Inspection dashboard** — store stats + LSP control + op-commands + keybinds ([below](#inspection-mode-ctrlt)) |
+| `Ctrl+T` | **Inspection dashboard** — store stats + LSP control + op-commands + keybinds + external messages ([below](#inspection-mode-ctrlt)) |
 | `Ctrl+R` | **Run an op-command** on the open file — pick a saved command, fill its `{$1}` `{$2}` args, watch the output stream ([below](#op-commands-ctrlr)) |
 | `Shift+Tab` | Cycle the focused tab (wraps) |
 | `Ctrl+Q` / `Ctrl+C` | Quit (session saved). `Ctrl+C` always quits, whatever the bindings |
@@ -216,6 +220,15 @@ A dashboard for the editor's own machinery. `Shift+↑/↓` switches the left me
   already taken, or isn't a chord, is refused in the status bar. Custom keys
   are highlighted next to their default. Changes apply immediately and are
   saved to your config — see [Custom keybindings](#custom-keybindings).
+- **external** — whether other programs may send this editor requests
+  ([External messages & review](#external-messages--review)). Shows the
+  socket the editor listens on, the **accept messages** switch (off by
+  default), the **history limit** (how many recent messages each project
+  keeps, 1–100, default 10), and how many this project has saved. Press `→`
+  to move in: `↑/↓` picks a row, `Enter` toggles the switch, edits the limit
+  (type a number, `Enter` saves, `Esc` cancels), or opens the **history** —
+  every saved message on the left, its details and raw text on the right,
+  `Enter` to replay one, `Esc` back.
 
 The `@inspection >` bar takes:
 
@@ -229,6 +242,9 @@ The `@inspection >` bar takes:
 | `keybind <action> <key>` | bind an action, e.g. `keybind goto_file ctrl+n` (saved to your config) |
 | `keybind <action> default` | restore one action's default key |
 | `keybind reset` | restore every default key |
+| `ext on` / `ext off` | accept or refuse external messages (all projects) |
+| `ext limit <n>` | keep the latest `n` messages per project (1–100) |
+| `ext history` | open the external-message history |
 
 LSP commands act live *and* write `~/.config/ntee-editor/config.yaml` (previous
 file backed up to `config.yaml.bak`), so the change sticks across restarts. If a
@@ -295,6 +311,66 @@ command is still running, to open it in your default browser.
 Op-commands are stored in `~/.ntee-editor/global/` and shared by every project.
 
 ---
+
+## External messages & review
+
+A running editor can take requests from other programs — your coding agent,
+a script, a git hook. Each editor listens on a private unix socket for the
+folder it opened (only your user can connect). Turn it on once in
+`Ctrl+T` → **external** (or `ext on` in that bar); until then senders are told
+messages are disabled.
+
+```sh
+ntee --msg open internal/app/app.go#L120        # jump to a line
+ntee --msg review internal/app/app.go web/src/main.ts old/removed.go
+git diff --name-only | ntee --msg review         # paths on stdin
+ntee --msg --msg-base HEAD~3 review $(git diff --name-only HEAD~3)
+ntee --msg help                                  # the full guide
+```
+
+`ntee --msg` finds the editor by walking up from the current directory
+(`--msg-root <dir>` names it). Paths are relative to where you run it, or
+absolute, and must be inside the editor's folder. It prints one reply line —
+`ok …` or `error …` (exit code 1).
+
+- **open** jumps straight there from the query view. If you are busy —
+  editing, in a bar, a diff, a preview — a dialog asks first (**Jump** /
+  **Ignore**), names the nested repo the editor will switch to when the file
+  lives in another one, and notes that unsaved edits are kept as a draft. A
+  newer request replaces an unanswered one.
+- **review** opens review mode (after the same confirmation when you are
+  busy): the files on the left, grouped by repo, each badged **M** / **A** /
+  **D**; the selected file's diff against `HEAD` on the right, `git diff`
+  style — added lines green, removed red, a new file all green, a deleted file
+  all red. Files may span several nested repos. Review is read-only (no
+  editing, no jump-to-definition), and `Esc` returns you to exactly the file
+  and repo you were on.
+
+| Review key | Action |
+|---|---|
+| `↑/↓` `PgUp/PgDn` `←/→` `Home/End` | move through the diff |
+| `Shift+↑/↓` | previous / next file |
+| `n` / `p` | next / previous change |
+| `Ctrl+F` | find in this file (removed lines included) |
+| `Ctrl+P` | jump to a file of the review |
+| `Ctrl+G` | search across the review's files |
+| `Esc` | leave the review |
+
+### For coding agents
+
+Paste this into your project's `CLAUDE.md` / `AGENTS.md` so your agent shows
+you its work in ntee:
+
+```markdown
+## Showing changes in ntee
+The user edits in ntee-editor. After changing files, send them for review:
+`ntee --msg review <changed files…>` (or pipe `git diff --name-only`).
+To point at a specific place: `ntee --msg open <file>#L<line>`.
+Paths are relative to the current directory. The command prints `ok …` on
+success; `error … disabled` means the user has not enabled external messages
+(Ctrl+T → external) — mention it once and carry on. Run `ntee --msg help`
+for details.
+```
 
 ## Tabs & drafts
 

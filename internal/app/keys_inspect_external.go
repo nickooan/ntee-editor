@@ -132,6 +132,10 @@ func (m Model) handleExternalLimitKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 }
 
 func (m Model) setExternalEnabled(enabled bool) (Model, tea.Cmd) {
+	if m.onlyFile != "" {
+		m.errText = "single-file mode never takes external messages — open a folder to use them"
+		return m, nil
+	}
 	if !m.external.settingsLoaded {
 		m.errText = "external settings are still loading"
 		return m, nil

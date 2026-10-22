@@ -6,6 +6,7 @@ package app
 import (
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -91,6 +92,7 @@ type Model struct {
 	root            string
 	db              store.Backend
 	workspaceRoot   string // absolute directory the editor was opened on
+	onlyFile        string // single-file mode (`ntee <file>`): the one root-relative file the editor shows
 	workspaceDB     store.Backend
 	workspaceIsRepo bool // the opened directory is itself a git repository
 	rootGen         int
@@ -663,7 +665,7 @@ func (m Model) Init() tea.Cmd {
 	// workspace, a cold start discovers them inside the corpus rebuild; a warm
 	// start, or a start rooted inside a repo (whose walk never covers the
 	// workspace), scans for them now.
-	if !m.workspaceIsRepo && (m.activeRepo != "" || !m.corpusBuiltAt.IsZero()) {
+	if !m.workspaceIsRepo && m.onlyFile == "" && (m.activeRepo != "" || !m.corpusBuiltAt.IsZero()) {
 		cmds = append(cmds, m.scanWorkspaceReposCmd())
 	}
 	return tea.Batch(cmds...)
@@ -855,6 +857,9 @@ func (m Model) ensureCorpus() (Model, tea.Cmd) {
 // the corpus. Safe to run concurrently: dirCache is mutex-guarded and the
 // captured root/ignore are read-only.
 func (m Model) rebuildCorpusCmd() tea.Cmd {
+	if m.onlyFile != "" {
+		return m.onlyFileCorpusCmd()
+	}
 	root, rootGen := m.root, m.rootGen
 	ignore := m.cfg.Tree.Ignore
 	maxFiles := m.cfg.Tree.MaxIndexFiles
@@ -1484,6 +1489,14 @@ func (m Model) treeEntries() []filetree.FileTreeEntry {
 	if f != nil && f.treeOk && f.treeSeq == f.seq && f.treeKey == key {
 		return f.entries
 	}
+	if m.onlyFile != "" {
+		// Single-file mode: the tree is that file alone.
+		entries := filetree.BuildPathTreeEntries([]string{m.onlyFile}, nil)
+		if f != nil {
+			f.treeOk, f.treeSeq, f.treeKey, f.entries = true, f.seq, key, entries
+		}
+		return entries
+	}
 	entries := filetree.BuildFileTreeEntries(
 		m.root,
 		filetree.BuildExpandedDirectoryPaths(key),
@@ -1547,6 +1560,30 @@ func (m Model) openFileAt(rel string) Model {
 		m.messageOverlay = f.FileName + " looks like a binary file."
 		return m
 	}
+	return m.showOpenedFile(rel, f)
+}
+
+// openNewFileAt opens rel — a path that does not exist yet — as an empty
+// buffer, like vim: the save path creates the file on the first Ctrl+S. A
+// stashed draft (the user switched away before saving) is restored by
+// showOpenedFile. The path is jailed like every other open.
+func (m Model) openNewFileAt(rel string) Model {
+	if !filetree.IsContained(m.root, rel) {
+		m.errText = "cannot open " + rel
+		return m
+	}
+	m = m.showOpenedFile(rel, filetree.OpenViewFile{
+		FileName: path.Base(rel),
+		Path:     filepath.Join(m.root, filepath.FromSlash(rel)),
+	})
+	m.notice = "new file — saved on first " + m.keys.Label(keymap.Save)
+	return m
+}
+
+// showOpenedFile puts a loaded file in front of the user: the buffer being
+// left is stashed, the new one gets an edit session, its draft, a tab, and
+// its remembered cursor. Shared by openFileAt and openNewFileAt.
+func (m Model) showOpenedFile(rel string, f filetree.OpenViewFile) Model {
 	m = m.recordCursor()      // remember where we were in the file being left
 	m = m.stashDraftIfDirty() // the old buffer's unsaved edits become a draft
 	if m.openFile != nil && m.openFile.Path != f.Path {

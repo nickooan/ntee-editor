@@ -285,6 +285,10 @@ func (m Model) repoPickerCandidates() (labels, rels []string) {
 // repo roots only (plus the workspace row), filtered like Ctrl+P, and is the
 // same whichever root the editor is currently at.
 func (m Model) openRepoPicker() (Model, tea.Cmd) {
+	if m.onlyFile != "" {
+		m.errText = "single-file mode — open the folder to switch repos"
+		return m, nil
+	}
 	if m.workspaceIsRepo {
 		m.errText = "not a workspace directory"
 		return m, nil

@@ -65,8 +65,11 @@ ntee --prepare-lsp
 ## Quick start
 
 ```sh
-ntee            # open the current directory
-ntee <path>     # open a project
+ntee                  # open the current directory
+ntee <path>           # open a project
+ntee .env             # open just this file (dotfiles too) — the sidebar and search show only it
+ntee src/app.go#L42   # …with the cursor on line 42
+ntee notes.txt        # a file that doesn't exist yet opens empty; Ctrl+S creates it
 ```
 
 Five things to know in your first five minutes:

@@ -38,6 +38,14 @@ func (m Model) renderInspectExternal(width, height int) string {
 		if m.external.settings.Enabled {
 			accept = panelGoodStyle.Render("on") + panelDimStyle.Render("  requests are accepted (and confirmed when you are busy)")
 		}
+		if m.onlyFile != "" {
+			// This window never listens, whatever the global switch says.
+			global := "off"
+			if m.external.settings.Enabled {
+				global = "on"
+			}
+			accept = panelDimStyle.Render("disabled") + panelDimStyle.Render("  single-file mode — the global switch is "+global+" for folder windows")
+		}
 		limit = panelStrongStyle.Render(fmt.Sprintf("%d", m.external.settings.HistoryLimit)) +
 			panelDimStyle.Render(fmt.Sprintf("  latest messages kept per project (%d–%d)", store.MinExternalHistoryLimit, store.MaxExternalHistoryLimit))
 	}

@@ -1,6 +1,8 @@
 package app
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -300,4 +302,32 @@ func TestExternalHistoryViewAndReplay(t *testing.T) {
 func (m Model) inspectExternalCommandForTest(args string) (Model, tea.Cmd) {
 	next, cmd := m.inspectExternalCommand(args)
 	return next.(Model), cmd
+}
+
+func TestExternalPanelInSingleFileModeShowsDisabled(t *testing.T) {
+	m, root := newTestModel(t, nil)
+	must(t, os.WriteFile(filepath.Join(root, ".env"), []byte("A=1\n"), 0o644))
+	m, settings, _ := externalModel(t, m, true)
+	m = m.WithOnlyFile(".env").WithStartFile(".env", 0)
+
+	next, cmd := m.Update(ctrlKey('t'))
+	m = settleExternal(next.(Model), cmd)
+	for m.inspectMenu != inspectMenuExternal {
+		m = key(m, shiftKey(tea.KeyDown))
+	}
+	plain := ansi.Strip(m.View().Content)
+	if !strings.Contains(plain, "disabled") || !strings.Contains(plain, "single-file mode") {
+		t.Fatalf("accept messages must read disabled:\n%s", plain)
+	}
+
+	m = key(m, keyPress(tea.KeyRight))
+	next, cmd = m.Update(keyPress(tea.KeyEnter)) // try to toggle
+	m = settleExternal(next.(Model), cmd)
+	if got, _ := settings.LoadExternalSettings(); !got.Enabled || !strings.Contains(m.errText, "single-file mode") {
+		t.Fatalf("the toggle is refused and the global switch untouched: enabled=%v err=%q", got.Enabled, m.errText)
+	}
+	m, _ = m.inspectExternalCommandForTest("off")
+	if got, _ := settings.LoadExternalSettings(); !got.Enabled {
+		t.Fatal("ext off is refused too")
+	}
 }

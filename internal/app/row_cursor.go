@@ -107,8 +107,12 @@ func (c rowCursor) blockJump(dir int, span rowSpan, isBlockStart func(row int) b
 // scrolled pages a cursorless view (a text panel) by one screen with a
 // one-line overlap; only scrollY moves.
 func (c rowCursor) scrolled(dir int, span rowSpan) rowCursor {
-	step := max(1, span.height-1)
-	c.scrollY = input.Clamp(c.scrollY+dir*step, 0, max(0, span.total-span.height))
+	return c.scrolledBy(dir*max(1, span.height-1), span)
+}
+
+// scrolledBy moves a cursorless view's window by lines, clamped to the span.
+func (c rowCursor) scrolledBy(lines int, span rowSpan) rowCursor {
+	c.scrollY = input.Clamp(c.scrollY+lines, 0, max(0, span.total-span.height))
 	return c
 }
 

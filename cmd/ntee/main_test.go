@@ -73,3 +73,20 @@ func TestSingleFileModeNeverStartsTheSocket(t *testing.T) {
 		t.Fatalf("a folder editor listens: %v", err)
 	}
 }
+
+func TestBuildRequestCarriesTheBaseOnTheFirstLine(t *testing.T) {
+	cases := []struct {
+		command, base string
+		paths         []string
+		want          string
+	}{
+		{"open", "", []string{"/p/a.go#L3"}, "open\n/p/a.go#L3\n"},
+		{"open", "v1.2.0", []string{"/p/a.go#L3"}, "open v1.2.0\n/p/a.go#L3\n"},
+		{"review", "HEAD~2", []string{"/p/a.go", "/p/b.go"}, "review HEAD~2\n/p/a.go\n/p/b.go\n"},
+	}
+	for _, c := range cases {
+		if got := buildRequest(c.command, c.base, c.paths); got != c.want {
+			t.Errorf("buildRequest(%q, %q) = %q, want %q", c.command, c.base, got, c.want)
+		}
+	}
+}

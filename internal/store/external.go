@@ -127,11 +127,28 @@ type ExternalRecord struct {
 	Key        string         `json:"key"`
 	Command    string         `json:"command"`
 	Args       []string       `json:"args"`
+	Base       string         `json:"base"` // the revision compared with the current files; ExternalDefaultBase when none was sent
 	Paths      []string       `json:"paths"`
 	Raw        string         `json:"raw"`
 	ReceivedAt time.Time      `json:"receivedAt"`
 	Status     ExternalStatus `json:"status"`
 	Note       string         `json:"note"`
+}
+
+// ExternalDefaultBase is the stored base of a request that named no revision.
+const ExternalDefaultBase = "HEAD"
+
+// withDefaultBase fills in the base of a record saved before the field
+// existed: a review's base was its single argument, anything else HEAD.
+func (record ExternalRecord) withDefaultBase() ExternalRecord {
+	if record.Base != "" {
+		return record
+	}
+	record.Base = ExternalDefaultBase
+	if record.Command == "review" && len(record.Args) == 1 {
+		record.Base = record.Args[0]
+	}
+	return record
 }
 
 // NewExternalRecordKey is a record key for a message received at time at.
@@ -206,7 +223,7 @@ func (h *ExternalHistory) withDB(limit int, run func(db *nteedb.DB) error) error
 }
 
 func (h *ExternalHistory) AppendExternal(record ExternalRecord, limit int) error {
-	data, err := json.Marshal(record)
+	data, err := json.Marshal(record.withDefaultBase())
 	if err != nil {
 		return err
 	}
@@ -229,7 +246,7 @@ func (h *ExternalHistory) LoadExternal() ([]ExternalRecord, error) {
 		for index := range keys {
 			var record ExternalRecord
 			if found[index] && json.Unmarshal(values[index], &record) == nil {
-				records = append(records, record)
+				records = append(records, record.withDefaultBase())
 			}
 		}
 		return nil
@@ -249,7 +266,7 @@ func (h *ExternalHistory) UpdateExternalStatus(key string, status ExternalStatus
 			return err
 		}
 		record.Status, record.Note = status, note
-		updated, err := json.Marshal(record)
+		updated, err := json.Marshal(record.withDefaultBase())
 		if err != nil {
 			return err
 		}
@@ -289,7 +306,7 @@ func NewMemoryExternalHistory() *MemoryExternalHistory {
 func (m *MemoryExternalHistory) AppendExternal(record ExternalRecord, limit int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.records[record.Key] = record
+	m.records[record.Key] = record.withDefaultBase()
 	m.trimLocked(limit)
 	return nil
 }
@@ -299,7 +316,7 @@ func (m *MemoryExternalHistory) LoadExternal() ([]ExternalRecord, error) {
 	defer m.mu.Unlock()
 	records := make([]ExternalRecord, 0, len(m.records))
 	for _, record := range m.records {
-		records = append(records, record)
+		records = append(records, record.withDefaultBase())
 	}
 	sortExternalNewestFirst(records)
 	return records, nil

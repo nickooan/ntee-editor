@@ -141,6 +141,10 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				next, _ := m.handleReviewClick(mo.X, mo.Y)
 				return next, nil
 			}
+			if m.mode == modeExternalHistory && mo.X >= m.sidebarWidth() {
+				m.externalHistory.detailFocused = len(m.externalHistory.records) > 0
+				return m, nil
+			}
 			if m.mode == modeBlame {
 				next, hit := m.handleBlameClick(mo.X, mo.Y)
 				if hit && ctrl {
@@ -313,8 +317,10 @@ func (m Model) wheelScroll(dir int) Model {
 		return m.syncPreviewSel()
 	case m.mode == modeReview:
 		m.review.position = m.review.position.moved(dir*wheelScrollLines, m.reviewSpan())
+	case m.mode == modeExternalHistory && m.externalHistory.detailFocused:
+		m.externalHistory.detail = m.externalHistory.detail.scrolledBy(dir*wheelScrollLines, m.externalDetailSpan())
 	case m.mode == modeExternalHistory:
-		m.externalHistory.selection = m.externalHistory.selection.moved(dir, len(m.externalHistory.records))
+		m = m.moveExternalSelection(dir)
 	case m.mode == modeConflict && m.openFile != nil:
 		return m.moveConflictCursor(0, dir*wheelScrollLines)
 	case (m.mode == modeQuery || m.mode == modeCommand) && m.openFile != nil:

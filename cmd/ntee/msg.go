@@ -17,9 +17,11 @@ import (
 const msgHelp = `ntee --msg — send a request to a running ntee editor
 
   ntee --msg open <file>[#L<line>]
+  ntee --msg --msg-base <rev> open <file>[#L<line>]
       Open one file in edit mode, cursor on the line. If the user is busy
       (editing, in a special view) they are asked first; the file may switch
-      the editor to the nested git repo that contains it.
+      the editor to the nested git repo that contains it. With --msg-base the
+      file opens in the diff view against <rev> instead.
 
   ntee --msg review <file>...
   git diff --name-only | ntee --msg review
@@ -28,6 +30,11 @@ const msgHelp = `ntee --msg — send a request to a running ntee editor
       deleted files all red). Paths may span nested repos of the workspace,
       and deleted files are fine. Diffs are against HEAD unless
       --msg-base <rev> comes before "review".
+
+A base revision (a commit hash, tag, branch, HEAD~2, …) is always compared
+with the current files on disk, uncommitted changes included. It travels on
+the request's first line ("open <rev>" / "review <rev>"), and the editor's
+history saves it (HEAD when none was given).
 
 Paths are relative to the current directory or absolute, and must be inside
 the folder the editor opened. The editor is found by walking up from the
@@ -62,10 +69,6 @@ func sendMessage(args []string, editorRoot, base string) int {
 			return 1
 		}
 	}
-	if base != "" && command != extmsg.CommandReview {
-		fmt.Fprintln(os.Stderr, "--msg-base only applies to review")
-		return 1
-	}
 	for i, path := range paths {
 		// A "#L<n>" anchor is plain filename text to Abs, so it rides along.
 		absolute, err := filepath.Abs(path)
@@ -81,11 +84,7 @@ func sendMessage(args []string, editorRoot, base string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	header := command
-	if base != "" {
-		header += " " + base
-	}
-	reply, err := extmsg.Send(socketPath, header+"\n"+strings.Join(paths, "\n")+"\n")
+	reply, err := extmsg.Send(socketPath, buildRequest(command, base, paths))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "cannot reach the editor:", err)
 		return 1
@@ -95,6 +94,16 @@ func sendMessage(args []string, editorRoot, base string) int {
 		return 1
 	}
 	return 0
+}
+
+// buildRequest is the wire text: the command and optional base revision on
+// the first line, then one path per line.
+func buildRequest(command, base string, paths []string) string {
+	header := command
+	if base != "" {
+		header += " " + base
+	}
+	return header + "\n" + strings.Join(paths, "\n") + "\n"
 }
 
 // findEditorSocket is the socket of editorRoot when given, else of the

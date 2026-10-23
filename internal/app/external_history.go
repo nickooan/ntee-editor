@@ -19,11 +19,12 @@ import (
 // details on the right. It is the review mode's two-pane layout over records
 // instead of files.
 type externalHistoryState struct {
-	records   []store.ExternalRecord
-	selection listSelection
-	detail    rowCursor // scroll of the detail pane
-	loading   bool
-	err       error
+	records       []store.ExternalRecord
+	selection     listSelection
+	detail        rowCursor // scroll of the detail pane
+	detailFocused bool      // → moved focus to the detail pane: ↑/↓ scroll it
+	loading       bool
+	err           error
 }
 
 // externalHistoryLoadedMsg delivers the history; gen guards against a load
@@ -85,6 +86,17 @@ func (m Model) exitExternalHistory() Model {
 	return m
 }
 
+// moveExternalSelection picks the message delta rows away and shows its
+// details from the top; the focused pane stays focused.
+func (m Model) moveExternalSelection(delta int) Model {
+	history := &m.externalHistory
+	moved := history.selection.moved(delta, len(history.records))
+	if moved != history.selection {
+		history.selection, history.detail = moved, rowCursor{}
+	}
+	return m
+}
+
 func (m Model) selectedExternalRecord() (store.ExternalRecord, bool) {
 	records := m.externalHistory.records
 	if len(records) == 0 {
@@ -93,19 +105,35 @@ func (m Model) selectedExternalRecord() (store.ExternalRecord, bool) {
 	return records[input.Clamp(m.externalHistory.selection.index, 0, len(records)-1)], true
 }
 
-// handleExternalHistoryKey: ↑/↓ (or Shift+↑/↓) pick a message, PgUp/PgDn
-// scroll its details, Enter replays it, Esc goes back to the dashboard.
+// handleExternalHistoryKey: with the list focused ↑/↓ pick a message and →
+// moves into its details; with the details focused ↑/↓ scroll them and ← or
+// Esc go back to the list. Shift+↑/↓ pick a message, PgUp/PgDn/Home/End
+// scroll the details, and Enter replays, from either pane.
 func (m Model) handleExternalHistoryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	history := &m.externalHistory
 	k := msg.String()
+	if history.detailFocused {
+		switch k {
+		case "up":
+			history.detail = history.detail.scrolledBy(-1, m.externalDetailSpan())
+			return m, nil
+		case "down":
+			history.detail = history.detail.scrolledBy(1, m.externalDetailSpan())
+			return m, nil
+		case "left", "esc":
+			history.detailFocused = false
+			return m, nil
+		}
+	}
 	switch k {
 	case "esc":
 		return m.exitExternalHistory(), nil
+	case "right":
+		history.detailFocused = len(history.records) > 0
 	case "up", "shift+up":
-		m.externalHistory.selection = m.externalHistory.selection.moved(-1, len(m.externalHistory.records))
-		m.externalHistory.detail = rowCursor{}
+		m = m.moveExternalSelection(-1)
 	case "down", "shift+down":
-		m.externalHistory.selection = m.externalHistory.selection.moved(1, len(m.externalHistory.records))
-		m.externalHistory.detail = rowCursor{}
+		m = m.moveExternalSelection(1)
 	case "pgup":
 		m.externalHistory.detail = m.externalHistory.detail.scrolled(-1, m.externalDetailSpan())
 	case "pgdown":
@@ -142,6 +170,7 @@ func (m Model) activateExternalHistoryRow(rowIndex int) (Model, bool) {
 	}
 	m.externalHistory.selection.index = rowIndex
 	m.externalHistory.detail = rowCursor{}
+	m.externalHistory.detailFocused = false
 	return m, true
 }
 
@@ -194,6 +223,10 @@ func (m Model) externalDetailLines(width int) []string {
 		subtitle:    "A request another program sent to this editor. Enter replays it.",
 		keyHeader:   "FIELD",
 		valueHeader: "VALUE",
+		titleHint:   "press → to scroll",
+	}
+	if m.externalHistory.detailFocused {
+		panel.titleHint = "▸ scrolling · ← back to the list"
 	}
 	switch {
 	case m.externalHistory.err != nil:
@@ -208,9 +241,14 @@ func (m Model) externalDetailLines(width int) []string {
 		if record.Note != "" {
 			status += panelDimStyle.Render("  " + record.Note)
 		}
+		base := panelStrongStyle.Render(record.Base)
+		if record.Base == store.ExternalDefaultBase {
+			base = panelDimStyle.Render(record.Base)
+		}
 		panel.rows = []panelRow{
-			{label: "command", pieces: []string{panelCommandStyle.Render(strings.Join(append([]string{record.Command}, record.Args...), " ")) +
+			{label: "command", pieces: []string{panelCommandStyle.Render(record.Command) +
 				panelDimStyle.Render(fmt.Sprintf(" · %d %s", len(record.Paths), pluralize("file", len(record.Paths))))}},
+			{label: "git hash", pieces: []string{base + panelDimStyle.Render("  compared with the current files")}},
 			{label: "received", pieces: []string{panelStrongStyle.Render(record.ReceivedAt.Local().Format("2006-01-02 15:04:05"))}},
 			{label: "status", pieces: []string{status}},
 		}
@@ -248,8 +286,14 @@ func (m Model) renderExternalHistoryStatus() string {
 	if count := len(m.externalHistory.records); count > 0 {
 		line += statusTextStyle.Render(fmt.Sprintf(" %d/%d", m.externalHistory.selection.index+1, count))
 	}
-	return withNotice(m, line) + statusTextStyle.Render("   ") +
-		hintStyle.Render("↑/↓ message · PgUp/PgDn scroll · Enter replay · Esc back")
+	hint := "↑/↓ message · → details · Enter replay · Esc back"
+	if m.externalHistory.detailFocused {
+		span := m.externalDetailSpan()
+		top := m.externalHistory.detail.scrollY
+		line += statusTextStyle.Render(fmt.Sprintf("  lines %d–%d of %d", top+1, min(top+span.height, span.total), span.total))
+		hint = "↑/↓ scroll · PgUp/PgDn page · Shift+↑/↓ message · ← list · Enter replay"
+	}
+	return withNotice(m, line) + statusTextStyle.Render("   ") + hintStyle.Render(hint)
 }
 
 func pluralize(noun string, count int) string {

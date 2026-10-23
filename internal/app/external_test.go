@@ -263,6 +263,7 @@ func TestExternalHistoryViewAndReplay(t *testing.T) {
 	older.Status = store.ExternalOpened
 	newer := externalRecord("review", "main.go", "lib/util.ts")
 	newer.Key = store.NewExternalRecordKey(time.Unix(2, 0))
+	newer.Args, newer.Base = []string{"v1.2.0"}, "v1.2.0"
 	must(t, history.AppendExternal(older, 10))
 	must(t, history.AppendExternal(newer, 10))
 
@@ -277,13 +278,19 @@ func TestExternalHistoryViewAndReplay(t *testing.T) {
 		t.Fatal("newest first")
 	}
 	plain := ansi.Strip(m.View().Content)
-	for _, want := range []string{"review", "2 files", "lib/util.ts", "RAW MESSAGE"} {
+	for _, want := range []string{"review", "2 files", "git hash", "v1.2.0", "lib/util.ts", "RAW MESSAGE"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("history view missing %q:\n%s", want, plain)
 		}
 	}
+	if strings.Contains(plain, "review v1.2.0") {
+		t.Fatalf("the base has its own row, not the command's:\n%s", plain)
+	}
 
 	m = key(m, keyPress(tea.KeyDown))
+	if plain := ansi.Strip(m.View().Content); !strings.Contains(plain, "HEAD") {
+		t.Fatalf("an open with no revision shows HEAD:\n%s", plain)
+	}
 	m = key(m, keyPress(tea.KeyEnter)) // replay the open
 	if !m.choice.open() || m.external.pending == nil || !m.external.pending.replay {
 		t.Fatal("a replay from the history view confirms first")
@@ -329,5 +336,165 @@ func TestExternalPanelInSingleFileModeShowsDisabled(t *testing.T) {
 	m, _ = m.inspectExternalCommandForTest("off")
 	if got, _ := settings.LoadExternalSettings(); !got.Enabled {
 		t.Fatal("ext off is refused too")
+	}
+}
+
+// settleDiff delivers the diff computed by cmd (dropped by settleExternal).
+func settleDiff(m Model, cmd tea.Cmd) Model {
+	for _, msg := range execCmds(cmd) {
+		if ready, ok := msg.(diffReadyMsg); ok {
+			m, _ = deliver(m, ready)
+		}
+	}
+	return m
+}
+
+func TestExternalOpenWithABaseLandsInTheDiff(t *testing.T) {
+	m, _ := gitReviewWorkspace(t)
+	m, _ = deliver(m, workspaceReposMsg{repos: []string{"apps/web", "libs/core"}})
+	m, _, history := externalModel(t, m, true)
+
+	plain := externalRecord("open", "apps/web/main.go#L3")
+	plain.Base = store.ExternalDefaultBase
+	m, cmd, outcome := receive(m, history, plain)
+	m = settleExternal(m, cmd)
+	if m.mode != modeEdit || m.openRel != "apps/web/main.go" || m.edit.cy != 2 {
+		t.Fatalf("HEAD is a plain jump: mode=%v open=%q cy=%d err=%q", m.mode, m.openRel, m.edit.cy, m.errText)
+	}
+	if strings.Contains(outcome, "diff") {
+		t.Fatalf("reply = %q", outcome)
+	}
+
+	m = m.leaveToEditOrQuery()
+	m.mode = modeQuery
+	based := externalRecord("open", "apps/web/main.go#L3")
+	based.Args, based.Base = []string{"HEAD~0"}, "HEAD~0"
+	m, cmd, outcome = receive(m, history, based)
+	if m.mode != modeDiff || m.diffBase != "HEAD~0" || m.openRel != "apps/web/main.go" {
+		t.Fatalf("a named revision opens the diff: mode=%v base=%q open=%q err=%q", m.mode, m.diffBase, m.openRel, m.errText)
+	}
+	if !strings.Contains(outcome, "diff against HEAD~0") {
+		t.Fatalf("reply = %q", outcome)
+	}
+	m = settleDiff(m, cmd)
+	// The base is compared with the working file, whose uncommitted edit
+	// changed line 3.
+	if m.mode != modeDiff || m.diffDocument.adds != 1 || m.diffDocument.dels != 1 {
+		t.Fatalf("diff against the working file: mode=%v +%d -%d err=%q", m.mode, m.diffDocument.adds, m.diffDocument.dels, m.errText)
+	}
+}
+
+func TestExternalOpenWithABaseOutsideGitStillOpens(t *testing.T) {
+	m, _ := newTestModel(t, nil)
+	m, _, history := externalModel(t, m, true)
+	record := externalRecord("open", "main.go#L2")
+	record.Args, record.Base = []string{"v1.2.0"}, "v1.2.0"
+	m, cmd, _ := receive(m, history, record)
+	m = settleExternal(m, cmd)
+	if m.mode != modeEdit || m.openRel != "main.go" {
+		t.Fatalf("the file still opens: mode=%v open=%q", m.mode, m.openRel)
+	}
+	got := historyStatus(t, history, record.Key)
+	if got.Status != store.ExternalOpened || !strings.Contains(got.Note, "not in a git repository") {
+		t.Fatalf("status = %q note = %q", got.Status, got.Note)
+	}
+}
+
+func TestExternalBaseComesFromTheRecord(t *testing.T) {
+	m, _ := newTestModel(t, nil)
+	review := externalRecord("review", "main.go")
+	for _, c := range []struct{ base, want string }{{"main", "main"}, {store.ExternalDefaultBase, ""}} {
+		review.Base = c.base
+		if pending, problem := m.resolveExternal(review); problem != "" || pending.base != c.want {
+			t.Fatalf("base %q → %q (%s), want %q", c.base, pending.base, problem, c.want)
+		}
+	}
+}
+
+func TestExternalReceiverStoresTheBase(t *testing.T) {
+	_, root := newTestModel(t, nil)
+	settings := store.NewMemoryExternalSettings(store.ExternalSettings{Enabled: true, HistoryLimit: 10})
+	history := store.NewMemoryExternalHistory()
+	receiver := NewExternalReceiver(root, settings, history)
+	delivered := make(chan externalMessageMsg, 1)
+	receiver.SetSink(func(msg any) {
+		message := msg.(externalMessageMsg)
+		message.reply <- "done"
+		delivered <- message
+	})
+	for _, c := range []struct{ text, want string }{
+		{"open\nmain.go\n", "HEAD"},
+		{"open a1b2c3d\nmain.go\n", "a1b2c3d"},
+		{"review v1.2.0\nmain.go\n", "v1.2.0"},
+	} {
+		receiver.Handle(c.text)
+		if got := (<-delivered).record.Base; got != c.want {
+			t.Fatalf("%q → base %q, want %q", c.text, got, c.want)
+		}
+	}
+	records, _ := history.LoadExternal()
+	if len(records) != 3 || records[0].Base != "v1.2.0" || records[2].Base != "HEAD" {
+		t.Fatalf("history bases: %+v", records)
+	}
+}
+
+func TestExternalHistoryDetailTakesFocusToScroll(t *testing.T) {
+	m, _ := newTestModel(t, nil)
+	m, _, history := externalModel(t, m, true)
+	paths := make([]string, 120)
+	for i := range paths {
+		paths[i] = "dir/file" + strings.Repeat("x", i%5) + ".go"
+	}
+	older := externalRecord("open", "main.go")
+	older.Key = store.NewExternalRecordKey(time.Unix(1, 0))
+	big := externalRecord("review", paths...)
+	big.Key = store.NewExternalRecordKey(time.Unix(2, 0))
+	must(t, history.AppendExternal(older, 10))
+	must(t, history.AppendExternal(big, 10))
+	m, cmd := m.enterExternalHistory()
+	m = settleExternal(m, cmd)
+	if span := m.externalDetailSpan(); span.total <= span.height {
+		t.Fatalf("fixture: the details must overflow (%d lines, %d high)", span.total, span.height)
+	}
+
+	m = key(m, keyPress(tea.KeyDown))
+	if m.externalHistory.selection.index != 1 || m.externalHistory.detail.scrollY != 0 {
+		t.Fatal("with the list focused ↓ picks the next message")
+	}
+	m = key(m, keyPress(tea.KeyUp))
+	m = key(m, keyPress(tea.KeyRight))
+	if !m.externalHistory.detailFocused {
+		t.Fatal("→ focuses the details")
+	}
+	if !strings.Contains(ansi.Strip(m.View().Content), "← back to the list") {
+		t.Fatal("the focused pane says so")
+	}
+	m = key(m, keyPress(tea.KeyDown))
+	m = key(m, keyPress(tea.KeyDown))
+	if m.externalHistory.detail.scrollY != 2 || m.externalHistory.selection.index != 0 {
+		t.Fatalf("↓ scrolls the details a line at a time: scroll=%d selection=%d", m.externalHistory.detail.scrollY, m.externalHistory.selection.index)
+	}
+	m = key(m, keyPress(tea.KeyEnd))
+	span := m.externalDetailSpan()
+	if m.externalHistory.detail.scrollY != span.total-span.height {
+		t.Fatal("End reaches the last path")
+	}
+	m = key(m, keyPress(tea.KeyDown))
+	if m.externalHistory.detail.scrollY != span.total-span.height {
+		t.Fatal("scrolling stops at the end")
+	}
+
+	m = m.wheelScroll(-1)
+	if m.externalHistory.detail.scrollY != span.total-span.height-wheelScrollLines || m.externalHistory.selection.index != 0 {
+		t.Fatal("the wheel scrolls the focused details")
+	}
+
+	m = key(m, keyPress(tea.KeyEscape))
+	if m.externalHistory.detailFocused || m.mode != modeExternalHistory {
+		t.Fatal("Esc in the details returns to the list, not out of the view")
+	}
+	m = key(m, keyPress(tea.KeyEscape))
+	if m.mode != modeInspect {
+		t.Fatal("Esc in the list leaves the history view")
 	}
 }

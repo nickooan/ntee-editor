@@ -1,6 +1,7 @@
 package app
 
 import (
+	"cmp"
 	"fmt"
 	"strings"
 
@@ -33,7 +34,7 @@ type pendingExternal struct {
 	line        int    // open: 1-based line, 0 = remembered position
 	targetRepo  string // open: the activeRepo to switch to ("" = the workspace)
 	reviewPaths []string
-	reviewBase  string
+	base        string // the revision to compare with, "" = HEAD (diffBaseOf)
 }
 
 // WithExternal attaches the external-message stores and the socket's status
@@ -99,7 +100,7 @@ func sendExternalReply(reply chan<- string, outcome string) {
 // editor re-roots at the file's own repo (or the whole workspace when no
 // repo holds it).
 func (m Model) resolveExternal(record store.ExternalRecord) (pendingExternal, string) {
-	pending := pendingExternal{record: record}
+	pending := pendingExternal{record: record, base: diffBaseOf(record)}
 	switch record.Command {
 	case extmsg.CommandOpen:
 		if len(record.Paths) != 1 {
@@ -126,13 +127,19 @@ func (m Model) resolveExternal(record store.ExternalRecord) (pendingExternal, st
 			workspaceRel, _ := splitLineAnchor(path)
 			pending.reviewPaths = append(pending.reviewPaths, workspaceRel)
 		}
-		if len(record.Args) == 1 {
-			pending.reviewBase = record.Args[0]
-		}
 	default:
 		return pending, "unknown command " + record.Command
 	}
 	return pending, ""
+}
+
+// diffBaseOf is the record's base in the diff and review views' terms, where
+// "" means HEAD.
+func diffBaseOf(record store.ExternalRecord) string {
+	if record.Base == store.ExternalDefaultBase {
+		return ""
+	}
+	return record.Base
 }
 
 // deepestRepoFor is the innermost nested repo holding a workspace-relative
@@ -150,7 +157,7 @@ func (m Model) deepestRepoFor(workspaceRel string) string {
 // carryOutExternal performs a resolved request from wherever the user is.
 func (m Model) carryOutExternal(pending pendingExternal) (Model, tea.Cmd) {
 	if pending.record.Command == extmsg.CommandReview {
-		m, cmd := m.enterReview(pending.reviewPaths, pending.reviewBase)
+		m, cmd := m.enterReview(pending.reviewPaths, pending.base)
 		if m.mode != modeReview {
 			return m, tea.Batch(cmd, m.saveExternalStatusCmd(pending, store.ExternalFailed, m.errText))
 		}
@@ -173,7 +180,18 @@ func (m Model) carryOutExternal(pending pendingExternal) (Model, tea.Cmd) {
 		}
 		return m, tea.Batch(append(cmds, m.saveExternalStatusCmd(pending, store.ExternalFailed, problem))...)
 	}
-	return m, tea.Batch(append(cmds, m.saveExternalStatusCmd(pending, store.ExternalOpened, ""))...)
+	note := ""
+	if pending.base != "" {
+		// A named revision lands in the diff of the file against it. A refusal
+		// (no repo, bad revision) leaves the file open with the reason shown.
+		next, cmd := m.enterDiff(pending.base)
+		m = next.(Model)
+		cmds = append(cmds, cmd)
+		if m.mode != modeDiff {
+			note = "opened without the diff: " + m.errText
+		}
+	}
+	return m, tea.Batch(append(cmds, m.saveExternalStatusCmd(pending, store.ExternalOpened, note))...)
 }
 
 // externalOutcome is the sender's reply after a request was carried out at
@@ -182,6 +200,8 @@ func (m Model) externalOutcome(pending pendingExternal) string {
 	switch {
 	case m.mode == modeReview && pending.record.Command == extmsg.CommandReview:
 		return fmt.Sprintf("reviewing %d files", len(m.review.files))
+	case m.mode == modeDiff && m.openRel == pending.rootRel:
+		return fmt.Sprintf("opened %s at line %d, diff against %s", pending.record.Paths[0], m.edit.cy+1, pending.base)
 	case m.mode == modeEdit && m.openRel == pending.rootRel:
 		return fmt.Sprintf("opened %s at line %d", pending.record.Paths[0], m.edit.cy+1)
 	case m.errText != "":
@@ -218,11 +238,7 @@ func (m Model) externalChoice(pending pendingExternal) choiceOverlay {
 		if len(repos) > 1 {
 			summary += fmt.Sprintf(" across %d repos", len(repos))
 		}
-		base := pending.reviewBase
-		if base == "" {
-			base = "HEAD"
-		}
-		choice.body = append(choice.body, overlayLine{text: summary + " · against " + base, style: overlayLineStrong})
+		choice.body = append(choice.body, overlayLine{text: summary + " · against " + cmp.Or(pending.base, store.ExternalDefaultBase), style: overlayLineStrong})
 		const shown = 5
 		for _, path := range pending.reviewPaths[:min(shown, len(pending.reviewPaths))] {
 			choice.body = append(choice.body, overlayLine{text: "  " + path})
@@ -234,6 +250,9 @@ func (m Model) externalChoice(pending pendingExternal) choiceOverlay {
 	} else {
 		target := pending.record.Paths[0]
 		choice.body = append(choice.body, overlayLine{text: target, style: overlayLineStrong})
+		if pending.base != "" {
+			choice.body = append(choice.body, overlayLine{text: "diff against " + pending.base, style: overlayLineHighlight})
+		}
 		if pending.targetRepo != m.activeRepo {
 			choice.body = append(choice.body, overlayLine{
 				text:  "switches repo: " + m.repoDisplayName(m.activeRepo) + " → " + m.repoDisplayName(pending.targetRepo),

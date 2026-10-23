@@ -37,7 +37,7 @@ func main() {
 	enableLSP := flag.Bool("enable-lsp", false, "re-enable LSP for the named languages (or 'all'); writes the user config")
 	sendMsg := flag.Bool("msg", false, "send a request to the running editor of this directory: --msg open <file>#L<n> · --msg review <files…> (or paths on stdin) · --msg help")
 	msgRoot := flag.String("msg-root", "", "with --msg: the editor's opened folder (default: the nearest running one above the current directory)")
-	msgBase := flag.String("msg-base", "", "with --msg review: the base revision to diff against (default HEAD)")
+	msgBase := flag.String("msg-base", "", "with --msg open/review: the revision to compare the current files against (default HEAD)")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println("ntee-editor " + app.Version)

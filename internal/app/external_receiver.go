@@ -1,6 +1,7 @@
 package app
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"os"
@@ -97,6 +98,7 @@ func (r *ExternalReceiver) Handle(text string) string {
 		Key:        store.NewExternalRecordKey(now),
 		Command:    message.Command,
 		Args:       message.Args,
+		Base:       cmp.Or(message.Base(), store.ExternalDefaultBase),
 		Paths:      paths,
 		Raw:        raw,
 		ReceivedAt: now,

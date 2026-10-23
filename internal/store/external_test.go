@@ -93,6 +93,55 @@ func TestMemoryExternalHistory(t *testing.T) {
 	exerciseExternalHistory(t, NewMemoryExternalHistory())
 }
 
+func TestExternalRecordBaseIsStoredExplicitly(t *testing.T) {
+	history := &ExternalHistory{dir: t.TempDir()}
+	at := time.Unix(2000, 0)
+	records := []ExternalRecord{
+		{Key: NewExternalRecordKey(at), Command: "open", Paths: []string{"a.go"}, ReceivedAt: at},
+		{Key: NewExternalRecordKey(at.Add(time.Second)), Command: "review", Args: []string{"v1.2.0"}, Base: "v1.2.0", Paths: []string{"a.go"}, ReceivedAt: at.Add(time.Second)},
+	}
+	for _, record := range records {
+		if err := history.AppendExternal(record, 10); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var raw map[string]any
+	err := history.withDB(10, func(db *nteedb.DB) error {
+		data, _, err := db.Get(records[0].Key)
+		if err != nil {
+			return err
+		}
+		return json.Unmarshal(data, &raw)
+	})
+	if err != nil || raw["base"] != ExternalDefaultBase {
+		t.Fatalf("no revision is stored as HEAD: %v %v", raw, err)
+	}
+	loaded, _ := history.LoadExternal()
+	if len(loaded) != 2 || loaded[0].Base != "v1.2.0" || loaded[1].Base != ExternalDefaultBase {
+		t.Fatalf("loaded bases: %+v", loaded)
+	}
+}
+
+func TestLegacyExternalRecordsGetABase(t *testing.T) {
+	cases := []struct {
+		json string
+		want string
+	}{
+		{`{"key":"msg:1","command":"open","paths":["a.go"]}`, "HEAD"},
+		{`{"key":"msg:2","command":"review","args":["main"],"paths":["a.go"]}`, "main"},
+		{`{"key":"msg:3","command":"review","args":[],"paths":["a.go"]}`, "HEAD"},
+	}
+	for _, c := range cases {
+		var record ExternalRecord
+		if err := json.Unmarshal([]byte(c.json), &record); err != nil {
+			t.Fatal(err)
+		}
+		if got := record.withDefaultBase().Base; got != c.want {
+			t.Errorf("%s → base %q, want %q", c.json, got, c.want)
+		}
+	}
+}
+
 func TestExternalPathsShareTheProjectHash(t *testing.T) {
 	storeDir, _ := Dir("/some/project")
 	externalDir, _ := ExternalDir("/some/project")

@@ -13,7 +13,7 @@ import (
 // Message is one parsed request: the command line, then one path per line.
 type Message struct {
 	Command string   // CommandOpen or CommandReview
-	Args    []string // tokens after the command (review: an optional base revision)
+	Args    []string // tokens after the command: an optional base revision
 	Paths   []string // payload lines, trimmed, blanks dropped; may carry a #L<n> anchor
 }
 
@@ -57,18 +57,15 @@ func Parse(text string) (Message, error) {
 	}
 	switch message.Command {
 	case CommandOpen:
-		if len(message.Args) > 0 {
-			return Message{}, errors.New("open takes no arguments — put the path on the next line")
+		if err := checkBaseArgument(message.Command, message.Args); err != nil {
+			return Message{}, err
 		}
 		if len(message.Paths) != 1 {
 			return Message{}, fmt.Errorf("open needs exactly one path, got %d", len(message.Paths))
 		}
 	case CommandReview:
-		if len(message.Args) > 1 {
-			return Message{}, errors.New("review takes at most one argument: the base revision")
-		}
-		if len(message.Args) == 1 && strings.HasPrefix(message.Args[0], "-") {
-			return Message{}, errors.New("bad revision: " + message.Args[0])
+		if err := checkBaseArgument(message.Command, message.Args); err != nil {
+			return Message{}, err
 		}
 		if len(message.Paths) == 0 {
 			return Message{}, errors.New("review needs at least one path")
@@ -82,9 +79,21 @@ func Parse(text string) (Message, error) {
 	return message, nil
 }
 
-// Base is a review request's base revision, "" for HEAD.
+// checkBaseArgument allows at most one argument, the base revision. One
+// starting with "-" would reach git's argv as an option, not an operand.
+func checkBaseArgument(command string, args []string) error {
+	if len(args) > 1 {
+		return errors.New(command + " takes at most one argument: the base revision — put paths on the next lines")
+	}
+	if len(args) == 1 && strings.HasPrefix(args[0], "-") {
+		return errors.New("bad revision: " + args[0])
+	}
+	return nil
+}
+
+// Base is the request's base revision, "" for HEAD.
 func (message Message) Base() string {
-	if message.Command == CommandReview && len(message.Args) == 1 {
+	if len(message.Args) == 1 {
 		return message.Args[0]
 	}
 	return ""

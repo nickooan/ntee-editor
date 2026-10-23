@@ -230,8 +230,10 @@ A dashboard for the editor's own machinery. `Shift+↑/↓` switches the left me
   keeps, 1–100, default 10), and how many this project has saved. Press `→`
   to move in: `↑/↓` picks a row, `Enter` toggles the switch, edits the limit
   (type a number, `Enter` saves, `Esc` cancels), or opens the **history** —
-  every saved message on the left, its details and raw text on the right,
-  `Enter` to replay one, `Esc` back.
+  every saved message on the left, its details (including the **git hash**
+  it compares against, `HEAD` by default) and raw text on the right,
+  `Enter` to replay one, `Esc` back. `→` moves focus to the details so `↑/↓`
+  (or the wheel) scroll a long path list; `←` or `Esc` returns to the list.
 
 The `@inspection >` bar takes:
 
@@ -328,23 +330,38 @@ ntee --msg open internal/app/app.go#L120        # jump to a line
 ntee --msg review internal/app/app.go web/src/main.ts old/removed.go
 git diff --name-only | ntee --msg review         # paths on stdin
 ntee --msg --msg-base HEAD~3 review $(git diff --name-only HEAD~3)
+ntee --msg --msg-base a1b2c3d open internal/app/app.go#L120   # diff against a commit
 ntee --msg help                                  # the full guide
 ```
 
-`ntee --msg` finds the editor by walking up from the current directory
-(`--msg-root <dir>` names it). Paths are relative to where you run it, or
-absolute, and must be inside the editor's folder. It prints one reply line —
-`ok …` or `error …` (exit code 1).
+`ntee --msg` finds the editor by walking up from the current directory:
+the nearest folder that a running editor has open gets the message
+(`--msg-root <dir>` names one instead). Run outside every open folder, it
+looks upward from the first path's folder. The same folder open in two editors
+has one listener, the first one. Single-file mode (`ntee <file>`) never
+listens. See [doc/extmsg.md › Which editor gets a message](doc/extmsg.md#which-editor-gets-a-message)
+for the socket naming and the edge cases.
+
+Paths are relative to where you run it, or absolute, and must be inside the
+editor's folder. It prints one reply line — `ok …` or `error …` (exit code 1).
+
+Either request may name a **base revision** with `--msg-base <rev>` (a commit
+hash, tag, branch, `HEAD~2`; on the wire it follows the command on the first
+line, `open <rev>` / `review <rev>`). It is always compared with the current
+files on disk, uncommitted changes included; without one the base is `HEAD`.
+The history saves it and shows it on the message's **git hash** row, and a
+replay compares against the same revision.
 
 - **open** jumps straight there from the query view. If you are busy —
   editing, in a bar, a diff, a preview — a dialog asks first (**Jump** /
   **Ignore**), names the nested repo the editor will switch to when the file
   lives in another one, and notes that unsaved edits are kept as a draft. A
-  newer request replaces an unanswered one.
+  newer request replaces an unanswered one. With a base revision the file
+  opens in the diff view against it (`Esc` back to editing).
 - **review** opens review mode (after the same confirmation when you are
   busy): the files on the left as a folder tree like the main sidebar, each
   badged **M** / **A** / **D** — click a folder to fold or unfold it (a folded
-  one shows how many files it hides); the selected file's diff against `HEAD` on the right, `git diff`
+  one shows how many files it hides); the selected file's diff against the base (`HEAD` by default) on the right, `git diff`
   style — added lines green, removed red, a new file all green, a deleted file
   all red. Files may span several nested repos. Review is read-only (no
   editing, no jump-to-definition), and `Esc` returns you to exactly the file

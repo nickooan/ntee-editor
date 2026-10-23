@@ -22,7 +22,9 @@ func TestParse(t *testing.T) {
 		{text: "", wantErr: "empty message"},
 		{text: "open\n", wantErr: "exactly one path"},
 		{text: "open\na\nb\n", wantErr: "exactly one path"},
-		{text: "open now\na\n", wantErr: "no arguments"},
+		{text: "open abc123\na.go\n", want: Message{Command: "open", Args: []string{"abc123"}, Paths: []string{"a.go"}}},
+		{text: "open -x\na.go\n", wantErr: "bad revision"},
+		{text: "open a b\nx\n", wantErr: "at most one argument"},
 		{text: "review\n", wantErr: "at least one path"},
 		{text: "review --exec=x\na\n", wantErr: "bad revision"},
 		{text: "review a b\nx\n", wantErr: "at most one argument"},
@@ -46,6 +48,12 @@ func TestParse(t *testing.T) {
 	}
 	if message, _ := Parse("review main\na.go"); message.Base() != "main" {
 		t.Errorf("base = %q", message.Base())
+	}
+	if message, _ := Parse("open v1.2.0\na.go"); message.Base() != "v1.2.0" {
+		t.Errorf("open base = %q", message.Base())
+	}
+	if message, _ := Parse("open\na.go"); message.Base() != "" {
+		t.Errorf("no base = %q, want empty (HEAD)", message.Base())
 	}
 }
 

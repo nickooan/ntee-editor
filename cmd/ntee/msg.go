@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/nickooan/ntee-editor/internal/app"
 	"github.com/nickooan/ntee-editor/internal/extmsg"
@@ -46,11 +47,15 @@ const msgHelp = `ntee --msg — send a request to a running ntee editor
         ` + "```" + ` … ` + "```" + `            fenced block on its own lines: shown as is on
                              a dark background, cut (not word-wrapped) at the
                              box edge
+        | a | b |            table: a header row, a |---|---| row, then
+        |---|---|            rows; columns line up, and when the box is too
+        | 1 | 2 |            narrow the widest cells wrap (a cell keeps a
+                             literal pipe as \|)
         blank line           paragraph break
       Line breaks and leading indentation are kept (a tab is the editor's
       all-files tab size, 4 by default), and long lines word-wrap to the
-      box. Anything else — links, tables, _italics_, HTML — shows as plain
-      text, markers included.
+      box. Anything else — links, _italics_, HTML — shows as plain text,
+      markers included.
 
   ntee --msg review <file>...
   git diff --name-only | ntee --msg review
@@ -59,6 +64,39 @@ const msgHelp = `ntee --msg — send a request to a running ntee editor
       deleted files all red). Paths may span nested repos of the workspace,
       and deleted files are fine. Diffs are against HEAD unless
       --msg-base <rev> comes before "review".
+
+Guided sessions — walk the user through code, one note at a time:
+
+  ntee --msg --msg-session <id> --msg-note "<text>" open <file>#L<line>
+  ntee --msg --msg-session <id> wait
+  ntee --msg --msg-session <id> end
+      Every step is an open with a note, sent with the same session id
+      (1–64 letters, digits, '.', '_', '-'; pick a new one per walkthrough).
+      The first step asks the user to start the session; after that each
+      step jumps straight there — other files, other nested repos — without
+      asking. On each step the user presses Enter for the next step or Esc to
+      end the session, and the file is read-only while the step shows.
+      The command waits for that answer (up to --msg-wait, default 10m):
+        ok next       exit 0  the user wants the next step: send it
+        ended …       exit 3  the user ended or declined the session, or it
+                              was already over: stop sending steps
+        ok waiting …  exit 4  no answer yet: run the wait command, which
+                              returns the answer once the user gives it
+        error …       exit 1  the step could not be shown (bad path, another
+                              session running, …)
+      After the last step, send end to close the session.
+
+  A walkthrough an agent might run:
+    ntee --msg --msg-session tour1 --msg-note - open cmd/ntee/main.go#L40 <<'EOF'
+    ## Flags
+    Everything starts here.
+    EOF
+    # exit 0 → next step; exit 3 → stop
+    ntee --msg --msg-session tour1 --msg-note "the request goes out here" open cmd/ntee/msg.go#L180
+    ntee --msg --msg-session tour1 end
+
+  On the wire the session is a first-line option: "open --session=<id>",
+  "wait --session=<id>", "end --session=<id>".
 
 A base revision (a commit hash, tag, branch, HEAD~2, …) is always compared
 with the current files on disk, uncommitted changes included. It travels on
@@ -78,6 +116,7 @@ folder); the user confirms first when busy:
 
 The --msg-* flags go before the command:
   ntee --msg --msg-note "…" open <file>#L<line>
+  ntee --msg --msg-session tour1 --msg-note "…" open <file>#L<line>
 
 External messages are off by default: the user turns them on in ntee under
 Ctrl+T › external. The editor keeps the latest messages (10 by default) and
@@ -85,7 +124,10 @@ can replay them from there.
 
 Reply (one line on stdout):
   ok <detail>       accepted — "opened …", "reviewing N files", or
-                    "waiting for the user to confirm"
+                    "waiting for the user to confirm"; for a session step
+                    "next" (exit 0) or "waiting …" (exit 4)
+  ended <reason>    a session is over — stop sending steps; the exit code
+                    is 3
   error <reason>    refused (disabled, path outside the project, …); the
                     exit code is 1
 
@@ -102,20 +144,44 @@ AGENTS.md:
   To point at a specific place: ` + "`ntee --msg open <file>#L<line>`" + `; to explain
   it, add a note: ` + "`ntee --msg --msg-note \"<why>\" open <file>#L<line>`" + ` (markdown
   is fine; ` + "`--msg-note -`" + ` reads a longer note from stdin).
+  To walk the user through several places, send each as a step of one
+  session: ` + "`ntee --msg --msg-session <id> --msg-note \"<why>\" open <file>#L<line>`" + `;
+  exit 0 means show the next step, exit 3 means the user ended it — stop;
+  finish with ` + "`ntee --msg --msg-session <id> end`" + `.
   Paths are relative to the current directory. The command prints ` + "`ok …`" + ` on
   success; ` + "`error … disabled`" + ` means the user has not enabled external messages
   (Ctrl+T → external) — mention it once and carry on. Run ` + "`ntee --msg help`" + `
   for details.
 `
 
+// msgOptions are the --msg-* flags.
+type msgOptions struct {
+	root    string        // --msg-root: the editor's folder
+	base    string        // --msg-base: the revision to compare against
+	note    string        // --msg-note: the note text, "-" = stdin
+	session string        // --msg-session: the guided session's id
+	wait    time.Duration // --msg-wait: how long a session request waits for the user
+}
+
+// Exit codes beyond 0 (ok) and 1 (error) for guided sessions.
+const (
+	exitSessionEnded   = 3 // the session is over: stop sending steps
+	exitSessionWaiting = 4 // the user hasn't answered yet: run wait
+)
+
 // sendMessage is the --msg client: it resolves the paths, finds the running
 // editor, sends one request, and prints the reply. It returns the exit code.
-func sendMessage(args []string, editorRoot, base, note string) int {
+func sendMessage(args []string, options msgOptions) int {
 	if len(args) == 0 || args[0] == "help" {
 		fmt.Print(msgHelp)
 		return 0
 	}
 	command, paths := strings.ToLower(args[0]), args[1:]
+	note := options.note
+	if err := checkSessionCommand(command, paths, options.session); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
 	if note == "-" {
 		var err error
 		if note, err = readNoteFromStdin(os.Stdin); err != nil {
@@ -144,32 +210,85 @@ func sendMessage(args []string, editorRoot, base, note string) int {
 		paths[i] = absolute
 	}
 
-	socketPath, err := findEditorSocket(editorRoot, paths)
+	socketPath, err := findEditorSocket(options.root, paths)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	reply, err := extmsg.Send(socketPath, buildRequest(command, base, paths, note))
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "cannot reach the editor:", err)
-		return 1
+	output, code := deliverRequest(socketPath, buildRequest(command, options.base, options.session, paths, note), options.session, options.wait)
+	if code == 1 && !extmsg.IsErrorReply(output) {
+		fmt.Fprintln(os.Stderr, output)
+		return code
 	}
-	fmt.Println(reply)
-	if extmsg.IsErrorReply(reply) {
+	fmt.Println(output)
+	return code
+}
+
+// deliverRequest sends a request and turns the reply into the printed line
+// and the exit code. A session request waits for the user up to wait; when
+// that runs out first, the agent is told how to keep waiting.
+func deliverRequest(socketPath, request, session string, wait time.Duration) (string, int) {
+	timeout := 10 * time.Second
+	if session != "" {
+		timeout = wait
+	}
+	reply, err := extmsg.SendWithTimeout(socketPath, request, timeout)
+	switch {
+	case err != nil && session != "" && os.IsTimeout(err):
+		return "ok waiting — the user hasn't answered yet; run: ntee --msg --msg-session " + session + " wait", exitSessionWaiting
+	case err != nil:
+		return "cannot reach the editor: " + err.Error(), 1
+	}
+	return reply, exitCodeForReply(reply)
+}
+
+// exitCodeForReply maps a reply line to the exit code an agent branches on.
+func exitCodeForReply(reply string) int {
+	switch {
+	case extmsg.IsErrorReply(reply):
 		return 1
+	case extmsg.IsEndedReply(reply):
+		return exitSessionEnded
+	case strings.HasPrefix(reply, "ok waiting"):
+		return exitSessionWaiting
 	}
 	return 0
+}
+
+// checkSessionCommand checks the session flag against the command: end and
+// wait act on a session and take no paths; review takes none.
+func checkSessionCommand(command string, paths []string, session string) error {
+	switch command {
+	case extmsg.CommandEnd, extmsg.CommandWait:
+		if session == "" {
+			return fmt.Errorf("%s needs --msg-session <id>", command)
+		}
+		if len(paths) > 0 {
+			return fmt.Errorf("%s takes no paths: ntee --msg --msg-session %s %s", command, session, command)
+		}
+	case extmsg.CommandReview:
+		if session != "" {
+			return errors.New("--msg-session goes with open (each step is an open with a note)")
+		}
+	}
+	return nil
 }
 
 // buildRequest is the wire text: the command and optional base revision on
 // the first line, then one path per line, then the optional note after the
 // separator line.
-func buildRequest(command, base string, paths []string, note string) string {
+func buildRequest(command, base, session string, paths []string, note string) string {
 	header := command
+	if session != "" {
+		header += " " + extmsg.SessionOption + session
+	}
 	if base != "" {
 		header += " " + base
 	}
-	request := header + "\n" + strings.Join(paths, "\n") + "\n"
+	request := header + "\n"
+	if len(paths) > 0 {
+		request += strings.Join(paths, "\n") + "\n"
+	}
 	if note != "" {
 		request += extmsg.LineNoteSeparator + "\n" + note + "\n"
 	}

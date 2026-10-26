@@ -145,6 +145,9 @@ func TestExternalRecordLineNoteIsStoredExplicitly(t *testing.T) {
 	if value, present := raw["lineNote"]; err != nil || !present || value != "" {
 		t.Fatalf("no note is stored as an explicit empty lineNote: %v %v", raw, err)
 	}
+	if value, present := raw["session"]; !present || value != "" {
+		t.Fatalf("no session is stored as an explicit empty session: %v", raw)
+	}
 	loaded, _ := history.LoadExternal()
 	if len(loaded) != 2 || loaded[0].LineNote != "# Why\n\n- kept" || loaded[1].LineNote != "" {
 		t.Fatalf("loaded notes: %+v", loaded)

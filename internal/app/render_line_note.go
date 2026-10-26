@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -10,15 +11,16 @@ import (
 )
 
 var (
-	lineNoteTextStyle      = lipgloss.NewStyle().Foreground(colFg).Background(colBgChrome)
-	lineNoteBorderStyle    = lipgloss.NewStyle().Foreground(colComment).Background(colBgChrome)
-	lineNoteTitleStyle     = lipgloss.NewStyle().Foreground(colAqua).Bold(true).Background(colBgChrome)
-	lineNoteHeadingStyle   = lipgloss.NewStyle().Foreground(colAqua).Bold(true).Background(colBgChrome)
-	lineNoteBoldStyle      = lipgloss.NewStyle().Foreground(colFg).Bold(true).Background(colBgChrome)
-	lineNoteCodeStyle      = lipgloss.NewStyle().Foreground(colYellow).Background(colBgChrome)
-	lineNoteCodeBlockStyle = lipgloss.NewStyle().Foreground(colFg).Background(colBg)
-	lineNoteMarkerStyle    = lipgloss.NewStyle().Foreground(colOrange).Background(colBgChrome)
-	lineNoteQuoteStyle     = lipgloss.NewStyle().Foreground(colComment).Italic(true).Background(colBgChrome)
+	lineNoteTextStyle         = lipgloss.NewStyle().Foreground(colFg).Background(colBgChrome)
+	lineNoteBorderStyle       = lipgloss.NewStyle().Foreground(colComment).Background(colBgChrome)
+	lineNoteTitleStyle        = lipgloss.NewStyle().Foreground(colAqua).Bold(true).Background(colBgChrome)
+	lineNoteSessionTitleStyle = lipgloss.NewStyle().Foreground(colOrange).Bold(true).Background(colBgChrome)
+	lineNoteHeadingStyle      = lipgloss.NewStyle().Foreground(colAqua).Bold(true).Background(colBgChrome)
+	lineNoteBoldStyle         = lipgloss.NewStyle().Foreground(colFg).Bold(true).Background(colBgChrome)
+	lineNoteCodeStyle         = lipgloss.NewStyle().Foreground(colYellow).Background(colBgChrome)
+	lineNoteCodeBlockStyle    = lipgloss.NewStyle().Foreground(colFg).Background(colBg)
+	lineNoteMarkerStyle       = lipgloss.NewStyle().Foreground(colOrange).Background(colBgChrome)
+	lineNoteQuoteStyle        = lipgloss.NewStyle().Foreground(colComment).Italic(true).Background(colBgChrome)
 )
 
 // overlayLineNote splices the note box onto the rendered file rows.
@@ -27,7 +29,11 @@ func (m Model) overlayLineNote(rows []string, start, gutterWidth, contentWidth, 
 	if !ok {
 		return rows
 	}
-	boxRows := renderLineNoteBox(box, m.lineNote.line+1)
+	title := fmt.Sprintf(" note · L%d ", m.lineNote.line+1)
+	if note := m.lineNote; note.session != "" {
+		title = fmt.Sprintf(" %s · step %d · L%d ", note.session, note.step, note.line+1)
+	}
+	boxRows := renderLineNoteBox(box, title, m.lineNote.session != "")
 	for i, boxRow := range boxRows {
 		rowIndex := box.top + i
 		if rowIndex < 0 || rowIndex >= len(rows) {
@@ -39,17 +45,21 @@ func (m Model) overlayLineNote(rows []string, start, gutterWidth, contentWidth, 
 }
 
 // renderLineNoteBox draws the bordered box, every row exactly box.width
-// cells: the title on the top border, the scroll state and Esc hint on the
-// bottom one.
-func renderLineNoteBox(box lineNoteBox, lineNumber int) []string {
+// cells: the title on the top border, the scroll state and key hints on the
+// bottom one. A session step's title stands out in orange.
+func renderLineNoteBox(box lineNoteBox, title string, session bool) []string {
 	horizontal := box.width - 2
-	title := ansi.Truncate(fmt.Sprintf(" note · L%d ", lineNumber), max(0, horizontal-1), "")
-	top := lineNoteBorderStyle.Render("╭─") + lineNoteTitleStyle.Render(title) +
+	title = ansi.Truncate(title, max(0, horizontal-1), "")
+	titleStyle := lineNoteTitleStyle
+	if session {
+		titleStyle = lineNoteSessionTitleStyle
+	}
+	top := lineNoteBorderStyle.Render("╭─") + titleStyle.Render(title) +
 		lineNoteBorderStyle.Render(strings.Repeat("─", max(0, horizontal-1-ansi.StringWidth(title)))+"╮")
 
 	// The longest hint that fits the border wins.
 	hint := ""
-	for _, candidate := range lineNoteHints(box) {
+	for _, candidate := range lineNoteHints(box, session) {
 		if ansi.StringWidth(candidate) <= horizontal-2 {
 			hint = candidate
 			break
@@ -69,10 +79,15 @@ func renderLineNoteBox(box lineNoteBox, lineNumber int) []string {
 }
 
 // lineNoteHints are the bottom-border hints, longest first: the rows
-// scrolled past and still below, the scroll keys, and Esc.
-func lineNoteHints(box lineNoteBox) []string {
+// scrolled past and still below, the scroll keys, and the keys that close
+// the box — Esc, or for a session step Enter (next) and Esc (end).
+func lineNoteHints(box lineNoteBox, session bool) []string {
+	closeHints := []string{"esc close", "esc"}
+	if session {
+		closeHints = []string{"enter next · esc end session", "enter next · esc end"}
+	}
 	if len(box.lines) <= box.bodyRows {
-		return []string{" esc close ", " esc "}
+		return []string{" " + closeHints[0] + " ", " " + closeHints[1] + " "}
 	}
 	position := []string{}
 	if above := box.scroll; above > 0 {
@@ -83,9 +98,9 @@ func lineNoteHints(box lineNoteBox) []string {
 	}
 	where := strings.Join(position, " · ")
 	return []string{
-		" " + where + " · shift+↑↓/wheel · esc close ",
-		" " + where + " · shift+↑↓ · esc ",
-		" " + where + " · esc ",
+		" " + where + " · shift+↑↓/wheel · " + closeHints[0] + " ",
+		" " + where + " · shift+↑↓ · " + closeHints[1] + " ",
+		" " + where + " · " + closeHints[1] + " ",
 		" " + where + " ",
 	}
 }
@@ -113,8 +128,9 @@ func layoutLineNote(text string, innerWidth, tabWidth int) []string {
 	innerWidth = max(1, innerWidth)
 	var out []string
 	inFence := false
-	for _, sourceLine := range strings.Split(text, "\n") {
-		sourceLine = expandTabs(sourceLine, tabWidth)
+	sourceLines := strings.Split(text, "\n")
+	for lineIndex := 0; lineIndex < len(sourceLines); lineIndex++ {
+		sourceLine := expandTabs(sourceLines[lineIndex], tabWidth)
 		trimmed := strings.TrimSpace(sourceLine)
 		if strings.HasPrefix(trimmed, "```") {
 			inFence = !inFence
@@ -133,6 +149,19 @@ func layoutLineNote(text string, innerWidth, tabWidth int) []string {
 
 		indent := len(sourceLine) - len(strings.TrimLeft(sourceLine, " "))
 		indent = min(indent, innerWidth/2)
+		if isNoteTableStart(sourceLines, lineIndex) {
+			end := lineIndex + 2
+			for end < len(sourceLines) && strings.Contains(sourceLines[end], "|") && strings.TrimSpace(sourceLines[end]) != "" {
+				end++
+			}
+			rows := [][]string{splitNoteTableRow(trimmed)}
+			for _, rowLine := range sourceLines[lineIndex+2 : end] {
+				rows = append(rows, splitNoteTableRow(strings.TrimSpace(expandTabs(rowLine, tabWidth))))
+			}
+			out = append(out, layoutNoteTable(rows, indent, innerWidth)...)
+			lineIndex = end - 1
+			continue
+		}
 		marker, markerStyle, body, bodyStyle := "", lineNoteTextStyle, trimmed, lineNoteTextStyle
 		if match := noteHeadingPattern.FindStringSubmatch(trimmed); match != nil {
 			body, bodyStyle = match[2], lineNoteHeadingStyle
@@ -161,6 +190,144 @@ func layoutLineNote(text string, innerWidth, tabWidth int) []string {
 		out = append(out, lineNoteTextStyle.Render(strings.Repeat(" ", innerWidth)))
 	}
 	return out
+}
+
+// noteTableDelimiterPattern is a table's second line: |---|:--:| cells.
+var noteTableDelimiterPattern = regexp.MustCompile(`^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?$`)
+
+// isNoteTableStart reports whether lines[index] is a table's header row: it
+// has a column bar and the next line is a delimiter row.
+func isNoteTableStart(lines []string, index int) bool {
+	if index+1 >= len(lines) || !strings.Contains(lines[index], "|") {
+		return false
+	}
+	delimiter := strings.TrimSpace(lines[index+1])
+	return strings.Contains(delimiter, "-") && noteTableDelimiterPattern.MatchString(delimiter)
+}
+
+// splitNoteTableRow cuts a table row into trimmed cells; the outer bars are
+// optional and an escaped \| stays in the cell.
+func splitNoteTableRow(line string) []string {
+	line = strings.TrimPrefix(line, "|")
+	if strings.HasSuffix(line, "|") && !strings.HasSuffix(line, "\\|") {
+		line = line[:len(line)-1]
+	}
+	var cells []string
+	var cell strings.Builder
+	for index := 0; index < len(line); index++ {
+		switch {
+		case line[index] == '\\' && index+1 < len(line) && line[index+1] == '|':
+			cell.WriteByte('|')
+			index++
+		case line[index] == '|':
+			cells = append(cells, strings.TrimSpace(cell.String()))
+			cell.Reset()
+		default:
+			cell.WriteByte(line[index])
+		}
+	}
+	return append(cells, strings.TrimSpace(cell.String()))
+}
+
+// layoutNoteTable draws a markdown table: a bold header, a rule, and the
+// rows, columns split by │. Columns take their content's width; when the
+// table is wider than the box, the widest columns give way first and their
+// cells word-wrap onto more lines.
+func layoutNoteTable(rows [][]string, indent, innerWidth int) []string {
+	columns := 0
+	for _, row := range rows {
+		columns = max(columns, len(row))
+	}
+	cellSpans := make([][][]noteSpan, len(rows))
+	natural := make([]int, columns)
+	for rowIndex, row := range rows {
+		style := lineNoteTextStyle
+		if rowIndex == 0 {
+			style = lineNoteHeadingStyle
+		}
+		cellSpans[rowIndex] = make([][]noteSpan, columns)
+		for column := 0; column < columns; column++ {
+			text := ""
+			if column < len(row) {
+				text = row[column]
+			}
+			spans := parseNoteInline(text, style)
+			cellSpans[rowIndex][column] = spans
+			width := 0
+			for _, span := range spans {
+				width += ansi.StringWidth(span.text)
+			}
+			natural[column] = max(natural[column], width, 1)
+		}
+	}
+
+	const separatorWidth = 3 // " │ "
+	widths := fitNoteTableColumns(natural, innerWidth-indent-separatorWidth*(columns-1))
+	prefix := lineNoteTextStyle.Render(strings.Repeat(" ", indent))
+	separator := lineNoteBorderStyle.Render(" │ ")
+	tableWidth := indent + separatorWidth*(columns-1)
+	for _, width := range widths {
+		tableWidth += width
+	}
+
+	var out []string
+	for rowIndex := range rows {
+		wrapped := make([][]wrappedNoteLine, columns)
+		height := 1
+		for column := 0; column < columns; column++ {
+			wrapped[column] = wrapNoteSpans(cellSpans[rowIndex][column], widths[column])
+			height = max(height, len(wrapped[column]))
+		}
+		for lineIndex := 0; lineIndex < height; lineIndex++ {
+			var line strings.Builder
+			line.WriteString(prefix)
+			for column := 0; column < columns; column++ {
+				if column > 0 {
+					line.WriteString(separator)
+				}
+				piece := wrappedNoteLine{}
+				if lineIndex < len(wrapped[column]) {
+					piece = wrapped[column][lineIndex]
+				}
+				line.WriteString(padStyled(piece.text, piece.width, widths[column], lineNoteTextStyle))
+			}
+			out = append(out, padStyled(line.String(), tableWidth, innerWidth, lineNoteTextStyle))
+		}
+		if rowIndex == 0 {
+			rule := make([]string, columns)
+			for column, width := range widths {
+				rule[column] = strings.Repeat("─", width)
+			}
+			ruleLine := prefix + lineNoteBorderStyle.Render(strings.Join(rule, "─┼─"))
+			out = append(out, padStyled(ruleLine, tableWidth, innerWidth, lineNoteTextStyle))
+		}
+	}
+	return out
+}
+
+// fitNoteTableColumns shrinks column widths to fit available cells, taking
+// from the widest column one cell at a time so narrow columns keep their
+// text; no column drops below 3 cells (or its own width, when narrower).
+func fitNoteTableColumns(natural []int, available int) []int {
+	widths := slices.Clone(natural)
+	total := 0
+	for _, width := range widths {
+		total += width
+	}
+	for total > available {
+		widest := 0
+		for column, width := range widths {
+			if width > widths[widest] {
+				widest = column
+			}
+		}
+		if widths[widest] <= 3 {
+			break
+		}
+		widths[widest]--
+		total--
+	}
+	return widths
 }
 
 // parseNoteInline splits text into spans: `code` and **bold** runs styled,

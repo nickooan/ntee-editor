@@ -19,12 +19,19 @@ const (
 
 // Send delivers one request and returns the editor's reply line.
 func Send(socketPath, text string) (string, error) {
+	return SendWithTimeout(socketPath, text, replyTimeout)
+}
+
+// SendWithTimeout is Send with the time to wait for the reply — a session
+// step waits for the user, far longer than a plain request. A timeout is an
+// error satisfying os.IsTimeout.
+func SendWithTimeout(socketPath, text string, timeout time.Duration) (string, error) {
 	conn, err := net.DialTimeout("unix", socketPath, dialTimeout)
 	if err != nil {
 		return "", err
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(replyTimeout))
+	_ = conn.SetDeadline(time.Now().Add(timeout))
 	writeErr := writeRequest(conn, text)
 	reply, readErr := io.ReadAll(io.LimitReader(conn, 64<<10))
 	// The editor may answer and close before reading everything (a refused

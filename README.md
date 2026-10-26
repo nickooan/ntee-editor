@@ -379,7 +379,7 @@ replay compares against the same revision.
   `#L<line>` anchor) also shows the note in a box under the line — right of
   the line numbers, as wide as the note needs up to the pane, word-wrapped,
   with light markdown (`# heading`, `- bullet`, `` `code` ``, `**bold**`,
-  fenced blocks). The editor stays live: move the cursor and scroll as usual,
+  fenced blocks, `| pipe | tables |`). The editor stays live: move the cursor and scroll as usual,
   scroll a tall note with `Shift+↑/↓` or the mouse wheel over the box, and press `Esc` to
   close it (it also closes on your first edit). On the wire the note follows
   the path after a line that is exactly `---`.
@@ -391,6 +391,24 @@ replay compares against the same revision.
   all red. Files may span several nested repos. Review is read-only (no
   editing, no jump-to-definition), and `Esc` returns you to exactly the file
   and repo you were on.
+
+- **guided session** (`--msg-session <id>` on each step) walks you through
+  code one note at a time. The first step asks **Start session / Decline**;
+  after that every step jumps straight to its file — other files, other
+  nested repos — without asking. On each step's box, `Enter` asks the agent
+  for the next step and `Esc` ends the session; while a step shows, the file
+  is read-only (move, scroll and `Shift+↑/↓` the note still work). The status
+  bar shows `● session <id> · step N` while one runs. The agent's command
+  waits for your answer: it prints `ok next` (exit 0), `ended …` (exit 3 —
+  stop), or after `--msg-wait` (default 10m) `ok waiting …` (exit 4), when
+  `ntee --msg --msg-session <id> wait` picks the answer up later. The agent
+  closes a finished walkthrough with `ntee --msg --msg-session <id> end`.
+
+  ```sh
+  ntee --msg --msg-session tour1 --msg-note "flags start here" open cmd/ntee/main.go#L40
+  ntee --msg --msg-session tour1 --msg-note "the request goes out" open cmd/ntee/msg.go#L180
+  ntee --msg --msg-session tour1 end
+  ```
 
 | Review key | Action |
 |---|---|
@@ -414,6 +432,10 @@ The user edits in ntee-editor. After changing files, send them for review:
 To point at a specific place: `ntee --msg open <file>#L<line>`; to explain
 it, add a note: `ntee --msg --msg-note "<why>" open <file>#L<line>` (markdown
 is fine; `--msg-note -` reads a longer note from stdin).
+To walk the user through several places, send each as a step of one session:
+`ntee --msg --msg-session <id> --msg-note "<why>" open <file>#L<line>`; exit 0
+means show the next step, exit 3 means the user ended it — stop; finish with
+`ntee --msg --msg-session <id> end`.
 Paths are relative to the current directory. The command prints `ok …` on
 success; `error … disabled` means the user has not enabled external messages
 (Ctrl+T → external) — mention it once and carry on. Run `ntee --msg help`

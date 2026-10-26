@@ -244,14 +244,14 @@ func TestShiftArrowsScrollATallNote(t *testing.T) {
 
 func TestLineNoteHintsFitTheBorder(t *testing.T) {
 	box := lineNoteBox{lines: make([]string, 20), bodyRows: 5, scroll: 3}
-	if hints := lineNoteHints(box); hints[0] != " ↑ 3 · ↓ 12 more · shift+↑↓/wheel · esc close " {
+	if hints := lineNoteHints(box, false); hints[0] != " ↑ 3 · ↓ 12 more · shift+↑↓/wheel · esc close " {
 		t.Fatalf("full hint = %q", hints[0])
 	}
 	box.scroll = 15
-	if hints := lineNoteHints(box); !strings.HasPrefix(hints[0], " ↑ 15 · shift") {
+	if hints := lineNoteHints(box, false); !strings.HasPrefix(hints[0], " ↑ 15 · shift") {
 		t.Fatalf("at the bottom = %q", hints[0])
 	}
-	if hints := lineNoteHints(lineNoteBox{lines: make([]string, 3), bodyRows: 3}); hints[0] != " esc close " {
+	if hints := lineNoteHints(lineNoteBox{lines: make([]string, 3), bodyRows: 3}, false); hints[0] != " esc close " {
 		t.Fatalf("a note that fits = %q", hints[0])
 	}
 }
@@ -368,6 +368,56 @@ func TestLayoutLineNote(t *testing.T) {
 	}
 	if !strings.Contains(lines[0], "\x1b[1") {
 		t.Fatal("the heading is bold")
+	}
+}
+
+func TestLayoutLineNoteTables(t *testing.T) {
+	text := "intro\n| key | what it does |\n|:---|---:|\n| `enter` | asks the agent for the **next** step |\n| esc | ends the session |\n| a \\| b | pipe |\nafter"
+	for _, width := range []int{60, 28} {
+		lines := layoutLineNote(text, width, config.DefaultTabWidth)
+		var plain []string
+		for index, line := range lines {
+			if got := ansi.StringWidth(line); got != width {
+				t.Fatalf("width %d: line %d is %d cells: %q", width, index, got, ansi.Strip(line))
+			}
+			plain = append(plain, ansi.Strip(line))
+		}
+		joined := strings.Join(plain, "\n")
+		if strings.Contains(joined, "|---") || strings.Contains(joined, "| key") || strings.Contains(joined, "`") || strings.Contains(joined, "**") {
+			t.Fatalf("width %d: markdown table syntax is drawn, not shown:\n%s", width, joined)
+		}
+		for _, want := range []string{"key", "│", "┼", "esc", "ends the session", "a | b", "intro", "after"} {
+			if !strings.Contains(joined, want) {
+				t.Fatalf("width %d: missing %q:\n%s", width, want, joined)
+			}
+		}
+		// Every body row's column bar lines up with the header's.
+		barColumn := func(line string) int { return ansi.StringWidth(line[:strings.IndexAny(line, "│┼")]) }
+		bar := barColumn(plain[1])
+		for _, line := range plain[1:] {
+			if strings.HasPrefix(line, "intro") || strings.HasPrefix(line, "after") || strings.TrimSpace(line) == "" {
+				continue
+			}
+			if !strings.ContainsAny(line, "│┼") {
+				t.Fatalf("width %d: a table line has no column bar: %q", width, line)
+			}
+			if column := barColumn(line); column != bar {
+				t.Fatalf("width %d: columns don't line up (%d vs %d):\n%s", width, column, bar, joined)
+			}
+		}
+	}
+	narrow := strings.Join(func() []string {
+		var plain []string
+		for _, line := range layoutLineNote(text, 28, config.DefaultTabWidth) {
+			plain = append(plain, ansi.Strip(line))
+		}
+		return plain
+	}(), "\n")
+	if !strings.Contains(narrow, "asks the agent") || !strings.Contains(narrow, "step") {
+		t.Fatalf("a narrow table wraps its cells:\n%s", narrow)
+	}
+	if lines := layoutLineNote("a | b\nnot a delimiter", 30, config.DefaultTabWidth); strings.Contains(ansi.Strip(strings.Join(lines, "\n")), "│") {
+		t.Fatal("a bar without a delimiter row is plain text")
 	}
 }
 

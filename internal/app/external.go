@@ -36,6 +36,10 @@ type pendingExternal struct {
 	reviewPaths []string
 	base        string // the revision to compare with, "" = HEAD (diffBaseOf)
 	lineNote    string // open: the sender's note for the line, "" = none
+	// session is the guided session this open is a step of ("" = none; a
+	// replay is never one). sessionReply waits for the user's answer.
+	session      string
+	sessionReply chan<- string
 }
 
 // WithExternal attaches the external-message stores and the socket's status
@@ -57,6 +61,9 @@ type externalStatusSavedMsg struct{ err error }
 // view, an overlay — the user is asked first. A newer request replaces an
 // unanswered one.
 func (m Model) handleExternalMessage(msg externalMessageMsg) (tea.Model, tea.Cmd) {
+	if msg.record.Session != "" && !msg.replay {
+		return m.handleSessionMessage(msg)
+	}
 	pending, problem := m.resolveExternal(msg.record)
 	pending.replay = msg.replay
 	if problem != "" {
@@ -65,14 +72,7 @@ func (m Model) handleExternalMessage(msg externalMessageMsg) (tea.Model, tea.Cmd
 		return m, m.saveExternalStatusCmd(pending, store.ExternalFailed, problem)
 	}
 
-	var cmds []tea.Cmd
-	if previous := m.external.pending; previous != nil {
-		cmds = append(cmds, m.saveExternalStatusCmd(*previous, store.ExternalSuperseded, "a newer request arrived"))
-		m.external.pending = nil
-		if m.choice.kind == choiceExternalRequest {
-			m.choice = choiceOverlay{}
-		}
-	}
+	m, cmds := m.supersedePendingExternal()
 	if m.mode == modeQuery && !m.overlayOpen() {
 		next, cmd := m.carryOutExternal(pending)
 		sendExternalReply(msg.reply, next.externalOutcome(pending))
@@ -88,6 +88,21 @@ func (m Model) handleExternalMessage(msg externalMessageMsg) (tea.Model, tea.Cmd
 	m.choice = m.externalChoice(pending)
 	sendExternalReply(msg.reply, "waiting for the user to confirm")
 	return m, tea.Batch(cmds...)
+}
+
+// supersedePendingExternal drops an unanswered request for a newer one: its
+// record notes why, and a session waiting to start hears it never will.
+func (m Model) supersedePendingExternal() (Model, []tea.Cmd) {
+	previous := m.external.pending
+	if previous == nil {
+		return m, nil
+	}
+	m.external.pending = nil
+	if m.choice.kind == choiceExternalRequest {
+		m.choice = choiceOverlay{}
+	}
+	sendExternalReply(previous.sessionReply, extmsg.EndedReply("session "+previous.session+" was superseded by another request before it started — stop sending steps"))
+	return m, []tea.Cmd{m.saveExternalStatusCmd(*previous, store.ExternalSuperseded, "a newer request arrived")}
 }
 
 func sendExternalReply(reply chan<- string, outcome string) {
@@ -184,6 +199,7 @@ func (m Model) carryOutExternal(pending pendingExternal) (Model, tea.Cmd) {
 	}
 	if pending.lineNote != "" && pending.line > 0 {
 		m.lineNote = newLineNote(m.openRel, m.edit.cy, pending.lineNote, m.edit.rev, m.cfg.Editor.TabWidth)
+		m.lineNote.session = pending.session
 	}
 	note := ""
 	if pending.base != "" {
@@ -231,6 +247,9 @@ func (m Model) resolveExternalChoice(accept bool) (Model, tea.Cmd) {
 	m.external.pending = nil
 	if pending == nil {
 		return m, nil
+	}
+	if pending.session != "" {
+		return m.resolveSessionStart(*pending, accept)
 	}
 	if !accept {
 		m.notice = "external " + pending.record.Command + " ignored"

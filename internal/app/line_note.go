@@ -20,6 +20,11 @@ type lineNoteOverlay struct {
 	editRevision int // m.edit.rev when shown — any edit hides the note
 	scroll       int // first note row shown when the box is capped
 	layout       *lineNoteLayoutCache
+	// session is the guided session this note is a step of ("" = a plain
+	// note); step numbers it. A step is read-only, so edits never hide it,
+	// and it outlives switching to another file.
+	session string
+	step    int
 }
 
 // lineNoteLayoutCache memoizes the wrapped, styled note for one inner width;
@@ -30,9 +35,12 @@ type lineNoteLayoutCache struct {
 }
 
 const (
-	lineNoteMargin   = 2   // cells kept clear on each side of the box
-	lineNoteMinWidth = 30  // box width floor, when the pane allows it
-	lineNoteMaxWidth = 100 // box width cap: prose past this gets hard to read
+	lineNoteMargin   = 2  // cells kept clear on each side of the box
+	lineNoteMinWidth = 30 // box width floor, when the pane allows it
+	// lineNoteSessionMinWidth fits a session step's "enter next · esc end
+	// session" hint.
+	lineNoteSessionMinWidth = 40
+	lineNoteMaxWidth        = 100 // box width cap: prose past this gets hard to read
 )
 
 func newLineNote(rel string, line int, text string, editRevision, tabWidth int) lineNoteOverlay {
@@ -56,7 +64,7 @@ func newLineNote(rel string, line int, text string, editRevision, tabWidth int) 
 func (m Model) lineNoteVisible() bool {
 	note := m.lineNote
 	return note.text != "" && (m.mode == modeEdit || m.mode == modeExec) && m.openFile != nil &&
-		m.openRel == note.rel && m.edit.rev == note.editRevision
+		m.openRel == note.rel && (note.session != "" || m.edit.rev == note.editRevision)
 }
 
 // lines is the note laid out for innerWidth, from the cache when the width
@@ -96,7 +104,11 @@ func (m Model) lineNoteGeometry(start, gutterWidth, contentWidth, height int) (l
 	}
 	note := m.lineNote
 	box := lineNoteBox{left: gutterWidth + 3 + lineNoteMargin}
-	box.width = input.Clamp(note.naturalWidth+4, min(lineNoteMinWidth, available), min(available, lineNoteMaxWidth))
+	minimum := lineNoteMinWidth
+	if note.session != "" {
+		minimum = lineNoteSessionMinWidth // room for the Enter/Esc hint
+	}
+	box.width = input.Clamp(note.naturalWidth+4, min(minimum, available), min(available, lineNoteMaxWidth))
 	box.innerWidth = box.width - 4 // border + one cell of padding per side
 	box.lines = note.lines(box.innerWidth)
 	box.bodyRows = min(len(box.lines), max(3, height/2-2))

@@ -6,7 +6,7 @@
 // a file opens in edit mode with its folder as the project, and a file that
 // doesn't exist yet opens empty and is created on the first save)
 //
-//	ntee --msg [--msg-note <text|->] <open|review|help> [paths…]   send a request to a running editor
+//	ntee --msg [--msg-note <text|->] [--msg-session <id>] <open|review|end|wait|help> [paths…]   send a request to a running editor
 package main
 
 import (
@@ -17,6 +17,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"gopkg.in/yaml.v3"
@@ -39,13 +40,15 @@ func main() {
 	msgRoot := flag.String("msg-root", "", "with --msg: the editor's opened folder (default: the nearest running one above the current directory)")
 	msgBase := flag.String("msg-base", "", "with --msg open/review: the revision to compare the current files against (default HEAD)")
 	msgNote := flag.String("msg-note", "", "with --msg open: a note shown in a box next to the line, light markdown (needs <file>#L<n>); '-' reads it from stdin")
+	msgSession := flag.String("msg-session", "", "with --msg: run the request as a step of a guided session <id> — the user confirms once, Enter shows the next step, Esc ends it (also: --msg --msg-session <id> wait|end)")
+	msgWait := flag.Duration("msg-wait", 10*time.Minute, "with --msg-session: how long a step waits for the user's Enter/Esc before printing \"ok waiting\" (exit 4)")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println("ntee-editor " + app.Version)
 		return
 	}
 	if *sendMsg {
-		os.Exit(sendMessage(flag.Args(), *msgRoot, *msgBase, *msgNote))
+		os.Exit(sendMessage(flag.Args(), msgOptions{root: *msgRoot, base: *msgBase, note: *msgNote, session: *msgSession, wait: *msgWait}))
 	}
 	if *disableLSP || *enableLSP {
 		if *disableLSP && *enableLSP {

@@ -45,6 +45,7 @@ type ExternalReceiver struct {
 	settings      store.ExternalSettingsStore
 	history       store.ExternalHistoryStore
 	queue         chan externalMessageMsg
+	sessionWait   time.Duration // how long a session request waits for the user
 }
 
 func NewExternalReceiver(workspaceRoot string, settings store.ExternalSettingsStore, history store.ExternalHistoryStore) *ExternalReceiver {
@@ -53,6 +54,7 @@ func NewExternalReceiver(workspaceRoot string, settings store.ExternalSettingsSt
 		settings:      settings,
 		history:       history,
 		queue:         make(chan externalMessageMsg, externalQueueSize),
+		sessionWait:   extmsg.MaxSessionWait,
 	}
 }
 
@@ -107,12 +109,16 @@ func (r *ExternalReceiver) Handle(text string) string {
 		Paths:      paths,
 		Raw:        raw,
 		LineNote:   message.LineNote,
+		Session:    message.Session,
 		ReceivedAt: now,
 		Status:     store.ExternalPending,
 	}
 	historyWarning := ""
-	if err := r.history.AppendExternal(record, settings.HistoryLimit); err != nil {
-		historyWarning = " (not saved to history: " + err.Error() + ")"
+	control := message.Command == extmsg.CommandEnd || message.Command == extmsg.CommandWait
+	if !control { // a session's end/wait is no request to replay
+		if err := r.history.AppendExternal(record, settings.HistoryLimit); err != nil {
+			historyWarning = " (not saved to history: " + err.Error() + ")"
+		}
 	}
 
 	reply := make(chan string, 1)
@@ -121,18 +127,33 @@ func (r *ExternalReceiver) Handle(text string) string {
 	default:
 		return extmsg.ErrorReply("the editor is busy — try again shortly")
 	}
+	// A session request is answered by the user (Enter/Esc), so it waits for
+	// them; anything else gets the UI's immediate outcome.
+	wait := externalReplyWait
+	if message.Session != "" {
+		wait = r.sessionWait
+	}
 	select {
 	case outcome := <-reply:
 		return replyFromOutcome(outcome) + historyWarning
-	case <-time.After(externalReplyWait):
+	case <-time.After(wait):
+		if message.Session != "" {
+			return extmsg.OkReply(sessionWaitingReply(message.Session))
+		}
 		return extmsg.OkReply("delivered" + historyWarning)
 	}
 }
 
+// sessionWaitingReply tells a session's agent the user hasn't answered yet
+// and how to keep waiting.
+func sessionWaitingReply(session string) string {
+	return "waiting — the user hasn't answered yet; run: ntee --msg --msg-session " + session + " wait"
+}
+
 // replyFromOutcome turns the UI's outcome into the sender's reply line: an
-// outcome starting with "error " is already an error reply.
+// outcome starting with "error " or "ended " is already a reply.
 func replyFromOutcome(outcome string) string {
-	if extmsg.IsErrorReply(outcome) {
+	if extmsg.IsErrorReply(outcome) || extmsg.IsEndedReply(outcome) {
 		return outcome
 	}
 	return extmsg.OkReply(outcome)

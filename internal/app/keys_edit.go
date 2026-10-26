@@ -36,6 +36,12 @@ func (m Model) handleEditKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	t := keyText(msg)
 	isText := t != "" && k != "space"
 
+	if m.sessionStepVisible() {
+		if next, handled := m.handleSessionStepKey(k); handled {
+			return next, nil
+		}
+	}
+
 	// The completion popup, when open, consumes its navigation/accept/dismiss
 	// keys; any other key (except typing/backspace, which manage the popup
 	// themselves) closes it and is then processed normally.

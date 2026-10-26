@@ -26,7 +26,7 @@ func TestParse(t *testing.T) {
 		{text: "open -x\na.go\n", wantErr: "bad revision"},
 		{text: "open a b\nx\n", wantErr: "at most one argument"},
 		{text: "review\n", wantErr: "at least one path"},
-		{text: "review --exec=x\na\n", wantErr: "bad revision"},
+		{text: "review --exec=x\na\n", wantErr: "unknown option"},
 		{text: "review a b\nx\n", wantErr: "at most one argument"},
 		{text: "delete\na\n", wantErr: "unknown command"},
 	}
@@ -54,6 +54,40 @@ func TestParse(t *testing.T) {
 	}
 	if message, _ := Parse("open\na.go"); message.Base() != "" {
 		t.Errorf("no base = %q, want empty (HEAD)", message.Base())
+	}
+}
+
+func TestParseSession(t *testing.T) {
+	cases := []struct {
+		name, text, wantSession, wantBase, wantErr string
+	}{
+		{name: "open step", text: "open --session=walk-1.a\na.go#L3\n---\nwhy\n", wantSession: "walk-1.a"},
+		{name: "with a base", text: "open HEAD~1 --session=w\na.go#L3\n---\nwhy\n", wantSession: "w", wantBase: "HEAD~1"},
+		{name: "bad id", text: "open --session=a/b\na.go#L3\n---\nwhy\n", wantErr: "bad session id"},
+		{name: "empty id", text: "open --session=\na.go#L3\n---\nwhy\n", wantErr: "bad session id"},
+		{name: "unknown option", text: "open --force\na.go\n", wantErr: "unknown option --force"},
+		{name: "step without a note", text: "open --session=w\na.go#L3\n", wantErr: "needs a note"},
+		{name: "review refuses", text: "review --session=w\na.go\n", wantErr: "review takes no session"},
+		{name: "end", text: "end --session=w\n", wantSession: "w"},
+		{name: "wait", text: "WAIT --session=w", wantSession: "w"},
+		{name: "end without id", text: "end\n", wantErr: "end needs --session"},
+		{name: "wait with a path", text: "wait --session=w\na.go\n", wantErr: "takes only"},
+		{name: "end with a note", text: "end --session=w\n---\nhi\n", wantErr: "takes only"},
+	}
+	for _, c := range cases {
+		got, err := Parse(c.text)
+		if c.wantErr != "" {
+			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+				t.Errorf("%s: error = %v, want %q", c.name, err, c.wantErr)
+			}
+			continue
+		}
+		if err != nil || got.Session != c.wantSession || got.Base() != c.wantBase {
+			t.Errorf("%s: Parse = %+v, %v", c.name, got, err)
+		}
+	}
+	if !IsEndedReply(EndedReply("closed by\nthe user")) || EndedReply("x y") != "ended x y" || IsEndedReply("ok ended") || IsErrorReply(EndedReply("x")) {
+		t.Fatal("ended replies")
 	}
 }
 

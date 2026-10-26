@@ -248,6 +248,9 @@ func (m Model) renderEditStatus() string {
 	}
 	pos := fmt.Sprintf("Ln %d, Col %d", m.edit.cy+1, m.edit.cx+1)
 	line := promptStyle.Render("@edit") + statusTextStyle.Render(" "+name+"   ") + state
+	if m.session.id != "" {
+		line += statusTextStyle.Render("   ") + sessionBadgeStyle.Render("● session "+m.session.id+" · step "+strconv.Itoa(m.session.step))
+	}
 	// Transient feedback sits right after the saved/editing indicator — near the
 	// front so the terminal never truncates it, and where the user expects the
 	// "copied" note.
@@ -1418,4 +1421,6 @@ var (
 	editingStyle = lipgloss.NewStyle().Foreground(colYellow).Bold(true).Background(colBgChrome) // unsaved edits
 	savedStyle   = lipgloss.NewStyle().Foreground(colGreen).Bold(true).Background(colBgChrome)  // in sync with disk
 	errStyle     = lipgloss.NewStyle().Foreground(colRed).Bold(true).Background(colBgChrome)
+	// A running guided session (external_session.go).
+	sessionBadgeStyle = lipgloss.NewStyle().Foreground(colOrange).Bold(true).Background(colBgChrome)
 )

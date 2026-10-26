@@ -101,7 +101,7 @@ select, exec) can be rebound — see [Custom keybindings](#custom-keybindings).
 | `Ctrl+U` | Goto **uncommitted** file — same finder, limited to git-dirty paths |
 | `Ctrl+W` | **Workspace repo** — re-root the editor at a nested git repo under the opened directory (pick the top `name/` row to go back to the whole workspace). The file tree, query bar, `Ctrl+P`/`Ctrl+U`/`Ctrl+G`, change highlights, and git views then cover that repo only, as if you had opened it directly; the title bar shows `working repo: …` in orange next to the path. Each repo remembers its own tabs, open file, and tree position (also across relaunch), and switching stashes unsaved edits as a draft. Refused when the opened directory is already a git repo |
 | `Ctrl+G` | **Grep the repo** — colored preview on top, results below; `↑/↓` + `Enter` jumps |
-| `Ctrl+T` | **Inspection dashboard** — store stats + LSP control + op-commands + keybinds + external messages ([below](#inspection-mode-ctrlt)) |
+| `Ctrl+T` | **Inspection dashboard** — store stats + LSP control + op-commands + keybinds + code style + external messages ([below](#inspection-mode-ctrlt)) |
 | `Ctrl+R` | **Run an op-command** on the open file — pick a saved command, fill its `{$1}` `{$2}` args, watch the output stream ([below](#op-commands-ctrlr)) |
 | `Shift+Tab` | Cycle the focused tab (wraps) |
 | `Ctrl+Q` / `Ctrl+C` | Quit (session saved). `Ctrl+C` always quits, whatever the bindings |
@@ -223,6 +223,18 @@ A dashboard for the editor's own machinery. `Shift+↑/↓` switches the left me
   already taken, or isn't a chord, is refused in the status bar. Custom keys
   are highlighted next to their default. Changes apply immediately and are
   saved to your config — see [Custom keybindings](#custom-keybindings).
+- **code style** — the tab size, as a LANGUAGE | TAB SIZE | DESCRIPTION table
+  laid out like keybinds. **all files** is the size for everything; each
+  language (go, typescript, python, yaml, markdown, makefile, …) uses it until
+  you give that language its own. The size is how many spaces `Tab` inserts
+  *and* how wide tab characters in a file are drawn — in the editor, diffs,
+  review, previews and notes. Press `→` to move in: `↑/↓` picks a row, `Enter`
+  types a size (1–16, `Enter` saves, `Esc` cancels), `+`/`-` step it, `r` lets
+  a language use **all files** again (or puts **all files** back to 4), `R`
+  resets everything after a `y/n`. In the bar: `tab 2`, `tab go 8`,
+  `tab go default`, `tab reset`. Saved to your config as `tab_width` and
+  `language_tab_widths`. A size set by the project's `.ntee-editor.yaml` is
+  tagged **project** and can only be changed in that file.
 - **external** — whether other programs may send this editor requests
   ([External messages & review](#external-messages--review)). Shows the
   socket the editor listens on, the **accept messages** switch (off by
@@ -331,6 +343,11 @@ ntee --msg review internal/app/app.go web/src/main.ts old/removed.go
 git diff --name-only | ntee --msg review         # paths on stdin
 ntee --msg --msg-base HEAD~3 review $(git diff --name-only HEAD~3)
 ntee --msg --msg-base a1b2c3d open internal/app/app.go#L120   # diff against a commit
+ntee --msg --msg-note "why this line matters" open internal/app/app.go#L120
+ntee --msg --msg-note - open internal/app/app.go#L120 <<'EOF'   # a longer note on stdin
+## Cache guard
+- skips the re-wrap unless the width changed
+EOF
 ntee --msg help                                  # the full guide
 ```
 
@@ -358,6 +375,14 @@ replay compares against the same revision.
   lives in another one, and notes that unsaved edits are kept as a draft. A
   newer request replaces an unanswered one. With a base revision the file
   opens in the diff view against it (`Esc` back to editing).
+- **open with a note** (`--msg-note <text>`, or `-` for stdin; needs the
+  `#L<line>` anchor) also shows the note in a box under the line — right of
+  the line numbers, as wide as the note needs up to the pane, word-wrapped,
+  with light markdown (`# heading`, `- bullet`, `` `code` ``, `**bold**`,
+  fenced blocks, `| pipe | tables |`). The editor stays live: move the cursor and scroll as usual,
+  scroll a tall note with `Shift+↑/↓` or the mouse wheel over the box, and press `Esc` to
+  close it (it also closes on your first edit). On the wire the note follows
+  the path after a line that is exactly `---`.
 - **review** opens review mode (after the same confirmation when you are
   busy): the files on the left as a folder tree like the main sidebar, each
   badged **M** / **A** / **D** — click a folder to fold or unfold it (a folded
@@ -366,6 +391,28 @@ replay compares against the same revision.
   all red. Files may span several nested repos. Review is read-only (no
   editing, no jump-to-definition), and `Esc` returns you to exactly the file
   and repo you were on.
+
+- **guided session** (`--msg-session <id>` on each step) walks you through
+  code one note at a time. The agent sends all its steps up front — each
+  command returns at once (`ok step N queued`) and the editor queues them.
+  The first step asks **Start session / Decline**; then you walk the queue at
+  your own pace: `Enter` shows the next step instantly, `Backspace` goes
+  back, `Esc` ends the session. Every step jumps straight to its file — other
+  files, other nested repos — without asking; the box is titled
+  `<id> · step 2/5`, and the file is read-only while it shows (move, scroll
+  and `Shift+↑/↓` the note still work). Past the last queued step the box
+  waits for the agent's next one. The agent sends `end` after its last step,
+  and `Enter` on that step then finishes the tour. Once you end a session,
+  the agent's next step gets `ended …` (exit 3) and it stops;
+  `ntee --msg --msg-session <id> wait` blocks until you finish (`ok finished`,
+  exit 0) or close it (`ended …`, exit 3).
+
+  ```sh
+  ntee --msg --msg-session tour1 --msg-note "flags start here" open cmd/ntee/main.go#L40
+  ntee --msg --msg-session tour1 --msg-note "the request goes out" open cmd/ntee/msg.go#L180
+  ntee --msg --msg-session tour1 end
+  ntee --msg --msg-session tour1 wait   # optional: until you're done
+  ```
 
 | Review key | Action |
 |---|---|
@@ -386,7 +433,13 @@ you its work in ntee:
 ## Showing changes in ntee
 The user edits in ntee-editor. After changing files, send them for review:
 `ntee --msg review <changed files…>` (or pipe `git diff --name-only`).
-To point at a specific place: `ntee --msg open <file>#L<line>`.
+To point at a specific place: `ntee --msg open <file>#L<line>`; to explain
+it, add a note: `ntee --msg --msg-note "<why>" open <file>#L<line>` (markdown
+is fine; `--msg-note -` reads a longer note from stdin).
+To walk the user through several places, send each as a step of one session,
+one after another: `ntee --msg --msg-session <id> --msg-note "<why>" open <file>#L<line>`
+(each returns at once; exit 3 means the user ended it — stop sending), then
+`ntee --msg --msg-session <id> end`.
 Paths are relative to the current directory. The command prints `ok …` on
 success; `error … disabled` means the user has not enabled external messages
 (Ctrl+T → external) — mention it once and carry on. Run `ntee --msg help`
@@ -457,7 +510,8 @@ Defaults ← `~/.config/ntee-editor/config.yaml` ← `<project>/.ntee-editor.yam
 
 ```yaml
 version: 1
-editor: { tab_width: 4, max_snapshots: 50, max_highlight_kb: 512 }
+editor: { tab_width: 4, language_tab_widths: {}, max_snapshots: 50, max_highlight_kb: 512 }
+# a language's own tab size, e.g. language_tab_widths: { go: 8, yaml: 2 } (Ctrl+T → code style)
 tree:   { ignore: [".git"] }    # only .git is hidden; .gitignore'd paths show grayed
 theme:  { syntax: "gruvbox" }   # any chroma style name (monokai, dracula, …)
 languages:

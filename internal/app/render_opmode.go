@@ -157,8 +157,8 @@ func (layout opRunLayout) visibleRange(lineCount, scroll int) (start, end int) {
 
 // opDisplayLine is an output line as drawn: tabs expanded, so rune columns
 // are screen columns.
-func opDisplayLine(line string) string {
-	return strings.ReplaceAll(line, "\t", "    ")
+func opDisplayLine(line string, tabWidth int) string {
+	return expandTabs(line, tabWidth)
 }
 
 // renderOpArgLines describes the arguments in the args stage. Once the typed
@@ -302,7 +302,7 @@ func (m Model) renderOpRunBox(width, height int) string {
 	start, end := layout.visibleRange(len(lines), run.scroll)
 	hasLinks := false
 	for _, line := range lines[start:end] {
-		line = opDisplayLine(line)
+		line = opDisplayLine(line, m.cfg.Editor.TabWidth)
 		links := findOutputLinks(line)
 		hasLinks = hasLinks || len(links) > 0
 		rows = append(rows, renderOpOutputLine(line, links, innerWidth))

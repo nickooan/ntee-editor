@@ -127,7 +127,7 @@ func (m Model) renderDefPickOverlay(width, height int) string {
 	if len(m.defPickPrevLines) > 0 {
 		sel := m.defPickItems[input.Clamp(m.defPickIndex, 0, max(0, len(m.defPickItems)-1))]
 		b.WriteString("\n")
-		for _, row := range renderPreviewRows(m.defPickPrevLines, m.defPickPrevHl, m.defPickRe, sel.line, previewH, rowWidth) {
+		for _, row := range renderPreviewRows(m.defPickPrevLines, m.defPickPrevHl, m.defPickRe, sel.line, previewH, rowWidth, m.tabWidthFor(sel.rel)) {
 			b.WriteString(row + "\n")
 		}
 		b.WriteString(overlayHintStyle.Render(strings.Repeat("─", rowWidth)))
@@ -171,7 +171,7 @@ func (m Model) renderDefPickOverlay(width, height int) string {
 // match on the target line in the focused (orange) style. Shared by the grep
 // overlay and the definition/references picker.
 func renderPreviewRows(lines []string, hl [][]view.HighlightSegment, re *regexp.Regexp,
-	targetLine, height, innerW int) []string {
+	targetLine, height, innerW, tabWidth int) []string {
 	blank := baseStyle.Render(strings.Repeat(" ", innerW))
 	rows := make([]string, 0, height)
 	start := input.Clamp(targetLine-height*4/10, 0, max(0, len(lines)-height))
@@ -203,7 +203,7 @@ func renderPreviewRows(lines []string, hl [][]view.HighlightSegment, re *regexp.
 			}
 		}
 		num := gutterStyle.Render(pad(strconv.Itoa(i+1), gutterW) + " │ ")
-		rows = append(rows, num+renderSearchLine(lines[i], segs, matches, nil, 0, 0, contentW))
+		rows = append(rows, num+renderSearchLine(lines[i], segs, matches, nil, 0, 0, contentW, tabWidth))
 	}
 	return rows
 }
@@ -289,9 +289,9 @@ func (m Model) renderGrepOverlay(width, height int) string {
 		previewQuery = previewQuery[:i]
 	}
 	re := m.grepPreviewRC.multiline(previewQuery)
-	_, hit, ok := m.grepSelectedFile()
+	file, hit, ok := m.grepSelectedFile()
 	if ok && m.grepPrevLines != nil {
-		rows = append(rows, renderPreviewRows(m.grepPrevLines, m.grepHl, re, hit.line, previewH, innerW)...)
+		rows = append(rows, renderPreviewRows(m.grepPrevLines, m.grepHl, re, hit.line, previewH, innerW, m.tabWidthFor(file.rel))...)
 	} else {
 		msg := "Type at least 2 characters to search the repo."
 		switch {

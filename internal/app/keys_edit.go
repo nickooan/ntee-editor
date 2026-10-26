@@ -36,6 +36,12 @@ func (m Model) handleEditKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	t := keyText(msg)
 	isText := t != "" && k != "space"
 
+	if m.sessionStepVisible() {
+		if next, cmd, handled := m.handleSessionStepKey(k); handled {
+			return next, cmd
+		}
+	}
+
 	// The completion popup, when open, consumes its navigation/accept/dismiss
 	// keys; any other key (except typing/backspace, which manage the popup
 	// themselves) closes it and is then processed normally.
@@ -65,7 +71,11 @@ func (m Model) handleEditKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch k {
 	case "esc":
 		// Esc peels state in order: popup (consumed above by completionKey),
-		// then the pinned signature, then a selection, then the mode itself.
+		// then an external note, then the pinned signature, then a selection,
+		// then the mode itself.
+		if m.lineNoteVisible() {
+			return m.dismissLineNote(), nil
+		}
 		if m.sigPinned != nil {
 			return m.sigUnpin(), nil
 		}
@@ -102,11 +112,16 @@ func (m Model) handleEditKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.moveEditCursor(-1, 0), nil
 	case "right":
 		return m.moveEditCursor(1, 0), nil
-	case "shift+up":
-		m.edit.extendLineSelection(-1)
-		return m, nil
-	case "shift+down":
-		m.edit.extendLineSelection(1)
+	case "shift+up", "shift+down":
+		delta := 1
+		if k == "shift+up" {
+			delta = -1
+		}
+		// A note too tall for its box takes Shift+↑/↓; otherwise they select.
+		if box, scrollable := m.lineNoteScrollableBox(); scrollable {
+			return m.scrollLineNote(box, delta), nil
+		}
+		m.edit.extendLineSelection(delta)
 		return m, nil
 	case "pgup":
 		return m.pageEdit(-1), nil
@@ -165,7 +180,7 @@ func (m Model) handleEditKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "tab":
-		m.edit.insert(strings.Repeat(" ", m.cfg.Editor.TabWidth))
+		m.edit.insert(strings.Repeat(" ", m.tabWidthFor(m.openRel)))
 		m = m.hlMarkLine(m.edit.cy)
 		m.snapDirty = true
 		return m, nil

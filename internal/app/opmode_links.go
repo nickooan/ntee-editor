@@ -95,7 +95,7 @@ func (m Model) opRunLinkAt(x, y int) (string, bool) {
 	if start+row >= end {
 		return "", false
 	}
-	for _, link := range findOutputLinks(opDisplayLine(lines[start+row])) {
+	for _, link := range findOutputLinks(opDisplayLine(lines[start+row], m.cfg.Editor.TabWidth)) {
 		if column >= link.start && column < link.end {
 			return link.url, true
 		}

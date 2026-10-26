@@ -18,7 +18,7 @@ func (m Model) renderDiff(width, height int) string {
 	if m.diffLoading {
 		return baseStyle.Render("computing diff…")
 	}
-	return renderDiffDocument(m.liveDiffDocument(), m.diffPosition, diffSearchOverlay{}, width, height)
+	return renderDiffDocument(m.liveDiffDocument(), m.diffPosition, diffSearchOverlay{}, width, height, m.tabWidthFor(m.openRel))
 }
 
 // diffSearchOverlay carries a document search's matches into the diff
@@ -32,7 +32,7 @@ type diffSearchOverlay struct {
 // Gutter numbers are the new side's line numbers — they advance only past
 // ctx/add rows; del rows show a blank red gutter. Only the visible window of
 // rows is rendered, and ctx/add rows use the document's highlight cache.
-func renderDiffDocument(document diffDocument, position rowCursor, search diffSearchOverlay, width, height int) string {
+func renderDiffDocument(document diffDocument, position rowCursor, search diffSearchOverlay, width, height, tabWidth int) string {
 	total := len(document.rows)
 	if total == 0 {
 		return ""
@@ -69,17 +69,17 @@ func renderDiffDocument(document diffDocument, position rowCursor, search diffSe
 
 		var content string
 		if matches := search.byLine[i]; len(matches) > 0 {
-			content = renderSearchLine(text, document.rowHighlights(i), matches, nil, search.focused, 0, contentWidth)
+			content = renderSearchLine(text, document.rowHighlights(i), matches, nil, search.focused, 0, contentWidth, tabWidth)
 		} else if i == position.row {
-			content = renderDiffCursorLine(text, position.column, contentWidth, diffCursorRowStyle(row.kind))
+			content = renderDiffCursorLine(text, position.column, contentWidth, diffCursorRowStyle(row.kind), tabWidth)
 		} else {
 			switch row.kind {
 			case diffAdd:
-				content = renderHighlightedLine(document.highlights, row.bufLine, text, contentWidth, hexDiffAddBg, diffAddTextStyle)
+				content = renderHighlightedLine(document.highlights, row.bufLine, text, contentWidth, hexDiffAddBg, diffAddTextStyle, tabWidth)
 			case diffDel:
-				content = plainWindowStyled(text, 0, contentWidth, diffDelTextStyle)
+				content = plainWindowStyled(text, 0, contentWidth, diffDelTextStyle, tabWidth)
 			default:
-				content = renderHighlightedLine(document.highlights, row.bufLine, text, contentWidth, hexBg, baseStyle)
+				content = renderHighlightedLine(document.highlights, row.bufLine, text, contentWidth, hexBg, baseStyle, tabWidth)
 			}
 		}
 		out = append(out, number+content)
@@ -97,16 +97,16 @@ func diffGutterWidth(document diffDocument, height int) int {
 // cache (valid in the views that sit on the live edit session and block
 // edits), plain in the row's background otherwise.
 func (m Model) renderDiffBufLine(bufLine int, text string, width int, bg string, style lipgloss.Style) string {
-	return renderHighlightedLine(m.hlLines, bufLine, text, width, bg, style)
+	return renderHighlightedLine(m.hlLines, bufLine, text, width, bg, style, m.tabWidthFor(m.openRel))
 }
 
 // renderHighlightedLine draws line bufLine from a highlight cache when it has
 // a cached row, plain in the row's background otherwise.
-func renderHighlightedLine(highlights [][]view.HighlightSegment, bufLine int, text string, width int, bg string, style lipgloss.Style) string {
+func renderHighlightedLine(highlights [][]view.HighlightSegment, bufLine int, text string, width int, bg string, style lipgloss.Style, tabWidth int) string {
 	if highlights != nil && bufLine >= 0 && bufLine < len(highlights) && highlights[bufLine] != nil {
-		return renderSegmentsBg(highlights[bufLine], 0, width, bg, style)
+		return renderSegmentsBg(highlights[bufLine], 0, width, bg, style, tabWidth)
 	}
-	return plainWindowStyled(text, 0, width, style)
+	return plainWindowStyled(text, 0, width, style, tabWidth)
 }
 
 // diffCursorRowStyle picks the cursor row's fill: changed rows keep their
@@ -126,7 +126,7 @@ func diffCursorRowStyle(kind diffRowKind) lipgloss.Style {
 // renderDiffCursorLine draws the review cursor's row: renderEditLine's
 // horizontal-window walk, minus selections, with the row's diff background
 // instead of an unconditional cursor-line repaint.
-func renderDiffCursorLine(line string, cx, width int, lineStyle lipgloss.Style) string {
+func renderDiffCursorLine(line string, cx, width int, lineStyle lipgloss.Style, tabWidth int) string {
 	if width < 1 {
 		width = 1
 	}
@@ -153,11 +153,11 @@ func renderDiffCursorLine(line string, cx, width int, lineStyle lipgloss.Style) 
 	}
 	var b strings.Builder
 	if curCol > 0 {
-		b.WriteString(lineStyle.Render(string(window[:curCol])))
+		b.WriteString(renderRun(lineStyle, string(window[:curCol]), tabWidth))
 	}
-	b.WriteString(cursorStyle.Render(string(window[curCol : curCol+1])))
+	b.WriteString(renderRun(cursorStyle, string(window[curCol:curCol+1]), tabWidth))
 	if curCol+1 < width {
-		b.WriteString(lineStyle.Render(string(window[curCol+1:])))
+		b.WriteString(renderRun(lineStyle, string(window[curCol+1:]), tabWidth))
 	}
 	return b.String()
 }

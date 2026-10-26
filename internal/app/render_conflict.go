@@ -64,6 +64,7 @@ func (m Model) renderConflict(width, height int) string {
 
 	gutterWidth := len(strconv.Itoa(max(len(lines), height)))
 	contentWidth := max(1, width-gutterWidth-3)
+	tabWidth := m.tabWidthFor(m.openRel)
 	start := fileViewportTop(m.edit.cy, m.fileScrollY, height, len(lines))
 
 	rows := make([]string, 0, height)
@@ -89,17 +90,17 @@ func (m Model) renderConflict(width, height int) string {
 
 		var content string
 		if i == m.edit.cy {
-			content = renderDiffCursorLine(lines[i], m.edit.cx, contentWidth, conflictCursorRowStyle(kind))
+			content = renderDiffCursorLine(lines[i], m.edit.cx, contentWidth, conflictCursorRowStyle(kind), tabWidth)
 		} else {
 			switch kind {
 			case conflictMarkerLine:
-				content = plainWindowStyled(lines[i], 0, contentWidth, conflictMarkerStyle)
+				content = plainWindowStyled(lines[i], 0, contentWidth, conflictMarkerStyle, tabWidth)
 			case conflictOursLine:
 				content = m.renderDiffBufLine(i, lines[i], contentWidth, hexDiffAddBg, diffAddTextStyle)
 			case conflictTheirsLine:
 				content = m.renderDiffBufLine(i, lines[i], contentWidth, hexConflictInBg, conflictInTextStyle)
 			case conflictBaseLine:
-				content = plainWindowStyled(lines[i], 0, contentWidth, conflictBaseTextStyle)
+				content = plainWindowStyled(lines[i], 0, contentWidth, conflictBaseTextStyle, tabWidth)
 			default:
 				content = m.renderContentLine(i, lines[i], 0, contentWidth)
 			}
@@ -167,13 +168,7 @@ func (m Model) overlayConflictPopup(rows []string, blockIdx, start, gutterWidth,
 	}
 	anchor := gutterWidth + 3 + anchorCol
 
-	orig := rows[rowIdx]
-	left := ansi.Truncate(orig, anchor, "")
-	if pad := anchor - ansi.StringWidth(left); pad > 0 {
-		left += baseStyle.Render(strings.Repeat(" ", pad))
-	}
-	right := ansi.TruncateLeft(orig, anchor+w, "")
-	rows[rowIdx] = left + box + right
+	rows[rowIdx] = spliceOverlay(rows[rowIdx], anchor, w, box)
 	return rows
 }
 

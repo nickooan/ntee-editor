@@ -132,7 +132,7 @@ func (m Model) renderReview(width, height int) string {
 				focused: m.review.search.focused,
 			}
 		}
-		body = renderDiffDocument(file.document, m.review.position, search, width, rowsHeight)
+		body = renderDiffDocument(file.document, m.review.position, search, width, rowsHeight, m.tabWidthFor(file.workspaceRel))
 	}
 	return header + "\n" + body
 }

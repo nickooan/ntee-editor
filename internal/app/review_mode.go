@@ -334,9 +334,13 @@ func (m Model) reviewLoadCmd(start, end, nextStart int) tea.Cmd {
 	gen, base, workspaceRoot := m.review.gen, m.review.base, m.workspaceRoot
 	pending := append([]reviewFile(nil), m.review.files[start:end]...)
 	highlightLimit := m.cfg.Editor.MaxHighlightKB * 1024
+	tabWidths := make([]int, len(pending)) // resolved here: the cmd never reads m.cfg
+	for i, file := range pending {
+		tabWidths[i] = m.tabWidthFor(file.workspaceRel)
+	}
 	return func() tea.Msg {
 		for i := range pending {
-			pending[i] = loadReviewFile(workspaceRoot, base, pending[i], highlightLimit)
+			pending[i] = loadReviewFile(workspaceRoot, base, pending[i], highlightLimit, tabWidths[i])
 		}
 		return reviewLoadedMsg{gen: gen, start: start, files: pending, nextStart: nextStart}
 	}
@@ -344,7 +348,7 @@ func (m Model) reviewLoadCmd(start, end, nextStart int) tea.Cmd {
 
 // loadReviewFile reads the working-tree side through the workspace file jail
 // and diffs it against the base in the file's own repo.
-func loadReviewFile(workspaceRoot, base string, file reviewFile, highlightLimit int) reviewFile {
+func loadReviewFile(workspaceRoot, base string, file reviewFile, highlightLimit, tabWidth int) reviewFile {
 	data, binary, err := filetree.ReadContainedFile(workspaceRoot, file.workspaceRel)
 	exists := err == nil
 	switch {
@@ -398,7 +402,7 @@ func loadReviewFile(workspaceRoot, base string, file reviewFile, highlightLimit 
 	default:
 		file.status = reviewModified
 	}
-	file.document = expandDocumentTabs(document)
+	file.document = expandDocumentTabs(document, tabWidth)
 	document = file.document
 	texts := make([]string, len(document.rows))
 	for i := range document.rows {
@@ -408,23 +412,21 @@ func loadReviewFile(workspaceRoot, base string, file reviewFile, highlightLimit 
 	return file
 }
 
-// reviewTab is how a tab displays — the 4 columns lipgloss draws it as.
-const reviewTab = "    "
-
-// expandDocumentTabs turns tabs into spaces in a review document's text and
-// highlights. Row windowing counts runes, so a raw tab would draw 4 columns
-// for 1 counted and push tab-indented code past the pane. Review is
-// read-only, so it can show expanded text; it runs after the diff, which
-// compares the real content.
-func expandDocumentTabs(document diffDocument) diffDocument {
+// expandDocumentTabs turns tabs into tabWidth spaces in a review document's
+// text and highlights. Row windowing counts runes, so a raw tab would draw
+// several columns for 1 counted and push tab-indented code past the pane.
+// Review is read-only, so it can show expanded text; it runs after the diff,
+// which compares the real content.
+func expandDocumentTabs(document diffDocument, tabWidth int) diffDocument {
+	tab := strings.Repeat(" ", tabWidth)
 	lines := make([]string, len(document.lines))
 	for i, line := range document.lines {
-		lines[i] = strings.ReplaceAll(line, "\t", reviewTab)
+		lines[i] = strings.ReplaceAll(line, "\t", tab)
 	}
 	document.lines = lines
 	rows := make([]diffRow, len(document.rows))
 	for i, row := range document.rows {
-		row.text = strings.ReplaceAll(row.text, "\t", reviewTab)
+		row.text = strings.ReplaceAll(row.text, "\t", tab)
 		rows[i] = row
 	}
 	document.rows = rows
@@ -433,7 +435,7 @@ func expandDocumentTabs(document diffDocument) diffDocument {
 		for i, segments := range document.highlights {
 			expanded := make([]view.HighlightSegment, len(segments))
 			for j, segment := range segments {
-				segment.Text = strings.ReplaceAll(segment.Text, "\t", reviewTab)
+				segment.Text = strings.ReplaceAll(segment.Text, "\t", tab)
 				expanded[j] = segment
 			}
 			highlights[i] = expanded

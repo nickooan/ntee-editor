@@ -35,6 +35,10 @@ type pendingExternal struct {
 	targetRepo  string // open: the activeRepo to switch to ("" = the workspace)
 	reviewPaths []string
 	base        string // the revision to compare with, "" = HEAD (diffBaseOf)
+	lineNote    string // open: the sender's note for the line, "" = none
+	// session is the guided session this open is a step of ("" = none; a
+	// replay is never one).
+	session string
 }
 
 // WithExternal attaches the external-message stores and the socket's status
@@ -56,6 +60,9 @@ type externalStatusSavedMsg struct{ err error }
 // view, an overlay — the user is asked first. A newer request replaces an
 // unanswered one.
 func (m Model) handleExternalMessage(msg externalMessageMsg) (tea.Model, tea.Cmd) {
+	if msg.record.Session != "" && !msg.replay {
+		return m.handleSessionMessage(msg)
+	}
 	pending, problem := m.resolveExternal(msg.record)
 	pending.replay = msg.replay
 	if problem != "" {
@@ -64,14 +71,7 @@ func (m Model) handleExternalMessage(msg externalMessageMsg) (tea.Model, tea.Cmd
 		return m, m.saveExternalStatusCmd(pending, store.ExternalFailed, problem)
 	}
 
-	var cmds []tea.Cmd
-	if previous := m.external.pending; previous != nil {
-		cmds = append(cmds, m.saveExternalStatusCmd(*previous, store.ExternalSuperseded, "a newer request arrived"))
-		m.external.pending = nil
-		if m.choice.kind == choiceExternalRequest {
-			m.choice = choiceOverlay{}
-		}
-	}
+	m, cmds := m.supersedePendingExternal()
 	if m.mode == modeQuery && !m.overlayOpen() {
 		next, cmd := m.carryOutExternal(pending)
 		sendExternalReply(msg.reply, next.externalOutcome(pending))
@@ -89,6 +89,23 @@ func (m Model) handleExternalMessage(msg externalMessageMsg) (tea.Model, tea.Cmd
 	return m, tea.Batch(cmds...)
 }
 
+// supersedePendingExternal drops an unanswered request for a newer one: its
+// record notes why, and a session waiting to start ends.
+func (m Model) supersedePendingExternal() (Model, []tea.Cmd) {
+	previous := m.external.pending
+	if previous == nil {
+		return m, nil
+	}
+	m.external.pending = nil
+	if m.choice.kind == choiceExternalRequest {
+		m.choice = choiceOverlay{}
+	}
+	if previous.session != "" && m.session.id == previous.session && !m.session.started {
+		m = m.endSession("was superseded by another request before it started", false)
+	}
+	return m, []tea.Cmd{m.saveExternalStatusCmd(*previous, store.ExternalSuperseded, "a newer request arrived")}
+}
+
 func sendExternalReply(reply chan<- string, outcome string) {
 	if reply != nil {
 		reply <- outcome
@@ -100,7 +117,7 @@ func sendExternalReply(reply chan<- string, outcome string) {
 // editor re-roots at the file's own repo (or the whole workspace when no
 // repo holds it).
 func (m Model) resolveExternal(record store.ExternalRecord) (pendingExternal, string) {
-	pending := pendingExternal{record: record, base: diffBaseOf(record)}
+	pending := pendingExternal{record: record, base: diffBaseOf(record), lineNote: record.LineNote}
 	switch record.Command {
 	case extmsg.CommandOpen:
 		if len(record.Paths) != 1 {
@@ -172,6 +189,7 @@ func (m Model) carryOutExternal(pending pendingExternal) (Model, tea.Cmd) {
 		cmds = append(cmds, cmd)
 	}
 	m.errText = ""
+	m = m.dismissLineNote() // a new request replaces an earlier note
 	m = m.openFileAtLine(pending.rootRel, pending.line)
 	if m.mode != modeEdit || m.openRel != pending.rootRel {
 		problem := m.errText
@@ -179,6 +197,10 @@ func (m Model) carryOutExternal(pending pendingExternal) (Model, tea.Cmd) {
 			problem = "cannot open " + pending.rootRel
 		}
 		return m, tea.Batch(append(cmds, m.saveExternalStatusCmd(pending, store.ExternalFailed, problem))...)
+	}
+	if pending.lineNote != "" && pending.line > 0 {
+		m.lineNote = newLineNote(m.openRel, m.edit.cy, pending.lineNote, m.edit.rev, m.cfg.Editor.TabWidth)
+		m.lineNote.session = pending.session
 	}
 	note := ""
 	if pending.base != "" {
@@ -201,14 +223,23 @@ func (m Model) externalOutcome(pending pendingExternal) string {
 	case m.mode == modeReview && pending.record.Command == extmsg.CommandReview:
 		return fmt.Sprintf("reviewing %d files", len(m.review.files))
 	case m.mode == modeDiff && m.openRel == pending.rootRel:
-		return fmt.Sprintf("opened %s at line %d, diff against %s", pending.record.Paths[0], m.edit.cy+1, pending.base)
+		return fmt.Sprintf("opened %s at line %d, diff against %s%s", pending.record.Paths[0], m.edit.cy+1, pending.base, m.lineNoteOutcome())
 	case m.mode == modeEdit && m.openRel == pending.rootRel:
-		return fmt.Sprintf("opened %s at line %d", pending.record.Paths[0], m.edit.cy+1)
+		return fmt.Sprintf("opened %s at line %d%s", pending.record.Paths[0], m.edit.cy+1, m.lineNoteOutcome())
 	case m.errText != "":
 		return extmsg.ErrorReply(m.errText)
 	default:
 		return "delivered"
 	}
+}
+
+// lineNoteOutcome is the reply's mention of a note now on screen (or shown
+// once the user leaves the diff).
+func (m Model) lineNoteOutcome() string {
+	if m.lineNote.text == "" {
+		return ""
+	}
+	return " with a note"
 }
 
 // resolveExternalChoice applies the user's answer to the confirm overlay.
@@ -217,6 +248,9 @@ func (m Model) resolveExternalChoice(accept bool) (Model, tea.Cmd) {
 	m.external.pending = nil
 	if pending == nil {
 		return m, nil
+	}
+	if pending.session != "" {
+		return m.resolveSessionStart(*pending, accept)
 	}
 	if !accept {
 		m.notice = "external " + pending.record.Command + " ignored"
@@ -252,6 +286,14 @@ func (m Model) externalChoice(pending pendingExternal) choiceOverlay {
 		choice.body = append(choice.body, overlayLine{text: target, style: overlayLineStrong})
 		if pending.base != "" {
 			choice.body = append(choice.body, overlayLine{text: "diff against " + pending.base, style: overlayLineHighlight})
+		}
+		if pending.lineNote != "" {
+			firstLine, _, more := strings.Cut(strings.TrimSpace(pending.lineNote), "\n")
+			firstLine = truncateRunes(strings.TrimSpace(firstLine), 48)
+			if more {
+				firstLine += " …"
+			}
+			choice.body = append(choice.body, overlayLine{text: "with a note: " + firstLine, style: overlayLineDim})
 		}
 		if pending.targetRepo != m.activeRepo {
 			choice.body = append(choice.body, overlayLine{

@@ -12,6 +12,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/nickooan/ntee-editor/internal/config"
 	"github.com/nickooan/ntee-editor/internal/input"
 	"github.com/nickooan/ntee-editor/internal/keymap"
 	"github.com/nickooan/ntee-editor/internal/lsp"
@@ -247,6 +248,9 @@ func (m Model) renderEditStatus() string {
 	}
 	pos := fmt.Sprintf("Ln %d, Col %d", m.edit.cy+1, m.edit.cx+1)
 	line := promptStyle.Render("@edit") + statusTextStyle.Render(" "+name+"   ") + state
+	if m.session.id != "" {
+		line += statusTextStyle.Render("   ") + sessionBadgeStyle.Render(m.sessionBadge())
+	}
 	// Transient feedback sits right after the saved/editing indicator — near the
 	// front so the terminal never truncates it, and where the user expects the
 	// "copied" note.
@@ -522,6 +526,7 @@ func (m Model) renderFile(width, height int) string {
 
 	gutterWidth := len(strconv.Itoa(max(len(lines), height)))
 	contentWidth := max(1, width-gutterWidth-3)
+	tabWidth := m.tabWidthFor(m.openRel)
 
 	// Worst diagnostic severity per line for the gutter markers.
 	lineSev := map[int]int{}
@@ -560,9 +565,9 @@ func (m Model) renderFile(width, height int) string {
 		var content string
 		switch {
 		case editing && i == m.edit.cy:
-			content = renderEditLine(lines[i], m.lineSegments(i), m.edit.cx, contentWidth, m.edit.sel)
+			content = renderEditLine(lines[i], m.lineSegments(i), m.edit.cx, contentWidth, m.edit.sel, tabWidth)
 		case editing && m.edit.inLineSelection(i):
-			content = renderSelectedLine(lines[i], contentWidth)
+			content = renderSelectedLine(lines[i], contentWidth, tabWidth)
 		default:
 			content = m.renderContentLine(i, lines[i], scrollX, contentWidth)
 		}
@@ -574,6 +579,9 @@ func (m Model) renderFile(width, height int) string {
 		// The popup wins while open (completing an inner argument); the
 		// pinned signature reappears when it closes.
 		rows = m.overlaySignature(rows, start, gutterWidth, contentWidth, height)
+	}
+	if editing && m.lineNoteVisible() && !m.completionOpen {
+		rows = m.overlayLineNote(rows, start, gutterWidth, contentWidth, height)
 	}
 	return strings.Join(rows, "\n")
 }
@@ -620,15 +628,7 @@ func (m Model) overlayCompletion(rows []string, start, gutterWidth, contentWidth
 		if rowIdx < 0 || rowIdx >= len(rows) {
 			continue
 		}
-		// Overlay the box onto the real row, preserving the gutter and the code
-		// to the left/right (ANSI-aware slicing) rather than blanking the line.
-		orig := rows[rowIdx]
-		left := ansi.Truncate(orig, anchor, "")
-		if pad := anchor - ansi.StringWidth(left); pad > 0 {
-			left += baseStyle.Render(strings.Repeat(" ", pad))
-		}
-		right := ansi.TruncateLeft(orig, anchor+w, "")
-		rows[rowIdx] = left + box + right
+		rows[rowIdx] = spliceOverlay(rows[rowIdx], anchor, w, box)
 	}
 	return rows
 }
@@ -661,14 +661,18 @@ func (m Model) overlaySignature(rows []string, start, gutterWidth, contentWidth,
 	if rowIdx < 0 || rowIdx >= len(rows) {
 		return rows
 	}
-	orig := rows[rowIdx]
-	left := ansi.Truncate(orig, anchor, "")
+	rows[rowIdx] = spliceOverlay(rows[rowIdx], anchor, w, box)
+	return rows
+}
+
+// spliceOverlay lays box (width cells) over a rendered row from column
+// anchor, keeping the row's cells on either side (ANSI-aware slicing).
+func spliceOverlay(row string, anchor, width int, box string) string {
+	left := ansi.Truncate(row, anchor, "")
 	if pad := anchor - ansi.StringWidth(left); pad > 0 {
 		left += baseStyle.Render(strings.Repeat(" ", pad))
 	}
-	right := ansi.TruncateLeft(orig, anchor+w, "")
-	rows[rowIdx] = left + box + right
-	return rows
+	return left + box + ansi.TruncateLeft(row, anchor+width, "")
 }
 
 // completionLayout sizes the popup's columns for the visible rows within cap.
@@ -733,10 +737,11 @@ func completionRow(it lsp.CompletionItem, labelW, detW, originW int, selected bo
 // when a row is available, plain otherwise (nil rows cover un-lexed files,
 // oversized files, and lines edited since the last rescan).
 func (m Model) renderContentLine(i int, line string, off, width int) string {
+	tabWidth := m.tabWidthFor(m.openRel)
 	if segments := m.lineSegments(i); segments != nil {
-		return renderSegments(segments, off, width)
+		return renderSegments(segments, off, width, tabWidth)
 	}
-	return plainWindow(line, off, width)
+	return plainWindow(line, off, width, tabWidth)
 }
 
 // lineSegments is line i's cached syntax highlighting, or nil when the file
@@ -748,13 +753,13 @@ func (m Model) lineSegments(i int) []view.HighlightSegment {
 	return m.hlLines[i]
 }
 
-func plainWindow(line string, off, width int) string {
-	return plainWindowStyled(line, off, width, baseStyle)
+func plainWindow(line string, off, width, tabWidth int) string {
+	return plainWindowStyled(line, off, width, baseStyle, tabWidth)
 }
 
 // plainWindowStyled is plainWindow with the row's style threaded in, so a
 // diff row's background covers the text and the EOL padding alike.
-func plainWindowStyled(line string, off, width int, style lipgloss.Style) string {
+func plainWindowStyled(line string, off, width int, style lipgloss.Style, tabWidth int) string {
 	runes := []rune(line)
 	start := input.Clamp(off, 0, len(runes))
 	end := input.Clamp(start+width, 0, len(runes))
@@ -762,19 +767,19 @@ func plainWindowStyled(line string, off, width int, style lipgloss.Style) string
 	if pad := width - (end - start); pad > 0 {
 		out += strings.Repeat(" ", pad)
 	}
-	return style.Render(out)
+	return renderRun(style, out, tabWidth)
 }
 
 // renderSegments renders styled segments through a rune window [off, off+width),
 // padding the remainder.
-func renderSegments(segs []view.HighlightSegment, off, width int) string {
-	return renderSegmentsBg(segs, off, width, hexBg, baseStyle)
+func renderSegments(segs []view.HighlightSegment, off, width, tabWidth int) string {
+	return renderSegmentsBg(segs, off, width, hexBg, baseStyle, tabWidth)
 }
 
 // renderSegmentsBg is renderSegments with the row's background threaded in:
 // bg tints every syntax run and padStyle carries the same tint past EOL —
 // without it the row would show a stripe of editor background after the text.
-func renderSegmentsBg(segs []view.HighlightSegment, off, width int, bg string, padStyle lipgloss.Style) string {
+func renderSegmentsBg(segs []view.HighlightSegment, off, width int, bg string, padStyle lipgloss.Style, tabWidth int) string {
 	var b strings.Builder
 	skipped, rendered := 0, 0
 	for _, seg := range segs {
@@ -793,7 +798,7 @@ func renderSegmentsBg(segs []view.HighlightSegment, off, width int, bg string, p
 			skipped = off
 		}
 		take := min(len(runes)-i, width-rendered)
-		b.WriteString(segStyleWithBg(seg, bg).Render(string(runes[i : i+take])))
+		b.WriteString(renderRun(segStyleWithBg(seg, bg), string(runes[i:i+take]), tabWidth))
 		rendered += take
 	}
 	if pad := width - rendered; pad > 0 {
@@ -807,7 +812,7 @@ func renderSegmentsBg(segs []view.HighlightSegment, off, width int, bg string, p
 // window that follows the cursor and draws the cursor at its in-window column.
 // segments (the line's syntax highlighting, or nil) keep their colours on the
 // cursor-line and selection backgrounds.
-func renderEditLine(line string, segments []view.HighlightSegment, cx, width int, sel *selRange) string {
+func renderEditLine(line string, segments []view.HighlightSegment, cx, width int, sel *selRange, tabWidth int) string {
 	if width < 1 {
 		width = 1
 	}
@@ -860,7 +865,7 @@ func renderEditLine(line string, segments []view.HighlightSegment, cx, width int
 		if col < width && regionAt(col) == region && segmentAt[col] == segmentAt[runStart] {
 			continue
 		}
-		b.WriteString(editRunStyle(region, segments, segmentAt[runStart]).Render(string(window[runStart:col])))
+		b.WriteString(renderRun(editRunStyle(region, segments, segmentAt[runStart]), string(window[runStart:col]), tabWidth))
 		runStart = col
 	}
 	return b.String()
@@ -923,14 +928,15 @@ func editRunStyle(region editLineRegion, segments []view.HighlightSegment, segme
 // scroll (line-wise selections start at column 0). One uniform run — this is
 // called for every visible line of a line-wise selection, so a per-char Render
 // here was width×height lipgloss calls per frame.
-func renderSelectedLine(line string, width int) string {
+func renderSelectedLine(line string, width, tabWidth int) string {
 	if width < 1 {
 		width = 1
 	}
-	return plainWindowStyled(line, 0, width, selectionStyle)
+	return plainWindowStyled(line, 0, width, selectionStyle, tabWidth)
 }
 
 func (m Model) renderSearch(width, height int) string {
+	tabWidth := m.tabWidthFor(m.openRel)
 	matches := m.searchMatches()
 	byLine := m.searchMC.matchesByLine(m.searchContent, m.searchInput)
 	lines := m.searchMC.splitLines(m.searchContent)
@@ -982,7 +988,7 @@ func (m Model) renderSearch(width, height int) string {
 		if i < len(m.searchHl) && pspans[i] == nil {
 			segs = m.searchHl[i]
 		}
-		rows = append(rows, renderSearchLine(lines[i], segs, byLine[i], pspans[i], focused, off, width))
+		rows = append(rows, renderSearchLine(lines[i], segs, byLine[i], pspans[i], focused, off, width, tabWidth))
 	}
 	return strings.Join(rows, "\n")
 }
@@ -991,7 +997,7 @@ func (m Model) renderSearch(width, height int) string {
 // width-wide window starting at rune column off. Matches and preview spans
 // (byte offsets, converted to rune columns here) render with their background
 // styles and win over the line's syntax segments, which color everything else.
-func renderSearchLine(line string, segs []view.HighlightSegment, matches []view.LineMatch, previews [][2]int, focused, off, width int) string {
+func renderSearchLine(line string, segs []view.HighlightSegment, matches []view.LineMatch, previews [][2]int, focused, off, width, tabWidth int) string {
 	if width < 1 {
 		width = 1
 	}
@@ -1074,7 +1080,7 @@ func renderSearchLine(line string, segs []view.HighlightSegment, matches []view.
 	runKey := 0
 	flush := func() {
 		if len(run) > 0 {
-			b.WriteString(styleFor(runKey).Render(string(run)))
+			b.WriteString(renderRun(styleFor(runKey), string(run), tabWidth))
 			run = run[:0]
 		}
 	}
@@ -1093,6 +1099,21 @@ func renderSearchLine(line string, segs []view.HighlightSegment, matches []view.
 	}
 	flush()
 	return b.String()
+}
+
+// renderRun renders a run of file text with its tabs drawn tabWidth columns
+// wide; lipgloss draws them config.DefaultTabWidth wide unless told.
+func renderRun(style lipgloss.Style, text string, tabWidth int) string {
+	if tabWidth != config.DefaultTabWidth && strings.IndexByte(text, '\t') >= 0 {
+		style = style.TabWidth(tabWidth)
+	}
+	return style.Render(text)
+}
+
+// tabWidthFor is the tab size of a file: its language's, else the
+// editor-wide one.
+func (m Model) tabWidthFor(path string) int {
+	return m.cfg.TabWidthFor(path)
 }
 
 // clampByte clamps a byte offset into [0, n].
@@ -1400,4 +1421,6 @@ var (
 	editingStyle = lipgloss.NewStyle().Foreground(colYellow).Bold(true).Background(colBgChrome) // unsaved edits
 	savedStyle   = lipgloss.NewStyle().Foreground(colGreen).Bold(true).Background(colBgChrome)  // in sync with disk
 	errStyle     = lipgloss.NewStyle().Foreground(colRed).Bold(true).Background(colBgChrome)
+	// A running guided session (external_session.go).
+	sessionBadgeStyle = lipgloss.NewStyle().Foreground(colOrange).Bold(true).Background(colBgChrome)
 )

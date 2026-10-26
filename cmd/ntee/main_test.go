@@ -5,8 +5,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nickooan/ntee-editor/internal/app"
+	"github.com/nickooan/ntee-editor/internal/extmsg"
 	"github.com/nickooan/ntee-editor/internal/store"
 )
 
@@ -85,8 +87,142 @@ func TestBuildRequestCarriesTheBaseOnTheFirstLine(t *testing.T) {
 		{"review", "HEAD~2", []string{"/p/a.go", "/p/b.go"}, "review HEAD~2\n/p/a.go\n/p/b.go\n"},
 	}
 	for _, c := range cases {
-		if got := buildRequest(c.command, c.base, c.paths); got != c.want {
+		if got := buildRequest(c.command, c.base, "", c.paths, ""); got != c.want {
 			t.Errorf("buildRequest(%q, %q) = %q, want %q", c.command, c.base, got, c.want)
+		}
+	}
+}
+
+func TestBuildRequestPutsTheNoteAfterTheSeparator(t *testing.T) {
+	got := buildRequest("open", "v1", "", []string{"/p/a.go#L3"}, "# Why\n\n  - kept")
+	if want := "open v1\n/p/a.go#L3\n---\n# Why\n\n  - kept\n"; got != want {
+		t.Fatalf("buildRequest = %q, want %q", got, want)
+	}
+	message, err := extmsg.Parse(got)
+	if err != nil || message.LineNote != "# Why\n\n  - kept" || message.Paths[0] != "/p/a.go#L3" {
+		t.Fatalf("the editor reads it back as %+v, %v", message, err)
+	}
+}
+
+func TestCheckLineNote(t *testing.T) {
+	cases := []struct {
+		command string
+		paths   []string
+		note    string
+		wantErr string
+	}{
+		{"open", []string{"/p/a.go"}, "", ""},
+		{"open", []string{"/p/a.go#L3"}, "why", ""},
+		{"open", []string{"/p/a.go#L3-L9"}, "why", ""},
+		{"open", []string{"/p/a.go"}, "why", "a note needs a line"},
+		{"open", []string{"/p/a.go#L"}, "why", "a note needs a line"},
+		{"review", []string{"/p/a.go#L3"}, "why", "goes with open"},
+	}
+	for _, c := range cases {
+		err := checkLineNote(c.command, c.paths, c.note)
+		if (c.wantErr == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), c.wantErr)) {
+			t.Errorf("checkLineNote(%q, %v, %q) = %v, want %q", c.command, c.paths, c.note, err, c.wantErr)
+		}
+	}
+}
+
+func TestReadNoteFromStdinKeepsTheText(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	note := "# Why\n\n  indented line\n"
+	go func() {
+		writer.WriteString(note)
+		writer.Close()
+	}()
+	got, err := readNoteFromStdin(reader)
+	if err != nil || got != note {
+		t.Fatalf("readNoteFromStdin = %q, %v; want %q", got, err, note)
+	}
+}
+
+func TestBuildRequestCarriesTheSession(t *testing.T) {
+	if got, want := buildRequest("open", "v1", "walk1", []string{"/p/a.go#L3"}, "why"), "open --session=walk1 v1\n/p/a.go#L3\n---\nwhy\n"; got != want {
+		t.Fatalf("open step = %q, want %q", got, want)
+	}
+	if got, want := buildRequest("wait", "", "walk1", nil, ""), "wait --session=walk1\n"; got != want {
+		t.Fatalf("wait = %q, want %q", got, want)
+	}
+	for _, request := range []string{buildRequest("open", "", "walk1", []string{"/p/a.go#L3"}, "why"), buildRequest("end", "", "walk1", nil, "")} {
+		if message, err := extmsg.Parse(request); err != nil || message.Session != "walk1" {
+			t.Fatalf("the editor reads %q as %+v, %v", request, message, err)
+		}
+	}
+}
+
+func TestCheckSessionCommand(t *testing.T) {
+	cases := []struct {
+		command, session string
+		paths            []string
+		wantErr          string
+	}{
+		{"open", "walk1", []string{"a.go#L3"}, ""},
+		{"wait", "walk1", nil, ""},
+		{"end", "walk1", nil, ""},
+		{"wait", "", nil, "needs --msg-session"},
+		{"end", "walk1", []string{"a.go"}, "takes no paths"},
+		{"review", "walk1", []string{"a.go"}, "goes with open"},
+	}
+	for _, c := range cases {
+		err := checkSessionCommand(c.command, c.paths, c.session)
+		if (c.wantErr == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), c.wantErr)) {
+			t.Errorf("checkSessionCommand(%q, %v, %q) = %v, want %q", c.command, c.paths, c.session, err, c.wantErr)
+		}
+	}
+}
+
+func TestDeliverRequestExitCodes(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "nteecli")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	socketPath := filepath.Join(dir, "s.sock")
+	server, err := extmsg.Listen(socketPath, func(text string) string {
+		switch {
+		case strings.HasPrefix(text, "slow"):
+			time.Sleep(time.Second)
+			return "ok finished"
+		case strings.HasPrefix(text, "next"):
+			return "ok step 2 queued"
+		case strings.HasPrefix(text, "finished"):
+			return "ok finished — session walk1 was finished — the user went through all 3 steps"
+		case strings.HasPrefix(text, "ended"):
+			return "ended session walk1 was closed by the user — stop sending steps"
+		case strings.HasPrefix(text, "waiting"):
+			return "ok waiting — the user hasn't answered yet"
+		}
+		return "error nope"
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+
+	cases := []struct {
+		request  string
+		session  string
+		wantCode int
+		wantText string
+	}{
+		{"next\n", "walk1", 0, "ok step 2 queued"},
+		{"finished\n", "walk1", 0, "ok finished"},
+		{"ended\n", "walk1", exitSessionEnded, "ended session walk1"},
+		{"waiting\n", "walk1", exitSessionWaiting, "ok waiting"},
+		{"bad\n", "", 1, "error nope"},
+		{"slow\n", "walk1", exitSessionWaiting, "--msg-session walk1 wait"},
+	}
+	for _, c := range cases {
+		output, code := deliverRequest(socketPath, c.request, c.session, 200*time.Millisecond)
+		if code != c.wantCode || !strings.Contains(output, c.wantText) {
+			t.Errorf("%q → %q exit %d, want %q exit %d", c.request, output, code, c.wantText, c.wantCode)
 		}
 	}
 }

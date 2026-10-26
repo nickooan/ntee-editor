@@ -7,6 +7,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 
+	"github.com/nickooan/ntee-editor/internal/config"
 	"github.com/nickooan/ntee-editor/internal/input"
 	"github.com/nickooan/ntee-editor/internal/lsp"
 	"github.com/nickooan/ntee-editor/internal/store"
@@ -23,6 +24,8 @@ func (m Model) renderInspectMain(width, height int) string {
 		return m.renderInspectOpCommands(width, height)
 	case inspectMenuKeybinds:
 		return m.renderInspectKeybinds(width, height)
+	case inspectMenuCodeStyle:
+		return m.renderInspectCodeStyle(width, height)
 	case inspectMenuExternal:
 		return m.renderInspectExternal(width, height)
 	default:
@@ -86,7 +89,7 @@ func (m Model) renderInspectSystem(width, height int) string {
 		for index, line := range strings.Split(stylePreviewSample, "\n") {
 			piece := panelLabelStyle.Render(line)
 			if index < len(picker.preview) && picker.preview[index] != nil {
-				piece = renderSegments(picker.preview[index], 0, len([]rune(line)))
+				piece = renderSegments(picker.preview[index], 0, len([]rune(line)), config.DefaultTabWidth)
 			}
 			preview.pieces = append(preview.pieces, piece)
 		}

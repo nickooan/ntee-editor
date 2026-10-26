@@ -132,7 +132,9 @@ type ExternalRecord struct {
 	Raw        string         `json:"raw"`
 	ReceivedAt time.Time      `json:"receivedAt"`
 	Status     ExternalStatus `json:"status"`
-	Note       string         `json:"note"`
+	Note       string         `json:"note"`     // what became of the request (written with the status)
+	LineNote   string         `json:"lineNote"` // open: the sender's note shown next to the line, "" = none
+	Session    string         `json:"session"`  // the guided session the request is a step of, "" = none
 }
 
 // ExternalDefaultBase is the stored base of a request that named no revision.

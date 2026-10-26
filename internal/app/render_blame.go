@@ -54,7 +54,7 @@ func (m Model) renderBlame(width, height int) string {
 
 		var content string
 		if i == m.blamePosition.row {
-			content = renderDiffCursorLine(text, m.blamePosition.column, contentWidth, cursorLineStyle)
+			content = renderDiffCursorLine(text, m.blamePosition.column, contentWidth, cursorLineStyle, m.tabWidthFor(m.openRel))
 		} else {
 			content = m.renderDiffBufLine(i, text, contentWidth, hexBg, baseStyle)
 		}

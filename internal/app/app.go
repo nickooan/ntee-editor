@@ -308,6 +308,7 @@ type Model struct {
 	stylePicker     stylePickerState
 	lspPicker       lspPickerState
 	keybindPicker   keybindPickerState
+	codeStylePicker codeStylePickerState
 
 	// Op-commands: user-saved shell command templates in the global store
 	// (opStore), edited in the inspect dashboard's table and run from the
@@ -410,6 +411,13 @@ type Model struct {
 	sigLine, sigCol int
 	sigAnchor       int
 	sigLastAccepted *lsp.CompletionItem
+
+	// An external open's note, boxed next to the line it explains.
+	lineNote lineNoteOverlay
+	// The guided session an agent is running (external_session.go), and the
+	// sessions that ended, so their agents are told to stop.
+	session       externalSession
+	endedSessions []endedSession
 
 	// Repo-wide content search overlay (Ctrl+G). All heavy work is async: the
 	// snapshot loads via grepLoadedMsg (guarded by grepGen), searches are
@@ -1126,6 +1134,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.splash {
 			return m, nil
 		}
+		if m.sessionStepVisible() {
+			m.notice = "session step is read-only — Enter next · Esc end session"
+			return m, nil
+		}
 		return m.handlePaste(msg.Content)
 
 	case tea.KeyPressMsg:
@@ -1592,6 +1604,9 @@ func (m Model) showOpenedFile(rel string, f filetree.OpenViewFile) Model {
 		}
 	}
 	m = m.sigUnpin() // the pin belongs to the buffer being left
+	if rel != m.lineNote.rel && m.lineNote.session == "" {
+		m = m.dismissLineNote()
+	}
 	m.openFile = &f
 	m.openRel = rel
 	m.fileScrollX, m.fileScrollY = 0, 0

@@ -11,6 +11,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/nickooan/ntee-editor/internal/config"
 	"github.com/nickooan/ntee-editor/internal/store"
 )
 
@@ -338,7 +339,7 @@ func TestLayoutLineNote(t *testing.T) {
 		"averyveryveryverylongwordthatcannotfit",
 	}, "\n")
 	const width = 20
-	lines := layoutLineNote(text, width)
+	lines := layoutLineNote(text, width, config.DefaultTabWidth)
 	var plain []string
 	for index, line := range lines {
 		if got := ansi.StringWidth(line); got != width {
@@ -371,7 +372,7 @@ func TestLayoutLineNote(t *testing.T) {
 }
 
 func TestLineNoteLayoutIsMemoized(t *testing.T) {
-	note := newLineNote("a.go", 0, "some note text", 0)
+	note := newLineNote("a.go", 0, "some note text", 0, config.DefaultTabWidth)
 	first := note.lines(30)
 	if second := note.lines(30); &first[0] != &second[0] {
 		t.Fatal("the same width reuses the layout")

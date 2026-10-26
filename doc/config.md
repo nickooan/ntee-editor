@@ -10,24 +10,24 @@ The package also edits the user config on the app's behalf (adding languages, to
 
 **Architecture**
 
-`Config` is the root type: `EditorConfig` (tab width, snapshot cap, highlight size cap), `TreeConfig` (ignore list, search-corpus cap), `ThemeConfig`, a `Languages` map of `LanguageConfig` (enable flag, extensions, optional `LSPServerConfig`, `InstallStrategy` list for `--prepare-lsp`), and the global `LSPConfig` switch. `LSPServerConfig` can carry a `BridgeConfig` wiring a hybrid server (like Volar) to a companion server's `executeCommand`. `Keybinds` maps action names to key chords; it stays a raw `map[string]string` here and is validated and resolved against the defaults by [`internal/keymap`](keymap.md) when the app starts.
+`Config` is the root type: `EditorConfig` (tab width, per-language tab widths, snapshot cap, highlight size cap), `TreeConfig` (ignore list, search-corpus cap), `ThemeConfig`, a `Languages` map of `LanguageConfig` (enable flag, extensions, optional `LSPServerConfig`, `InstallStrategy` list for `--prepare-lsp`), and the global `LSPConfig` switch. `LSPServerConfig` can carry a `BridgeConfig` wiring a hybrid server (like Volar) to a companion server's `executeCommand`. `Keybinds` maps action names to key chords; it stays a raw `map[string]string` here and is validated and resolved against the defaults by [`internal/keymap`](keymap.md) when the app starts.
 
 The merge flow: `LoadWithWarnings` starts from `Default()`, then calls `merge` twice — user config with `trustExec: true`, project config with `trustExec: false`. Inside `merge`, languages are decoded separately from the rest (plain unmarshal would replace, and extensions need union), the trust gate strips `LSP`/`Install` (and the whole `keybinds` section) from untrusted files, and `mergeLanguages` folds the result back in. `Keybinds` is cleared before each decode because yaml.v3 decodes into an existing map in place: the user file's section replaces rather than merges. Finally, a few numeric fields are clamped to sane defaults.
 
-Everything lives in one file, `config.go`.
+`config.go` holds the loading and the user-config writers; `code_style.go` holds the tab-size settings.
 
 **Functions**
 
 ### config.go
 
 - `Default` — the built-in configuration: tab width 4, 50 snapshots, a curated `tree.ignore` list of build/dependency dirs (on top of the always-hidden `.git` and always-dimmed `node_modules`), gruvbox syntax theme, and LSP recipes for Go (`gopls`) and TypeScript (`typescript-language-server`, which also covers JavaScript). LSP defaults to enabled — safe because a missing server binary degrades to a one-time notice.
-- `LoadWithWarnings` — builds the effective config for a project root and returns any warnings. Missing files are fine; a malformed one is skipped so the editor still starts, but the skip is reported — a typo'd config silently acting like defaults is worse than a notice. Also clamps `TabWidth`, `MaxSnapshots`, and `MaxIndexFiles` when set below 1.
+- `LoadWithWarnings` — builds the effective config for a project root and returns any warnings. Missing files are fine; a malformed one is skipped so the editor still starts, but the skip is reported — a typo'd config silently acting like defaults is worse than a notice. Also clamps `MaxSnapshots` and `MaxIndexFiles` when set below 1, validates the tab sizes (`validateTabWidths`), and records which tab sizes the project file set (`ProjectCodeStyle`).
 - `Load` — `LoadWithWarnings` with the warnings discarded, for callers that don't surface them.
 - `ConfigPath` — the user config location: `$XDG_CONFIG_HOME` (else `~/.config`) + `ntee-editor/config.yaml`.
 - `merge` — reads one YAML file into the accumulating config. Languages are pulled out and merged with union semantics; when `trustExec` is false, every language's `LSP` and `Install` blocks are nil'd before merging and the file's `keybinds` are discarded (with a warning if it set any) — that's the whole trust gate. Parse errors warn as "partially applied" because fields decoded before the error may already have landed.
 - `mergeLanguages` — overlays a file's languages onto the accumulated map: extensions union, `LSP`/`Enabled`/`Install` overlay only when set, new languages are added whole.
 - `mergeLSP` — field-by-field overlay of one server config onto another; a nil base is replaced whole.
-- `readUserConfig` — loads the user config for *editing*. If the file is malformed it refuses to proceed, because continuing would overwrite the user's recoverable file with a defaults-seeded one. If the file is absent, non-language sections are seeded from defaults — otherwise marshalling would emit zero values like `lsp.enabled: false`, which would disable all LSP on the next load. Languages stay empty so only explicit entries get written.
+- `readUserConfig` — loads the user config for *editing*. If the file is malformed it refuses to proceed, because continuing would overwrite the user's recoverable file with a defaults-seeded one. If the file is absent, non-language sections are seeded from defaults — otherwise marshalling would emit zero values like `lsp.enabled: false`, which would disable all LSP on the next load. Languages stay empty so only explicit entries get written. When the file exists, `seedMissingEditorFields` gives `editor` fields it leaves out their defaults — otherwise any rewrite would turn an absent `max_highlight_kb` into `0`, which means *unlimited*. A zero the user wrote stays.
 - `writeUserConfig` — marshals and writes the config, backing the prior content up to `path+".bak"` first. No backup means no rewrite: the rewrite loses comments and the backup is the only way back.
 - `MergeUserLanguages` — adds language entries to the user config, skipping any already present so the user's tuning is never clobbered. Returns the (sorted) names actually added; writes nothing if that list is empty.
 - `SetLanguagesEnabled` — writes `enable:` flags for named languages into the user config (the special name `"all"` toggles global `lsp.enabled` instead). Unlike `MergeUserLanguages` it does modify existing entries — but only the enable flag.
@@ -36,3 +36,16 @@ Everything lives in one file, `config.go`.
 - `LanguageConfig.IsEnabled` — a language is enabled when the flag is unset or true; only an explicit `enable: false` turns it off.
 
 *Plus small helpers: `firstLine` — clips a multi-line YAML error to its first line for warnings, and `unionStrings` — order-preserving, de-duped list union backing the extensions merge.*
+
+### code_style.go
+
+The tab size, editor-wide and per language. `editor.tab_width` is the size for every file; `editor.language_tab_widths` maps a language key to its own size, and a language without an entry inherits `tab_width`. The map is always written (`{}` when empty), so the file says outright that nothing is overridden. The size decides both how many spaces Tab inserts and how wide tab characters are drawn.
+
+- `CodeStyleLanguages` — the curated languages the settings can target (go, typescript, javascript, python, … makefile), each with its extensions and exact file names. It is independent of the LSP `languages` section, so a file type with no language server (YAML, Markdown) can still have its own size.
+- `LanguageForPath` — a file's language key, from maps built once at init (basename first, then the lower-cased extension); `""` when no language claims it.
+- `Config.TabWidthFor` — the size for a file: its language's own, else `tab_width`.
+- `validateTabWidths` — keeps sizes within `MinTabWidth`–`MaxTabWidth` (1–16): an out-of-range `tab_width` falls back to `DefaultTabWidth` (4), and a per-language entry that is out of range or names an unknown language is dropped. Each fix is reported as a load warning.
+- `readProjectCodeStyle` — decodes the project file's `editor` section a second time, into pointer fields, to tell which sizes it set (`ProjectCodeStyle`). The project file wins over the user config, so the settings panel refuses to change those sizes and points at the file instead.
+- `SetTabWidths` — writes `tab_width` and the full `language_tab_widths` map into the user config (`.bak` first), like `SetKeybinds`.
+
+*Plus: `IsCodeStyleLanguage`, the `DefaultTabWidth`/`MinTabWidth`/`MaxTabWidth` limits.*

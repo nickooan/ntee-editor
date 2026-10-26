@@ -138,6 +138,10 @@ func TestInspectMenuSelection(t *testing.T) {
 		t.Fatalf("Shift+Down should select keybinds, got %d", m.inspectMenu)
 	}
 	m = key(m, shiftKey(tea.KeyDown))
+	if m.inspectMenu != inspectMenuCodeStyle {
+		t.Fatalf("Shift+Down should select code style, got %d", m.inspectMenu)
+	}
+	m = key(m, shiftKey(tea.KeyDown))
 	if m.inspectMenu != inspectMenuExternal {
 		t.Fatalf("Shift+Down should select external, got %d", m.inspectMenu)
 	}
@@ -145,6 +149,7 @@ func TestInspectMenuSelection(t *testing.T) {
 	if m.inspectMenu != inspectMenuExternal {
 		t.Fatalf("selection should clamp at the last item, got %d", m.inspectMenu)
 	}
+	m = key(m, shiftKey(tea.KeyUp))
 	m = key(m, shiftKey(tea.KeyUp))
 	m = key(m, shiftKey(tea.KeyUp))
 	m = key(m, shiftKey(tea.KeyUp))

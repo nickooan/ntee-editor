@@ -6,6 +6,7 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/nickooan/ntee-editor/internal/config"
 	"github.com/nickooan/ntee-editor/internal/view"
 )
 
@@ -63,31 +64,31 @@ func TestBatchedLineRenderersVisibleOutput(t *testing.T) {
 	width := 8
 
 	// renderEditLine: cursor inside, no selection.
-	if got := ansi.Strip(renderEditLine(line, nil, 3, width, nil)); got != "hello wo" {
+	if got := ansi.Strip(renderEditLine(line, nil, 3, width, nil, config.DefaultTabWidth)); got != "hello wo" {
 		t.Fatalf("renderEditLine = %q", got)
 	}
 	// Cursor beyond width scrolls the window.
-	if got := ansi.Strip(renderEditLine(line, nil, 10, width, nil)); got != "lo world" {
+	if got := ansi.Strip(renderEditLine(line, nil, 10, width, nil, config.DefaultTabWidth)); got != "lo world" {
 		t.Fatalf("renderEditLine scrolled = %q", got)
 	}
 	// Selection spanning the cursor still renders the same runes.
 	sel := &selRange{start: 1, end: 6}
-	if got := ansi.Strip(renderEditLine(line, nil, 3, width, sel)); got != "hello wo" {
+	if got := ansi.Strip(renderEditLine(line, nil, 3, width, sel, config.DefaultTabWidth)); got != "hello wo" {
 		t.Fatalf("renderEditLine selected = %q", got)
 	}
 	// Short line pads to width.
-	if got := ansi.Strip(renderEditLine("hi", nil, 1, 6, nil)); got != "hi    " {
+	if got := ansi.Strip(renderEditLine("hi", nil, 1, 6, nil, config.DefaultTabWidth)); got != "hi    " {
 		t.Fatalf("renderEditLine padded = %q", got)
 	}
 
-	if got := ansi.Strip(renderSelectedLine("hi", 6)); got != "hi    " {
+	if got := ansi.Strip(renderSelectedLine("hi", 6, config.DefaultTabWidth)); got != "hi    " {
 		t.Fatalf("renderSelectedLine = %q", got)
 	}
 
-	if got := ansi.Strip(renderDiffCursorLine(line, 3, 8, cursorLineStyle)); got != "hello wo" {
+	if got := ansi.Strip(renderDiffCursorLine(line, 3, 8, cursorLineStyle, config.DefaultTabWidth)); got != "hello wo" {
 		t.Fatalf("renderDiffCursorLine = %q", got)
 	}
-	if got := ansi.Strip(renderDiffCursorLine("hi", 0, 6, cursorLineStyle)); got != "hi    " {
+	if got := ansi.Strip(renderDiffCursorLine("hi", 0, 6, cursorLineStyle, config.DefaultTabWidth)); got != "hi    " {
 		t.Fatalf("renderDiffCursorLine padded = %q", got)
 	}
 }
@@ -98,7 +99,7 @@ func TestRenderEditLineKeepsSyntaxColours(t *testing.T) {
 	segments := []view.HighlightSegment{keyword, rest}
 	line := "func main()"
 
-	got := renderEditLine(line, segments, 9, 14, nil)
+	got := renderEditLine(line, segments, 9, 14, nil, config.DefaultTabWidth)
 	if ansi.Strip(got) != "func main()   " {
 		t.Fatalf("visible text changed: %q", ansi.Strip(got))
 	}
@@ -112,7 +113,7 @@ func TestRenderEditLineKeepsSyntaxColours(t *testing.T) {
 		t.Fatal("the keyword must not be repainted in the plain foreground")
 	}
 
-	selected := renderEditLine(line, segments, 9, 14, &selRange{start: 0, end: 2})
+	selected := renderEditLine(line, segments, 9, 14, &selRange{start: 0, end: 2}, config.DefaultTabWidth)
 	if !strings.Contains(selected, segStyleWithBg(keyword, hexSelection).Render("fu")) ||
 		!strings.Contains(selected, segStyleWithBg(keyword, hexLineHl).Render("nc")) {
 		t.Fatal("a selection should keep the token colour on the selection background")
@@ -122,7 +123,7 @@ func TestRenderEditLineKeepsSyntaxColours(t *testing.T) {
 func TestRenderEditLineScrolledWindowColoursRightRunes(t *testing.T) {
 	keyword := view.HighlightSegment{Text: "return", Color: "#fb4934"}
 	segments := []view.HighlightSegment{{Text: "x := 1; "}, keyword}
-	got := renderEditLine("x := 1; return", segments, 14, 8, nil)
+	got := renderEditLine("x := 1; return", segments, 14, 8, nil, config.DefaultTabWidth)
 	if ansi.Strip(got) != " return " {
 		t.Fatalf("scrolled window = %q", ansi.Strip(got))
 	}
@@ -133,7 +134,7 @@ func TestRenderEditLineScrolledWindowColoursRightRunes(t *testing.T) {
 
 func TestRenderEditLineIgnoresStaleSegments(t *testing.T) {
 	stale := []view.HighlightSegment{{Text: "fun", Color: "#fb4934"}}
-	got := renderEditLine("func main()", stale, 0, 12, nil)
+	got := renderEditLine("func main()", stale, 0, 12, nil, config.DefaultTabWidth)
 	if want := cursorStyle.Render("f") + cursorLineStyle.Render("unc main() "); got != want {
 		t.Fatalf("mismatched segments should render plain:\n got %q\nwant %q", got, want)
 	}

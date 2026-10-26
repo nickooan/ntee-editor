@@ -183,7 +183,7 @@ func (m Model) carryOutExternal(pending pendingExternal) (Model, tea.Cmd) {
 		return m, tea.Batch(append(cmds, m.saveExternalStatusCmd(pending, store.ExternalFailed, problem))...)
 	}
 	if pending.lineNote != "" && pending.line > 0 {
-		m.lineNote = newLineNote(m.openRel, m.edit.cy, pending.lineNote, m.edit.rev)
+		m.lineNote = newLineNote(m.openRel, m.edit.cy, pending.lineNote, m.edit.rev, m.cfg.Editor.TabWidth)
 	}
 	note := ""
 	if pending.base != "" {

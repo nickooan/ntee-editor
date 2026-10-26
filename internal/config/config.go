@@ -33,12 +33,18 @@ type Config struct {
 	// Keybinds maps action names to key chords (resolved by internal/keymap).
 	// User config only: a project file's keybinds are ignored.
 	Keybinds map[string]string `yaml:"keybinds"`
+	// ProjectCodeStyle notes the tab sizes the project file set (not read
+	// from YAML; filled by LoadWithWarnings).
+	ProjectCodeStyle ProjectCodeStyle `yaml:"-"`
 }
 
 type EditorConfig struct {
-	TabWidth       int `yaml:"tab_width"`
-	MaxSnapshots   int `yaml:"max_snapshots"`
-	MaxHighlightKB int `yaml:"max_highlight_kb"`
+	TabWidth int `yaml:"tab_width"`
+	// LanguageTabWidths overrides TabWidth per CodeStyleLanguages key; a
+	// language without an entry inherits TabWidth.
+	LanguageTabWidths map[string]int `yaml:"language_tab_widths"`
+	MaxSnapshots      int            `yaml:"max_snapshots"`
+	MaxHighlightKB    int            `yaml:"max_highlight_kb"`
 }
 
 type TreeConfig struct {
@@ -106,9 +112,10 @@ func Default() Config {
 	return Config{
 		Version: 1,
 		Editor: EditorConfig{
-			TabWidth:       4,
-			MaxSnapshots:   50,
-			MaxHighlightKB: 512,
+			TabWidth:          DefaultTabWidth,
+			LanguageTabWidths: map[string]int{},
+			MaxSnapshots:      50,
+			MaxHighlightKB:    512,
 		},
 		Tree: TreeConfig{
 			// .git is always fully hidden and node_modules is always shown-but-
@@ -160,10 +167,10 @@ func LoadWithWarnings(projectRoot string) (Config, []string) {
 	if path, err := ConfigPath(); err == nil {
 		warnings = append(warnings, merge(&cfg, path, true)...) // user config: trusted, may name executables
 	}
-	warnings = append(warnings, merge(&cfg, filepath.Join(projectRoot, ".ntee-editor.yaml"), false)...)
-	if cfg.Editor.TabWidth < 1 {
-		cfg.Editor.TabWidth = 4
-	}
+	projectPath := filepath.Join(projectRoot, ".ntee-editor.yaml")
+	warnings = append(warnings, merge(&cfg, projectPath, false)...)
+	cfg.ProjectCodeStyle = readProjectCodeStyle(projectPath)
+	warnings = append(warnings, validateTabWidths(&cfg)...)
 	if cfg.Editor.MaxSnapshots < 1 {
 		cfg.Editor.MaxSnapshots = 50
 	}
@@ -219,7 +226,38 @@ func readUserConfig() (file Config, existing []byte, path string, err error) {
 	if file.Languages == nil {
 		file.Languages = map[string]LanguageConfig{}
 	}
+	if readErr == nil {
+		seedMissingEditorFields(&file, existing)
+	}
 	return file, existing, path, nil
+}
+
+// seedMissingEditorFields gives editor fields the file leaves out their
+// defaults, so a rewrite never turns an absent field into a zero —
+// max_highlight_kb: 0 means unlimited, not the default cap. A zero the user
+// wrote stays.
+func seedMissingEditorFields(file *Config, existing []byte) {
+	var present struct {
+		Editor struct {
+			TabWidth       *int `yaml:"tab_width"`
+			MaxSnapshots   *int `yaml:"max_snapshots"`
+			MaxHighlightKB *int `yaml:"max_highlight_kb"`
+		} `yaml:"editor"`
+	}
+	_ = yaml.Unmarshal(existing, &present) // the same bytes just decoded
+	defaults := Default().Editor
+	if present.Editor.TabWidth == nil {
+		file.Editor.TabWidth = defaults.TabWidth
+	}
+	if present.Editor.MaxSnapshots == nil {
+		file.Editor.MaxSnapshots = defaults.MaxSnapshots
+	}
+	if present.Editor.MaxHighlightKB == nil {
+		file.Editor.MaxHighlightKB = defaults.MaxHighlightKB
+	}
+	if file.Editor.LanguageTabWidths == nil {
+		file.Editor.LanguageTabWidths = map[string]int{}
+	}
 }
 
 // writeUserConfig marshals file to path, backing the prior content up to

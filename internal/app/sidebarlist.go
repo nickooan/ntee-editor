@@ -259,6 +259,7 @@ func (m Model) activateSidebarRow(rowIndex int) (Model, bool) {
 		m.stylePicker.focused = false
 		m.lspPicker = lspPickerState{}
 		m.keybindPicker = keybindPickerState{}
+		m.codeStylePicker = codeStylePickerState{}
 		m.externalPicker = externalPickerState{}
 		return m, true
 	case modeOpenAPI, modeGraphQL:

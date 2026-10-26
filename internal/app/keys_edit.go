@@ -174,7 +174,7 @@ func (m Model) handleEditKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "tab":
-		m.edit.insert(strings.Repeat(" ", m.cfg.Editor.TabWidth))
+		m.edit.insert(strings.Repeat(" ", m.tabWidthFor(m.openRel)))
 		m = m.hlMarkLine(m.edit.cy)
 		m.snapDirty = true
 		return m, nil

@@ -101,7 +101,7 @@ select, exec) can be rebound — see [Custom keybindings](#custom-keybindings).
 | `Ctrl+U` | Goto **uncommitted** file — same finder, limited to git-dirty paths |
 | `Ctrl+W` | **Workspace repo** — re-root the editor at a nested git repo under the opened directory (pick the top `name/` row to go back to the whole workspace). The file tree, query bar, `Ctrl+P`/`Ctrl+U`/`Ctrl+G`, change highlights, and git views then cover that repo only, as if you had opened it directly; the title bar shows `working repo: …` in orange next to the path. Each repo remembers its own tabs, open file, and tree position (also across relaunch), and switching stashes unsaved edits as a draft. Refused when the opened directory is already a git repo |
 | `Ctrl+G` | **Grep the repo** — colored preview on top, results below; `↑/↓` + `Enter` jumps |
-| `Ctrl+T` | **Inspection dashboard** — store stats + LSP control + op-commands + keybinds + external messages ([below](#inspection-mode-ctrlt)) |
+| `Ctrl+T` | **Inspection dashboard** — store stats + LSP control + op-commands + keybinds + code style + external messages ([below](#inspection-mode-ctrlt)) |
 | `Ctrl+R` | **Run an op-command** on the open file — pick a saved command, fill its `{$1}` `{$2}` args, watch the output stream ([below](#op-commands-ctrlr)) |
 | `Shift+Tab` | Cycle the focused tab (wraps) |
 | `Ctrl+Q` / `Ctrl+C` | Quit (session saved). `Ctrl+C` always quits, whatever the bindings |
@@ -223,6 +223,18 @@ A dashboard for the editor's own machinery. `Shift+↑/↓` switches the left me
   already taken, or isn't a chord, is refused in the status bar. Custom keys
   are highlighted next to their default. Changes apply immediately and are
   saved to your config — see [Custom keybindings](#custom-keybindings).
+- **code style** — the tab size, as a LANGUAGE | TAB SIZE | DESCRIPTION table
+  laid out like keybinds. **all files** is the size for everything; each
+  language (go, typescript, python, yaml, markdown, makefile, …) uses it until
+  you give that language its own. The size is how many spaces `Tab` inserts
+  *and* how wide tab characters in a file are drawn — in the editor, diffs,
+  review, previews and notes. Press `→` to move in: `↑/↓` picks a row, `Enter`
+  types a size (1–16, `Enter` saves, `Esc` cancels), `+`/`-` step it, `r` lets
+  a language use **all files** again (or puts **all files** back to 4), `R`
+  resets everything after a `y/n`. In the bar: `tab 2`, `tab go 8`,
+  `tab go default`, `tab reset`. Saved to your config as `tab_width` and
+  `language_tab_widths`. A size set by the project's `.ntee-editor.yaml` is
+  tagged **project** and can only be changed in that file.
 - **external** — whether other programs may send this editor requests
   ([External messages & review](#external-messages--review)). Shows the
   socket the editor listens on, the **accept messages** switch (off by
@@ -472,7 +484,8 @@ Defaults ← `~/.config/ntee-editor/config.yaml` ← `<project>/.ntee-editor.yam
 
 ```yaml
 version: 1
-editor: { tab_width: 4, max_snapshots: 50, max_highlight_kb: 512 }
+editor: { tab_width: 4, language_tab_widths: {}, max_snapshots: 50, max_highlight_kb: 512 }
+# a language's own tab size, e.g. language_tab_widths: { go: 8, yaml: 2 } (Ctrl+T → code style)
 tree:   { ignore: [".git"] }    # only .git is hidden; .gitignore'd paths show grayed
 theme:  { syntax: "gruvbox" }   # any chroma style name (monokai, dracula, …)
 languages:

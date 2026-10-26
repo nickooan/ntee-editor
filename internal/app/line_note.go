@@ -16,6 +16,7 @@ type lineNoteOverlay struct {
 	line         int    // 0-based buffer line it explains
 	text         string
 	naturalWidth int // widest source line in cells, sizes the box
+	tabWidth     int // the editor-wide tab size when shown
 	editRevision int // m.edit.rev when shown — any edit hides the note
 	scroll       int // first note row shown when the box is capped
 	layout       *lineNoteLayoutCache
@@ -34,16 +35,17 @@ const (
 	lineNoteMaxWidth = 100 // box width cap: prose past this gets hard to read
 )
 
-func newLineNote(rel string, line int, text string, editRevision int) lineNoteOverlay {
+func newLineNote(rel string, line int, text string, editRevision, tabWidth int) lineNoteOverlay {
 	naturalWidth := 0
 	for _, sourceLine := range strings.Split(text, "\n") {
-		naturalWidth = max(naturalWidth, ansi.StringWidth(expandTabs(sourceLine)))
+		naturalWidth = max(naturalWidth, ansi.StringWidth(expandTabs(sourceLine, tabWidth)))
 	}
 	return lineNoteOverlay{
 		rel:          rel,
 		line:         line,
 		text:         text,
 		naturalWidth: naturalWidth,
+		tabWidth:     tabWidth,
 		editRevision: editRevision,
 		layout:       &lineNoteLayoutCache{},
 	}
@@ -61,11 +63,11 @@ func (m Model) lineNoteVisible() bool {
 // is unchanged.
 func (note lineNoteOverlay) lines(innerWidth int) []string {
 	if note.layout == nil {
-		return layoutLineNote(note.text, innerWidth)
+		return layoutLineNote(note.text, innerWidth, note.tabWidth)
 	}
 	if note.layout.lines == nil || note.layout.innerWidth != innerWidth {
 		note.layout.innerWidth = innerWidth
-		note.layout.lines = layoutLineNote(note.text, innerWidth)
+		note.layout.lines = layoutLineNote(note.text, innerWidth, note.tabWidth)
 	}
 	return note.layout.lines
 }

@@ -28,6 +28,7 @@ func (m Model) renderPreview(width, height int) string {
 		focused = m.preview.search.focused
 	}
 
+	tabWidth := m.tabWidthFor(m.openRel)
 	rows := make([]string, 0, height)
 	for i := start; i < start+height; i++ {
 		if i >= total {
@@ -37,11 +38,11 @@ func (m Model) renderPreview(width, height int) string {
 		line := m.preview.lines[i]
 		switch {
 		case len(byLine[i]) > 0:
-			rows = append(rows, renderSearchLine(m.preview.plain[i], line.Segs, byLine[i], nil, focused, 0, width))
+			rows = append(rows, renderSearchLine(m.preview.plain[i], line.Segs, byLine[i], nil, focused, 0, width, tabWidth))
 		case i == m.preview.position.row:
-			rows = append(rows, renderSegmentsBg(line.Segs, 0, width, hexLineHl, cursorLineStyle))
+			rows = append(rows, renderSegmentsBg(line.Segs, 0, width, hexLineHl, cursorLineStyle, tabWidth))
 		default:
-			rows = append(rows, renderSegments(line.Segs, 0, width))
+			rows = append(rows, renderSegments(line.Segs, 0, width, tabWidth))
 		}
 	}
 	return strings.Join(rows, "\n")

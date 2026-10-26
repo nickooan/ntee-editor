@@ -308,6 +308,7 @@ type Model struct {
 	stylePicker     stylePickerState
 	lspPicker       lspPickerState
 	keybindPicker   keybindPickerState
+	codeStylePicker codeStylePickerState
 
 	// Op-commands: user-saved shell command templates in the global store
 	// (opStore), edited in the inspect dashboard's table and run from the

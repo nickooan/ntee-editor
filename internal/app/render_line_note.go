@@ -109,12 +109,12 @@ var (
 // quotes, fenced code blocks (hard-wrapped, never word-wrapped), inline
 // `code` and **bold**. Indentation is kept. Every returned line is exactly
 // innerWidth cells wide.
-func layoutLineNote(text string, innerWidth int) []string {
+func layoutLineNote(text string, innerWidth, tabWidth int) []string {
 	innerWidth = max(1, innerWidth)
 	var out []string
 	inFence := false
 	for _, sourceLine := range strings.Split(text, "\n") {
-		sourceLine = expandTabs(sourceLine)
+		sourceLine = expandTabs(sourceLine, tabWidth)
 		trimmed := strings.TrimSpace(sourceLine)
 		if strings.HasPrefix(trimmed, "```") {
 			inFence = !inFence
@@ -291,7 +291,10 @@ func padStyled(line string, width, total int, fill lipgloss.Style) string {
 	return line + fill.Render(strings.Repeat(" ", total-width))
 }
 
-// expandTabs turns tabs into four spaces so widths are countable.
-func expandTabs(text string) string {
-	return strings.ReplaceAll(text, "\t", "    ")
+// expandTabs turns tabs into tabWidth spaces so widths are countable.
+func expandTabs(text string, tabWidth int) string {
+	if strings.IndexByte(text, '\t') < 0 {
+		return text
+	}
+	return strings.ReplaceAll(text, "\t", strings.Repeat(" ", tabWidth))
 }

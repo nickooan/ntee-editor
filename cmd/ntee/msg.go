@@ -47,9 +47,10 @@ const msgHelp = `ntee --msg — send a request to a running ntee editor
                              a dark background, cut (not word-wrapped) at the
                              box edge
         blank line           paragraph break
-      Line breaks and leading indentation are kept (a tab is 4 spaces), and
-      long lines word-wrap to the box. Anything else — links, tables,
-      _italics_, HTML — shows as plain text, markers included.
+      Line breaks and leading indentation are kept (a tab is the editor's
+      all-files tab size, 4 by default), and long lines word-wrap to the
+      box. Anything else — links, tables, _italics_, HTML — shows as plain
+      text, markers included.
 
   ntee --msg review <file>...
   git diff --name-only | ntee --msg review

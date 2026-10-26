@@ -57,6 +57,41 @@ func TestParse(t *testing.T) {
 	}
 }
 
+func TestParseLineNote(t *testing.T) {
+	cases := []struct {
+		name, text, wantNote, wantErr string
+		wantPaths                     []string
+	}{
+		{name: "none", text: "open\na.go#L3\n", wantPaths: []string{"a.go#L3"}},
+		{
+			name:      "formatting kept",
+			text:      "open\na.go#L3\n---\n\n# Why\n\n  - indented\n---\nlast  \n\n",
+			wantNote:  "# Why\n\n  - indented\n---\nlast",
+			wantPaths: []string{"a.go#L3"},
+		},
+		{name: "crlf", text: "open main\r\na.go#L3\r\n---\r\none\r\ntwo\r\n", wantNote: "one\ntwo", wantPaths: []string{"a.go#L3"}},
+		{name: "empty note", text: "open\na.go#L3\n---\n  \n\n", wantPaths: []string{"a.go#L3"}},
+		{name: "no path before note", text: "open\n---\nnote\n", wantErr: "exactly one path"},
+		{name: "review refuses a note", text: "review\na.go\n---\nnote\n", wantErr: "review takes no note"},
+		{name: "too long", text: "open\na.go#L3\n---\n" + strings.Repeat("x", MaxLineNoteBytes+1), wantErr: "note is too long"},
+	}
+	for _, c := range cases {
+		got, err := Parse(c.text)
+		if c.wantErr != "" {
+			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+				t.Errorf("%s: error = %v, want %q", c.name, err, c.wantErr)
+			}
+			continue
+		}
+		if err != nil || got.LineNote != c.wantNote || fmt.Sprint(got.Paths) != fmt.Sprint(c.wantPaths) {
+			t.Errorf("%s: Parse = %+v, %v; want note %q, paths %v", c.name, got, err, c.wantNote, c.wantPaths)
+		}
+	}
+	if message, err := Parse("open v1\na.go#L3\n---\nn"); err != nil || message.Base() != "v1" {
+		t.Errorf("a note keeps the base: %+v, %v", message, err)
+	}
+}
+
 func TestReplies(t *testing.T) {
 	if OkReply("opened\n  a.go") != "ok opened a.go" || ErrorReply("no\nway") != "error no way" {
 		t.Fatal("replies are single lines")

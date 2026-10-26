@@ -575,6 +575,9 @@ func (m Model) renderFile(width, height int) string {
 		// pinned signature reappears when it closes.
 		rows = m.overlaySignature(rows, start, gutterWidth, contentWidth, height)
 	}
+	if editing && m.lineNoteVisible() && !m.completionOpen {
+		rows = m.overlayLineNote(rows, start, gutterWidth, contentWidth, height)
+	}
 	return strings.Join(rows, "\n")
 }
 
@@ -620,15 +623,7 @@ func (m Model) overlayCompletion(rows []string, start, gutterWidth, contentWidth
 		if rowIdx < 0 || rowIdx >= len(rows) {
 			continue
 		}
-		// Overlay the box onto the real row, preserving the gutter and the code
-		// to the left/right (ANSI-aware slicing) rather than blanking the line.
-		orig := rows[rowIdx]
-		left := ansi.Truncate(orig, anchor, "")
-		if pad := anchor - ansi.StringWidth(left); pad > 0 {
-			left += baseStyle.Render(strings.Repeat(" ", pad))
-		}
-		right := ansi.TruncateLeft(orig, anchor+w, "")
-		rows[rowIdx] = left + box + right
+		rows[rowIdx] = spliceOverlay(rows[rowIdx], anchor, w, box)
 	}
 	return rows
 }
@@ -661,14 +656,18 @@ func (m Model) overlaySignature(rows []string, start, gutterWidth, contentWidth,
 	if rowIdx < 0 || rowIdx >= len(rows) {
 		return rows
 	}
-	orig := rows[rowIdx]
-	left := ansi.Truncate(orig, anchor, "")
+	rows[rowIdx] = spliceOverlay(rows[rowIdx], anchor, w, box)
+	return rows
+}
+
+// spliceOverlay lays box (width cells) over a rendered row from column
+// anchor, keeping the row's cells on either side (ANSI-aware slicing).
+func spliceOverlay(row string, anchor, width int, box string) string {
+	left := ansi.Truncate(row, anchor, "")
 	if pad := anchor - ansi.StringWidth(left); pad > 0 {
 		left += baseStyle.Render(strings.Repeat(" ", pad))
 	}
-	right := ansi.TruncateLeft(orig, anchor+w, "")
-	rows[rowIdx] = left + box + right
-	return rows
+	return left + box + ansi.TruncateLeft(row, anchor+width, "")
 }
 
 // completionLayout sizes the popup's columns for the visible rows within cap.

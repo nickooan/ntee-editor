@@ -122,6 +122,39 @@ func TestExternalRecordBaseIsStoredExplicitly(t *testing.T) {
 	}
 }
 
+func TestExternalRecordLineNoteIsStoredExplicitly(t *testing.T) {
+	history := &ExternalHistory{dir: t.TempDir()}
+	at := time.Unix(3000, 0)
+	records := []ExternalRecord{
+		{Key: NewExternalRecordKey(at), Command: "open", Base: ExternalDefaultBase, Paths: []string{"a.go#L3"}, ReceivedAt: at},
+		{Key: NewExternalRecordKey(at.Add(time.Second)), Command: "open", Base: ExternalDefaultBase, Paths: []string{"a.go#L3"}, LineNote: "# Why\n\n- kept", ReceivedAt: at.Add(time.Second)},
+	}
+	for _, record := range records {
+		if err := history.AppendExternal(record, 10); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var raw map[string]any
+	err := history.withDB(10, func(db *nteedb.DB) error {
+		data, _, err := db.Get(records[0].Key)
+		if err != nil {
+			return err
+		}
+		return json.Unmarshal(data, &raw)
+	})
+	if value, present := raw["lineNote"]; err != nil || !present || value != "" {
+		t.Fatalf("no note is stored as an explicit empty lineNote: %v %v", raw, err)
+	}
+	loaded, _ := history.LoadExternal()
+	if len(loaded) != 2 || loaded[0].LineNote != "# Why\n\n- kept" || loaded[1].LineNote != "" {
+		t.Fatalf("loaded notes: %+v", loaded)
+	}
+	var legacy ExternalRecord
+	if err := json.Unmarshal([]byte(`{"key":"msg:1","command":"open","paths":["a.go#L3"]}`), &legacy); err != nil || legacy.LineNote != "" {
+		t.Fatalf("a legacy record has no note: %+v %v", legacy, err)
+	}
+}
+
 func TestLegacyExternalRecordsGetABase(t *testing.T) {
 	cases := []struct {
 		json string

@@ -35,6 +35,7 @@ type pendingExternal struct {
 	targetRepo  string // open: the activeRepo to switch to ("" = the workspace)
 	reviewPaths []string
 	base        string // the revision to compare with, "" = HEAD (diffBaseOf)
+	lineNote    string // open: the sender's note for the line, "" = none
 }
 
 // WithExternal attaches the external-message stores and the socket's status
@@ -100,7 +101,7 @@ func sendExternalReply(reply chan<- string, outcome string) {
 // editor re-roots at the file's own repo (or the whole workspace when no
 // repo holds it).
 func (m Model) resolveExternal(record store.ExternalRecord) (pendingExternal, string) {
-	pending := pendingExternal{record: record, base: diffBaseOf(record)}
+	pending := pendingExternal{record: record, base: diffBaseOf(record), lineNote: record.LineNote}
 	switch record.Command {
 	case extmsg.CommandOpen:
 		if len(record.Paths) != 1 {
@@ -172,6 +173,7 @@ func (m Model) carryOutExternal(pending pendingExternal) (Model, tea.Cmd) {
 		cmds = append(cmds, cmd)
 	}
 	m.errText = ""
+	m = m.dismissLineNote() // a new request replaces an earlier note
 	m = m.openFileAtLine(pending.rootRel, pending.line)
 	if m.mode != modeEdit || m.openRel != pending.rootRel {
 		problem := m.errText
@@ -179,6 +181,9 @@ func (m Model) carryOutExternal(pending pendingExternal) (Model, tea.Cmd) {
 			problem = "cannot open " + pending.rootRel
 		}
 		return m, tea.Batch(append(cmds, m.saveExternalStatusCmd(pending, store.ExternalFailed, problem))...)
+	}
+	if pending.lineNote != "" && pending.line > 0 {
+		m.lineNote = newLineNote(m.openRel, m.edit.cy, pending.lineNote, m.edit.rev)
 	}
 	note := ""
 	if pending.base != "" {
@@ -201,14 +206,23 @@ func (m Model) externalOutcome(pending pendingExternal) string {
 	case m.mode == modeReview && pending.record.Command == extmsg.CommandReview:
 		return fmt.Sprintf("reviewing %d files", len(m.review.files))
 	case m.mode == modeDiff && m.openRel == pending.rootRel:
-		return fmt.Sprintf("opened %s at line %d, diff against %s", pending.record.Paths[0], m.edit.cy+1, pending.base)
+		return fmt.Sprintf("opened %s at line %d, diff against %s%s", pending.record.Paths[0], m.edit.cy+1, pending.base, m.lineNoteOutcome())
 	case m.mode == modeEdit && m.openRel == pending.rootRel:
-		return fmt.Sprintf("opened %s at line %d", pending.record.Paths[0], m.edit.cy+1)
+		return fmt.Sprintf("opened %s at line %d%s", pending.record.Paths[0], m.edit.cy+1, m.lineNoteOutcome())
 	case m.errText != "":
 		return extmsg.ErrorReply(m.errText)
 	default:
 		return "delivered"
 	}
+}
+
+// lineNoteOutcome is the reply's mention of a note now on screen (or shown
+// once the user leaves the diff).
+func (m Model) lineNoteOutcome() string {
+	if m.lineNote.text == "" {
+		return ""
+	}
+	return " with a note"
 }
 
 // resolveExternalChoice applies the user's answer to the confirm overlay.
@@ -252,6 +266,14 @@ func (m Model) externalChoice(pending pendingExternal) choiceOverlay {
 		choice.body = append(choice.body, overlayLine{text: target, style: overlayLineStrong})
 		if pending.base != "" {
 			choice.body = append(choice.body, overlayLine{text: "diff against " + pending.base, style: overlayLineHighlight})
+		}
+		if pending.lineNote != "" {
+			firstLine, _, more := strings.Cut(strings.TrimSpace(pending.lineNote), "\n")
+			firstLine = truncateRunes(strings.TrimSpace(firstLine), 48)
+			if more {
+				firstLine += " …"
+			}
+			choice.body = append(choice.body, overlayLine{text: "with a note: " + firstLine, style: overlayLineDim})
 		}
 		if pending.targetRepo != m.activeRepo {
 			choice.body = append(choice.body, overlayLine{

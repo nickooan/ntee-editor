@@ -331,6 +331,11 @@ ntee --msg review internal/app/app.go web/src/main.ts old/removed.go
 git diff --name-only | ntee --msg review         # paths on stdin
 ntee --msg --msg-base HEAD~3 review $(git diff --name-only HEAD~3)
 ntee --msg --msg-base a1b2c3d open internal/app/app.go#L120   # diff against a commit
+ntee --msg --msg-note "why this line matters" open internal/app/app.go#L120
+ntee --msg --msg-note - open internal/app/app.go#L120 <<'EOF'   # a longer note on stdin
+## Cache guard
+- skips the re-wrap unless the width changed
+EOF
 ntee --msg help                                  # the full guide
 ```
 
@@ -358,6 +363,14 @@ replay compares against the same revision.
   lives in another one, and notes that unsaved edits are kept as a draft. A
   newer request replaces an unanswered one. With a base revision the file
   opens in the diff view against it (`Esc` back to editing).
+- **open with a note** (`--msg-note <text>`, or `-` for stdin; needs the
+  `#L<line>` anchor) also shows the note in a box under the line — right of
+  the line numbers, as wide as the note needs up to the pane, word-wrapped,
+  with light markdown (`# heading`, `- bullet`, `` `code` ``, `**bold**`,
+  fenced blocks). The editor stays live: move the cursor and scroll as usual,
+  scroll a tall note with `Shift+↑/↓` or the mouse wheel over the box, and press `Esc` to
+  close it (it also closes on your first edit). On the wire the note follows
+  the path after a line that is exactly `---`.
 - **review** opens review mode (after the same confirmation when you are
   busy): the files on the left as a folder tree like the main sidebar, each
   badged **M** / **A** / **D** — click a folder to fold or unfold it (a folded
@@ -386,7 +399,9 @@ you its work in ntee:
 ## Showing changes in ntee
 The user edits in ntee-editor. After changing files, send them for review:
 `ntee --msg review <changed files…>` (or pipe `git diff --name-only`).
-To point at a specific place: `ntee --msg open <file>#L<line>`.
+To point at a specific place: `ntee --msg open <file>#L<line>`; to explain
+it, add a note: `ntee --msg --msg-note "<why>" open <file>#L<line>` (markdown
+is fine; `--msg-note -` reads a longer note from stdin).
 Paths are relative to the current directory. The command prints `ok …` on
 success; `error … disabled` means the user has not enabled external messages
 (Ctrl+T → external) — mention it once and carry on. Run `ntee --msg help`

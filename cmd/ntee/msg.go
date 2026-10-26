@@ -4,10 +4,12 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/nickooan/ntee-editor/internal/app"
 	"github.com/nickooan/ntee-editor/internal/extmsg"
 	"github.com/nickooan/ntee-editor/internal/store"
 )
@@ -22,6 +24,20 @@ const msgHelp = `ntee --msg — send a request to a running ntee editor
       (editing, in a special view) they are asked first; the file may switch
       the editor to the nested git repo that contains it. With --msg-base the
       file opens in the diff view against <rev> instead.
+
+  ntee --msg --msg-note "<text>" open <file>#L<line>
+  ntee --msg --msg-note - open <file>#L<line> <<'EOF'
+  <note, any number of lines>
+  EOF
+      Open the file as above and show the note in a box next to the line,
+      to explain it. The #L<line> anchor is required with a note. "-" reads
+      the note from stdin. Long lines wrap to the editor's width; line breaks
+      and indentation are kept, and light markdown is styled: "# heading",
+      "- bullet", ` + "`code`" + `, **bold**, and ` + "```" + ` fenced blocks. A tall note
+      scrolls with Shift+Up/Down or the mouse wheel; the user closes the box
+      with Esc and keeps editing; it also closes on the first edit.
+      Notes are capped at 16 KiB. On the wire the note follows the path
+      after a line that is exactly "---".
 
   ntee --msg review <file>...
   git diff --name-only | ntee --msg review
@@ -38,7 +54,8 @@ history saves it (HEAD when none was given).
 
 Paths are relative to the current directory or absolute, and must be inside
 the folder the editor opened. The editor is found by walking up from the
-current directory; --msg-root <dir> names it instead.
+current directory; --msg-root <dir> names it instead. The --msg-* flags
+go before the command: ntee --msg --msg-note "…" open <file>#L<line>.
 
 External messages are off by default: the user turns them on in ntee under
 Ctrl+T › external. The editor keeps the latest messages (10 by default) and
@@ -52,16 +69,28 @@ Reply (one line on stdout):
 
 Typical agent use, after changing files:
   ntee --msg review $(git diff --name-only HEAD)
+  ntee --msg --msg-note "this guard is why the cache stays fresh" open internal/app/render.go#L571
 `
 
 // sendMessage is the --msg client: it resolves the paths, finds the running
 // editor, sends one request, and prints the reply. It returns the exit code.
-func sendMessage(args []string, editorRoot, base string) int {
+func sendMessage(args []string, editorRoot, base, note string) int {
 	if len(args) == 0 || args[0] == "help" {
 		fmt.Print(msgHelp)
 		return 0
 	}
 	command, paths := strings.ToLower(args[0]), args[1:]
+	if note == "-" {
+		var err error
+		if note, err = readNoteFromStdin(os.Stdin); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+	}
+	if err := checkLineNote(command, paths, note); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
 	if command == extmsg.CommandReview && len(paths) == 0 {
 		var err error
 		if paths, err = readPathsFromStdin(); err != nil {
@@ -84,7 +113,7 @@ func sendMessage(args []string, editorRoot, base string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	reply, err := extmsg.Send(socketPath, buildRequest(command, base, paths))
+	reply, err := extmsg.Send(socketPath, buildRequest(command, base, paths, note))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "cannot reach the editor:", err)
 		return 1
@@ -97,13 +126,58 @@ func sendMessage(args []string, editorRoot, base string) int {
 }
 
 // buildRequest is the wire text: the command and optional base revision on
-// the first line, then one path per line.
-func buildRequest(command, base string, paths []string) string {
+// the first line, then one path per line, then the optional note after the
+// separator line.
+func buildRequest(command, base string, paths []string, note string) string {
 	header := command
 	if base != "" {
 		header += " " + base
 	}
-	return header + "\n" + strings.Join(paths, "\n") + "\n"
+	request := header + "\n" + strings.Join(paths, "\n") + "\n"
+	if note != "" {
+		request += extmsg.LineNoteSeparator + "\n" + note + "\n"
+	}
+	return request
+}
+
+// checkLineNote refuses a note the editor would refuse, before the request
+// is sent: only an open takes one, and only with a line to sit next to.
+func checkLineNote(command string, paths []string, note string) error {
+	if strings.TrimSpace(note) == "" {
+		return nil
+	}
+	if command != extmsg.CommandOpen {
+		return errors.New("--msg-note goes with open <file>#L<n>")
+	}
+	for _, path := range paths {
+		if _, line := app.SplitLineAnchor(path); line == 0 {
+			return fmt.Errorf("a note needs a line: %s#L<n>", path)
+		}
+	}
+	return nil
+}
+
+// readNoteFromStdin is the --msg-note - text, read whole and kept verbatim;
+// an interactive terminal gets the usage instead of a silent wait.
+func readNoteFromStdin(stdin *os.File) (string, error) {
+	info, err := stdin.Stat()
+	if err != nil {
+		return "", err
+	}
+	if info.Mode()&os.ModeCharDevice != 0 {
+		return "", errors.New("usage: ntee --msg --msg-note - open <file>#L<n> <<'EOF' … EOF (pipe the note on stdin)")
+	}
+	text, err := io.ReadAll(io.LimitReader(stdin, extmsg.MaxLineNoteBytes+1))
+	if err != nil {
+		return "", err
+	}
+	if len(text) > extmsg.MaxLineNoteBytes {
+		return "", fmt.Errorf("note is too long (max %d KiB)", extmsg.MaxLineNoteBytes>>10)
+	}
+	if strings.TrimSpace(string(text)) == "" {
+		return "", errors.New("--msg-note -: no note on stdin")
+	}
+	return string(text), nil
 }
 
 // findEditorSocket is the socket of editorRoot when given, else of the

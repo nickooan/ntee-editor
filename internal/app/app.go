@@ -411,6 +411,9 @@ type Model struct {
 	sigAnchor       int
 	sigLastAccepted *lsp.CompletionItem
 
+	// An external open's note, boxed next to the line it explains.
+	lineNote lineNoteOverlay
+
 	// Repo-wide content search overlay (Ctrl+G). All heavy work is async: the
 	// snapshot loads via grepLoadedMsg (guarded by grepGen), searches are
 	// debounced via grepTickMsg and land via grepResultsMsg (guarded by
@@ -1592,6 +1595,9 @@ func (m Model) showOpenedFile(rel string, f filetree.OpenViewFile) Model {
 		}
 	}
 	m = m.sigUnpin() // the pin belongs to the buffer being left
+	if rel != m.lineNote.rel {
+		m = m.dismissLineNote()
+	}
 	m.openFile = &f
 	m.openRel = rel
 	m.fileScrollX, m.fileScrollY = 0, 0

@@ -167,13 +167,7 @@ func (m Model) overlayConflictPopup(rows []string, blockIdx, start, gutterWidth,
 	}
 	anchor := gutterWidth + 3 + anchorCol
 
-	orig := rows[rowIdx]
-	left := ansi.Truncate(orig, anchor, "")
-	if pad := anchor - ansi.StringWidth(left); pad > 0 {
-		left += baseStyle.Render(strings.Repeat(" ", pad))
-	}
-	right := ansi.TruncateLeft(orig, anchor+w, "")
-	rows[rowIdx] = left + box + right
+	rows[rowIdx] = spliceOverlay(rows[rowIdx], anchor, w, box)
 	return rows
 }
 

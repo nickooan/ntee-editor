@@ -6,7 +6,7 @@ The external-message channel: each running editor listens on a unix socket for i
 
 **Architecture**
 
-A request is plain text: the first non-blank line is the command and its arguments, every following non-blank line one path (`open` takes exactly one, optionally with a `#L<n>` anchor; `review` takes 1–500). Either command may name one base revision after it on the first line (`open a1b2c3d`, `review v1.2.0`): a commit, tag, branch or `HEAD~2`, always compared with the current files on disk, uncommitted changes included. No revision means `HEAD`. The sender writes it and half-closes the connection; the server reads to EOF and answers one line, `ok <detail>` or `error <reason>`.
+A request is plain text: the first non-blank line is the command and its arguments, every following non-blank line one path (`open` takes exactly one, optionally with a `#L<n>` anchor; `review` takes 1–500). Either command may name one base revision after it on the first line (`open a1b2c3d`, `review v1.2.0`): a commit, tag, branch or `HEAD~2`, always compared with the current files on disk, uncommitted changes included. No revision means `HEAD`. An `open` may end with a note: after the path, a line that is exactly `---` ends the paths, and everything after it is free-form text the editor shows in a box next to the anchored line (blank lines and indentation kept, blank lines at either end dropped, at most `MaxLineNoteBytes`, 16 KiB). A note needs a `#L<n>` anchor — the app's receiver refuses one without, since anchors are parsed there — and `review` refuses a note. The sender writes it and half-closes the connection; the server reads to EOF and answers one line, `ok <detail>` or `error <reason>`.
 
 The socket is `~/.ntee-editor/external/<project hash>/ntee.sock` (`store.ExternalSocketPath`, the same hash as the project's store). Trust is the file system's: the directory is 0700 and the socket 0600, so only the user's own processes can connect, and the app jails every named path to the opened folder. Messages are off by default (a global switch in Ctrl+T › external); the socket listens either way so a sender gets "disabled" instead of a dead socket.
 
@@ -46,7 +46,7 @@ Consequences worth knowing:
 
 ### extmsg.go
 
-- `Parse` — reads a request into `Message{Command, Args, Paths}`, normalizing CRLF, dropping blank lines, and lower-casing the command. It enforces each command's shape (open: one path; review: 1–`MaxReviewPaths` paths; both: at most one base revision, never one starting with `-`, which would reach git's argv as an option — `checkBaseArgument`). Its errors go back to the sender verbatim, so they say what to fix.
+- `Parse` — reads a request into `Message{Command, Args, Paths, LineNote}`, normalizing CRLF, dropping blank lines, and lower-casing the command. At the first `LineNoteSeparator` line after the command it stops reading paths and keeps the rest verbatim as the note (`trimBlankLines` drops blank lines at either end and trailing spaces). It enforces each command's shape (open: one path and a note of at most `MaxLineNoteBytes`; review: 1–`MaxReviewPaths` paths and no note; both: at most one base revision, never one starting with `-`, which would reach git's argv as an option — `checkBaseArgument`). Its errors go back to the sender verbatim, so they say what to fix.
 
 *Plus: `Message.Base` (the base revision, "" for HEAD), `OkReply`, `ErrorReply`, `IsErrorReply`, `oneLine` — the reply format.*
 

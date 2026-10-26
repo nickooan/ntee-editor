@@ -88,6 +88,11 @@ func (r *ExternalReceiver) Handle(text string) string {
 		}
 		paths[i] = rel
 	}
+	if message.LineNote != "" {
+		if _, line := splitLineAnchor(paths[0]); line == 0 {
+			return extmsg.ErrorReply("a note needs a line: " + message.Paths[0] + "#L<n>")
+		}
+	}
 
 	now := time.Now()
 	raw := text
@@ -101,6 +106,7 @@ func (r *ExternalReceiver) Handle(text string) string {
 		Base:       cmp.Or(message.Base(), store.ExternalDefaultBase),
 		Paths:      paths,
 		Raw:        raw,
+		LineNote:   message.LineNote,
 		ReceivedAt: now,
 		Status:     store.ExternalPending,
 	}

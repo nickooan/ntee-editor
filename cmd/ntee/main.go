@@ -6,7 +6,7 @@
 // a file opens in edit mode with its folder as the project, and a file that
 // doesn't exist yet opens empty and is created on the first save)
 //
-//	ntee --msg <open|review|help> [paths…]   send a request to a running editor
+//	ntee --msg [--msg-note <text|->] <open|review|help> [paths…]   send a request to a running editor
 package main
 
 import (
@@ -35,16 +35,17 @@ func main() {
 	assumeYes := flag.Bool("yes", false, "skip the confirmation prompt for --prepare-lsp")
 	disableLSP := flag.Bool("disable-lsp", false, "disable LSP for the named languages (or 'all'); writes the user config")
 	enableLSP := flag.Bool("enable-lsp", false, "re-enable LSP for the named languages (or 'all'); writes the user config")
-	sendMsg := flag.Bool("msg", false, "send a request to the running editor of this directory: --msg open <file>#L<n> · --msg review <files…> (or paths on stdin) · --msg help")
+	sendMsg := flag.Bool("msg", false, "send a request to the running editor of this directory: --msg open <file>#L<n> · --msg --msg-note <text> open <file>#L<n> · --msg review <files…> (or paths on stdin) · --msg help")
 	msgRoot := flag.String("msg-root", "", "with --msg: the editor's opened folder (default: the nearest running one above the current directory)")
 	msgBase := flag.String("msg-base", "", "with --msg open/review: the revision to compare the current files against (default HEAD)")
+	msgNote := flag.String("msg-note", "", "with --msg open: a note shown in a box next to the line, light markdown (needs <file>#L<n>); '-' reads it from stdin")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println("ntee-editor " + app.Version)
 		return
 	}
 	if *sendMsg {
-		os.Exit(sendMessage(flag.Args(), *msgRoot, *msgBase))
+		os.Exit(sendMessage(flag.Args(), *msgRoot, *msgBase, *msgNote))
 	}
 	if *disableLSP || *enableLSP {
 		if *disableLSP && *enableLSP {

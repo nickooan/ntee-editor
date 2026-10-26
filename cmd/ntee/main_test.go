@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/nickooan/ntee-editor/internal/app"
+	"github.com/nickooan/ntee-editor/internal/extmsg"
 	"github.com/nickooan/ntee-editor/internal/store"
 )
 
@@ -85,8 +86,58 @@ func TestBuildRequestCarriesTheBaseOnTheFirstLine(t *testing.T) {
 		{"review", "HEAD~2", []string{"/p/a.go", "/p/b.go"}, "review HEAD~2\n/p/a.go\n/p/b.go\n"},
 	}
 	for _, c := range cases {
-		if got := buildRequest(c.command, c.base, c.paths); got != c.want {
+		if got := buildRequest(c.command, c.base, c.paths, ""); got != c.want {
 			t.Errorf("buildRequest(%q, %q) = %q, want %q", c.command, c.base, got, c.want)
 		}
+	}
+}
+
+func TestBuildRequestPutsTheNoteAfterTheSeparator(t *testing.T) {
+	got := buildRequest("open", "v1", []string{"/p/a.go#L3"}, "# Why\n\n  - kept")
+	if want := "open v1\n/p/a.go#L3\n---\n# Why\n\n  - kept\n"; got != want {
+		t.Fatalf("buildRequest = %q, want %q", got, want)
+	}
+	message, err := extmsg.Parse(got)
+	if err != nil || message.LineNote != "# Why\n\n  - kept" || message.Paths[0] != "/p/a.go#L3" {
+		t.Fatalf("the editor reads it back as %+v, %v", message, err)
+	}
+}
+
+func TestCheckLineNote(t *testing.T) {
+	cases := []struct {
+		command string
+		paths   []string
+		note    string
+		wantErr string
+	}{
+		{"open", []string{"/p/a.go"}, "", ""},
+		{"open", []string{"/p/a.go#L3"}, "why", ""},
+		{"open", []string{"/p/a.go#L3-L9"}, "why", ""},
+		{"open", []string{"/p/a.go"}, "why", "a note needs a line"},
+		{"open", []string{"/p/a.go#L"}, "why", "a note needs a line"},
+		{"review", []string{"/p/a.go#L3"}, "why", "goes with open"},
+	}
+	for _, c := range cases {
+		err := checkLineNote(c.command, c.paths, c.note)
+		if (c.wantErr == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), c.wantErr)) {
+			t.Errorf("checkLineNote(%q, %v, %q) = %v, want %q", c.command, c.paths, c.note, err, c.wantErr)
+		}
+	}
+}
+
+func TestReadNoteFromStdinKeepsTheText(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	note := "# Why\n\n  indented line\n"
+	go func() {
+		writer.WriteString(note)
+		writer.Close()
+	}()
+	got, err := readNoteFromStdin(reader)
+	if err != nil || got != note {
+		t.Fatalf("readNoteFromStdin = %q, %v; want %q", got, err, note)
 	}
 }

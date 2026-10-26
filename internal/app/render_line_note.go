@@ -30,10 +30,12 @@ func (m Model) overlayLineNote(rows []string, start, gutterWidth, contentWidth, 
 		return rows
 	}
 	title := fmt.Sprintf(" note · L%d ", m.lineNote.line+1)
+	closeHints := [2]string{"esc close", "esc"}
 	if note := m.lineNote; note.session != "" {
-		title = fmt.Sprintf(" %s · step %d · L%d ", note.session, note.step, note.line+1)
+		title = fmt.Sprintf(" %s · step %d/%d · L%d ", note.session, m.session.current+1, len(m.session.steps), note.line+1)
+		closeHints = m.sessionBoxHints()
 	}
-	boxRows := renderLineNoteBox(box, title, m.lineNote.session != "")
+	boxRows := renderLineNoteBox(box, title, m.lineNote.session != "", closeHints)
 	for i, boxRow := range boxRows {
 		rowIndex := box.top + i
 		if rowIndex < 0 || rowIndex >= len(rows) {
@@ -47,7 +49,7 @@ func (m Model) overlayLineNote(rows []string, start, gutterWidth, contentWidth, 
 // renderLineNoteBox draws the bordered box, every row exactly box.width
 // cells: the title on the top border, the scroll state and key hints on the
 // bottom one. A session step's title stands out in orange.
-func renderLineNoteBox(box lineNoteBox, title string, session bool) []string {
+func renderLineNoteBox(box lineNoteBox, title string, session bool, closeHints [2]string) []string {
 	horizontal := box.width - 2
 	title = ansi.Truncate(title, max(0, horizontal-1), "")
 	titleStyle := lineNoteTitleStyle
@@ -59,7 +61,7 @@ func renderLineNoteBox(box lineNoteBox, title string, session bool) []string {
 
 	// The longest hint that fits the border wins.
 	hint := ""
-	for _, candidate := range lineNoteHints(box, session) {
+	for _, candidate := range lineNoteHints(box, closeHints) {
 		if ansi.StringWidth(candidate) <= horizontal-2 {
 			hint = candidate
 			break
@@ -78,14 +80,24 @@ func renderLineNoteBox(box lineNoteBox, title string, session bool) []string {
 	return append(out, bottom)
 }
 
+// sessionBoxHints are a session step's keys, long and short: Enter next (or
+// finish on the last step of a complete session), Backspace back after the
+// first step, Esc end.
+func (m Model) sessionBoxHints() [2]string {
+	next := "enter next"
+	if m.session.current == len(m.session.steps)-1 && m.session.complete {
+		next = "enter finish"
+	}
+	if m.session.current == 0 {
+		return [2]string{next + " · esc end session", next + " · esc end"}
+	}
+	return [2]string{next + " · ⌫ back · esc end", "enter · ⌫ · esc"}
+}
+
 // lineNoteHints are the bottom-border hints, longest first: the rows
 // scrolled past and still below, the scroll keys, and the keys that close
-// the box — Esc, or for a session step Enter (next) and Esc (end).
-func lineNoteHints(box lineNoteBox, session bool) []string {
-	closeHints := []string{"esc close", "esc"}
-	if session {
-		closeHints = []string{"enter next · esc end session", "enter next · esc end"}
-	}
+// the box (closeHints, long and short).
+func lineNoteHints(box lineNoteBox, closeHints [2]string) []string {
 	if len(box.lines) <= box.bodyRows {
 		return []string{" " + closeHints[0] + " ", " " + closeHints[1] + " "}
 	}

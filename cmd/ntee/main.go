@@ -40,8 +40,8 @@ func main() {
 	msgRoot := flag.String("msg-root", "", "with --msg: the editor's opened folder (default: the nearest running one above the current directory)")
 	msgBase := flag.String("msg-base", "", "with --msg open/review: the revision to compare the current files against (default HEAD)")
 	msgNote := flag.String("msg-note", "", "with --msg open: a note shown in a box next to the line, light markdown (needs <file>#L<n>); '-' reads it from stdin")
-	msgSession := flag.String("msg-session", "", "with --msg: run the request as a step of a guided session <id> — the user confirms once, Enter shows the next step, Esc ends it (also: --msg --msg-session <id> wait|end)")
-	msgWait := flag.Duration("msg-wait", 10*time.Minute, "with --msg-session: how long a step waits for the user's Enter/Esc before printing \"ok waiting\" (exit 4)")
+	msgSession := flag.String("msg-session", "", "with --msg open: queue the request as a step of guided session <id> — the user confirms once, then walks the steps with Enter/Backspace, Esc ends it (also: --msg --msg-session <id> end|wait)")
+	msgWait := flag.Duration("msg-wait", 10*time.Minute, "with --msg --msg-session <id> wait: how long to wait for the session to end before printing \"ok waiting\" (exit 4)")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println("ntee-editor " + app.Version)

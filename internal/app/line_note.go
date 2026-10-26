@@ -21,10 +21,9 @@ type lineNoteOverlay struct {
 	scroll       int // first note row shown when the box is capped
 	layout       *lineNoteLayoutCache
 	// session is the guided session this note is a step of ("" = a plain
-	// note); step numbers it. A step is read-only, so edits never hide it,
-	// and it outlives switching to another file.
+	// note). A step is read-only, so edits never hide it, and it outlives
+	// switching to another file.
 	session string
-	step    int
 }
 
 // lineNoteLayoutCache memoizes the wrapped, styled note for one inner width;

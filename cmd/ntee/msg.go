@@ -68,35 +68,42 @@ const msgHelp = `ntee --msg — send a request to a running ntee editor
 Guided sessions — walk the user through code, one note at a time:
 
   ntee --msg --msg-session <id> --msg-note "<text>" open <file>#L<line>
-  ntee --msg --msg-session <id> wait
   ntee --msg --msg-session <id> end
+  ntee --msg --msg-session <id> wait
       Every step is an open with a note, sent with the same session id
       (1–64 letters, digits, '.', '_', '-'; pick a new one per walkthrough).
-      The first step asks the user to start the session; after that each
-      step jumps straight there — other files, other nested repos — without
-      asking. On each step the user presses Enter for the next step or Esc to
-      end the session, and the file is read-only while the step shows.
-      The command waits for that answer (up to --msg-wait, default 10m):
-        ok next       exit 0  the user wants the next step: send it
-        ended …       exit 3  the user ended or declined the session, or it
-                              was already over: stop sending steps
-        ok waiting …  exit 4  no answer yet: run the wait command, which
-                              returns the answer once the user gives it
-        error …       exit 1  the step could not be shown (bad path, another
-                              session running, …)
-      After the last step, send end to close the session.
+      Send the steps one after another without waiting: each returns at once
+      and the editor queues them in order. The first step asks the user to
+      start the session; from then on they walk the queue at their own pace —
+      Enter shows the next step instantly, Backspace goes back, Esc ends the
+      session — and each step jumps straight to its file, other files and
+      nested repos included, without asking. The file is read-only while a
+      step shows. Past the last queued step the box waits for the agent's
+      next one, which then shows as soon as it arrives.
+      After the last step, send end: it marks the session complete, so
+      Enter on the last step finishes it.
+      What each command prints:
+        open  ok step N queued   exit 0  keep sending steps
+              ended …            exit 3  the user ended or declined the
+                                         session, or it is over: stop
+              error …            exit 1  bad path, another session running, …
+        end   ok session … complete — it ends after step N
+        wait  blocks until the session is over (up to --msg-wait, default 10m):
+              ok finished …      exit 0  the user went through every step
+              ended …            exit 3  the user closed or declined it
+              ok waiting …       exit 4  not over yet: run wait again
 
   A walkthrough an agent might run:
     ntee --msg --msg-session tour1 --msg-note - open cmd/ntee/main.go#L40 <<'EOF'
     ## Flags
     Everything starts here.
     EOF
-    # exit 0 → next step; exit 3 → stop
     ntee --msg --msg-session tour1 --msg-note "the request goes out here" open cmd/ntee/msg.go#L180
     ntee --msg --msg-session tour1 end
+    ntee --msg --msg-session tour1 wait   # optional: until the user is done
 
   On the wire the session is a first-line option: "open --session=<id>",
-  "wait --session=<id>", "end --session=<id>".
+  "end --session=<id>", "wait --session=<id>".
 
 A base revision (a commit hash, tag, branch, HEAD~2, …) is always compared
 with the current files on disk, uncommitted changes included. It travels on
@@ -124,8 +131,9 @@ can replay them from there.
 
 Reply (one line on stdout):
   ok <detail>       accepted — "opened …", "reviewing N files", or
-                    "waiting for the user to confirm"; for a session step
-                    "next" (exit 0) or "waiting …" (exit 4)
+                    "waiting for the user to confirm"; for a session
+                    "step N queued", "finished …", or from wait
+                    "waiting …" (exit 4)
   ended <reason>    a session is over — stop sending steps; the exit code
                     is 3
   error <reason>    refused (disabled, path outside the project, …); the
@@ -145,9 +153,9 @@ AGENTS.md:
   it, add a note: ` + "`ntee --msg --msg-note \"<why>\" open <file>#L<line>`" + ` (markdown
   is fine; ` + "`--msg-note -`" + ` reads a longer note from stdin).
   To walk the user through several places, send each as a step of one
-  session: ` + "`ntee --msg --msg-session <id> --msg-note \"<why>\" open <file>#L<line>`" + `;
-  exit 0 means show the next step, exit 3 means the user ended it — stop;
-  finish with ` + "`ntee --msg --msg-session <id> end`" + `.
+  session, one after another: ` + "`ntee --msg --msg-session <id> --msg-note \"<why>\" open <file>#L<line>`" + `
+  (each returns at once; exit 3 means the user ended it — stop sending), then
+  ` + "`ntee --msg --msg-session <id> end`" + `.
   Paths are relative to the current directory. The command prints ` + "`ok …`" + ` on
   success; ` + "`error … disabled`" + ` means the user has not enabled external messages
   (Ctrl+T → external) — mention it once and carry on. Run ` + "`ntee --msg help`" + `
@@ -215,7 +223,11 @@ func sendMessage(args []string, options msgOptions) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	output, code := deliverRequest(socketPath, buildRequest(command, options.base, options.session, paths, note), options.session, options.wait)
+	timeout := 10 * time.Second
+	if command == extmsg.CommandWait {
+		timeout = options.wait
+	}
+	output, code := deliverRequest(socketPath, buildRequest(command, options.base, options.session, paths, note), options.session, timeout)
 	if code == 1 && !extmsg.IsErrorReply(output) {
 		fmt.Fprintln(os.Stderr, output)
 		return code
@@ -225,13 +237,10 @@ func sendMessage(args []string, options msgOptions) int {
 }
 
 // deliverRequest sends a request and turns the reply into the printed line
-// and the exit code. A session request waits for the user up to wait; when
-// that runs out first, the agent is told how to keep waiting.
-func deliverRequest(socketPath, request, session string, wait time.Duration) (string, int) {
-	timeout := 10 * time.Second
-	if session != "" {
-		timeout = wait
-	}
+// and the exit code. A session's wait blocks until the session is over, up
+// to timeout; when that runs out first, the agent is told how to keep
+// waiting.
+func deliverRequest(socketPath, request, session string, timeout time.Duration) (string, int) {
 	reply, err := extmsg.SendWithTimeout(socketPath, request, timeout)
 	switch {
 	case err != nil && session != "" && os.IsTimeout(err):

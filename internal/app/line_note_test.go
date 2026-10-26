@@ -244,14 +244,14 @@ func TestShiftArrowsScrollATallNote(t *testing.T) {
 
 func TestLineNoteHintsFitTheBorder(t *testing.T) {
 	box := lineNoteBox{lines: make([]string, 20), bodyRows: 5, scroll: 3}
-	if hints := lineNoteHints(box, false); hints[0] != " ↑ 3 · ↓ 12 more · shift+↑↓/wheel · esc close " {
+	if hints := lineNoteHints(box, [2]string{"esc close", "esc"}); hints[0] != " ↑ 3 · ↓ 12 more · shift+↑↓/wheel · esc close " {
 		t.Fatalf("full hint = %q", hints[0])
 	}
 	box.scroll = 15
-	if hints := lineNoteHints(box, false); !strings.HasPrefix(hints[0], " ↑ 15 · shift") {
+	if hints := lineNoteHints(box, [2]string{"esc close", "esc"}); !strings.HasPrefix(hints[0], " ↑ 15 · shift") {
 		t.Fatalf("at the bottom = %q", hints[0])
 	}
-	if hints := lineNoteHints(lineNoteBox{lines: make([]string, 3), bodyRows: 3}, false); hints[0] != " esc close " {
+	if hints := lineNoteHints(lineNoteBox{lines: make([]string, 3), bodyRows: 3}, [2]string{"esc close", "esc"}); hints[0] != " esc close " {
 		t.Fatalf("a note that fits = %q", hints[0])
 	}
 }

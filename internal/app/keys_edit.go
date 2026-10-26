@@ -37,8 +37,8 @@ func (m Model) handleEditKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	isText := t != "" && k != "space"
 
 	if m.sessionStepVisible() {
-		if next, handled := m.handleSessionStepKey(k); handled {
-			return next, nil
+		if next, cmd, handled := m.handleSessionStepKey(k); handled {
+			return next, cmd
 		}
 	}
 

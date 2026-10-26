@@ -37,9 +37,8 @@ type pendingExternal struct {
 	base        string // the revision to compare with, "" = HEAD (diffBaseOf)
 	lineNote    string // open: the sender's note for the line, "" = none
 	// session is the guided session this open is a step of ("" = none; a
-	// replay is never one). sessionReply waits for the user's answer.
-	session      string
-	sessionReply chan<- string
+	// replay is never one).
+	session string
 }
 
 // WithExternal attaches the external-message stores and the socket's status
@@ -91,7 +90,7 @@ func (m Model) handleExternalMessage(msg externalMessageMsg) (tea.Model, tea.Cmd
 }
 
 // supersedePendingExternal drops an unanswered request for a newer one: its
-// record notes why, and a session waiting to start hears it never will.
+// record notes why, and a session waiting to start ends.
 func (m Model) supersedePendingExternal() (Model, []tea.Cmd) {
 	previous := m.external.pending
 	if previous == nil {
@@ -101,7 +100,9 @@ func (m Model) supersedePendingExternal() (Model, []tea.Cmd) {
 	if m.choice.kind == choiceExternalRequest {
 		m.choice = choiceOverlay{}
 	}
-	sendExternalReply(previous.sessionReply, extmsg.EndedReply("session "+previous.session+" was superseded by another request before it started — stop sending steps"))
+	if previous.session != "" && m.session.id == previous.session && !m.session.started {
+		m = m.endSession("was superseded by another request before it started", false)
+	}
 	return m, []tea.Cmd{m.saveExternalStatusCmd(*previous, store.ExternalSuperseded, "a newer request arrived")}
 }
 

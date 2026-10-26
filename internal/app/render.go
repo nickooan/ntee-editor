@@ -249,7 +249,7 @@ func (m Model) renderEditStatus() string {
 	pos := fmt.Sprintf("Ln %d, Col %d", m.edit.cy+1, m.edit.cx+1)
 	line := promptStyle.Render("@edit") + statusTextStyle.Render(" "+name+"   ") + state
 	if m.session.id != "" {
-		line += statusTextStyle.Render("   ") + sessionBadgeStyle.Render("● session "+m.session.id+" · step "+strconv.Itoa(m.session.step))
+		line += statusTextStyle.Render("   ") + sessionBadgeStyle.Render(m.sessionBadge())
 	}
 	// Transient feedback sits right after the saved/editing indicator — near the
 	// front so the terminal never truncates it, and where the user expects the

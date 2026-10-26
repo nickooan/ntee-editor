@@ -393,21 +393,25 @@ replay compares against the same revision.
   and repo you were on.
 
 - **guided session** (`--msg-session <id>` on each step) walks you through
-  code one note at a time. The first step asks **Start session / Decline**;
-  after that every step jumps straight to its file — other files, other
-  nested repos — without asking. On each step's box, `Enter` asks the agent
-  for the next step and `Esc` ends the session; while a step shows, the file
-  is read-only (move, scroll and `Shift+↑/↓` the note still work). The status
-  bar shows `● session <id> · step N` while one runs. The agent's command
-  waits for your answer: it prints `ok next` (exit 0), `ended …` (exit 3 —
-  stop), or after `--msg-wait` (default 10m) `ok waiting …` (exit 4), when
-  `ntee --msg --msg-session <id> wait` picks the answer up later. The agent
-  closes a finished walkthrough with `ntee --msg --msg-session <id> end`.
+  code one note at a time. The agent sends all its steps up front — each
+  command returns at once (`ok step N queued`) and the editor queues them.
+  The first step asks **Start session / Decline**; then you walk the queue at
+  your own pace: `Enter` shows the next step instantly, `Backspace` goes
+  back, `Esc` ends the session. Every step jumps straight to its file — other
+  files, other nested repos — without asking; the box is titled
+  `<id> · step 2/5`, and the file is read-only while it shows (move, scroll
+  and `Shift+↑/↓` the note still work). Past the last queued step the box
+  waits for the agent's next one. The agent sends `end` after its last step,
+  and `Enter` on that step then finishes the tour. Once you end a session,
+  the agent's next step gets `ended …` (exit 3) and it stops;
+  `ntee --msg --msg-session <id> wait` blocks until you finish (`ok finished`,
+  exit 0) or close it (`ended …`, exit 3).
 
   ```sh
   ntee --msg --msg-session tour1 --msg-note "flags start here" open cmd/ntee/main.go#L40
   ntee --msg --msg-session tour1 --msg-note "the request goes out" open cmd/ntee/msg.go#L180
   ntee --msg --msg-session tour1 end
+  ntee --msg --msg-session tour1 wait   # optional: until you're done
   ```
 
 | Review key | Action |
@@ -432,9 +436,9 @@ The user edits in ntee-editor. After changing files, send them for review:
 To point at a specific place: `ntee --msg open <file>#L<line>`; to explain
 it, add a note: `ntee --msg --msg-note "<why>" open <file>#L<line>` (markdown
 is fine; `--msg-note -` reads a longer note from stdin).
-To walk the user through several places, send each as a step of one session:
-`ntee --msg --msg-session <id> --msg-note "<why>" open <file>#L<line>`; exit 0
-means show the next step, exit 3 means the user ended it — stop; finish with
+To walk the user through several places, send each as a step of one session,
+one after another: `ntee --msg --msg-session <id> --msg-note "<why>" open <file>#L<line>`
+(each returns at once; exit 3 means the user ended it — stop sending), then
 `ntee --msg --msg-session <id> end`.
 Paths are relative to the current directory. The command prints `ok …` on
 success; `error … disabled` means the user has not enabled external messages

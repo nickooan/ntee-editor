@@ -189,9 +189,11 @@ func TestDeliverRequestExitCodes(t *testing.T) {
 		switch {
 		case strings.HasPrefix(text, "slow"):
 			time.Sleep(time.Second)
-			return "ok next"
+			return "ok finished"
 		case strings.HasPrefix(text, "next"):
-			return "ok next"
+			return "ok step 2 queued"
+		case strings.HasPrefix(text, "finished"):
+			return "ok finished — session walk1 was finished — the user went through all 3 steps"
 		case strings.HasPrefix(text, "ended"):
 			return "ended session walk1 was closed by the user — stop sending steps"
 		case strings.HasPrefix(text, "waiting"):
@@ -210,7 +212,8 @@ func TestDeliverRequestExitCodes(t *testing.T) {
 		wantCode int
 		wantText string
 	}{
-		{"next\n", "walk1", 0, "ok next"},
+		{"next\n", "walk1", 0, "ok step 2 queued"},
+		{"finished\n", "walk1", 0, "ok finished"},
 		{"ended\n", "walk1", exitSessionEnded, "ended session walk1"},
 		{"waiting\n", "walk1", exitSessionWaiting, "ok waiting"},
 		{"bad\n", "", 1, "error nope"},

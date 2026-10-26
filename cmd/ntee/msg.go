@@ -31,13 +31,25 @@ const msgHelp = `ntee --msg — send a request to a running ntee editor
   EOF
       Open the file as above and show the note in a box next to the line,
       to explain it. The #L<line> anchor is required with a note. "-" reads
-      the note from stdin. Long lines wrap to the editor's width; line breaks
-      and indentation are kept, and light markdown is styled: "# heading",
-      "- bullet", ` + "`code`" + `, **bold**, and ` + "```" + ` fenced blocks. A tall note
-      scrolls with Shift+Up/Down or the mouse wheel; the user closes the box
-      with Esc and keeps editing; it also closes on the first edit.
-      Notes are capped at 16 KiB. On the wire the note follows the path
-      after a line that is exactly "---".
+      the note from stdin. A tall note scrolls with Shift+Up/Down or the
+      mouse wheel; the user closes the box with Esc and keeps editing; it
+      also closes on the first edit. Notes are capped at 16 KiB. On the wire
+      the note follows the path after a line that is exactly "---".
+
+      Note formatting (light markdown):
+        # Heading            any level (#–######), shown bold
+        - item / * / +       bullet "•", wrapped lines hang under the text
+        1. item / 1) item    numbered item, same hanging indent
+        > text               quote, dimmed italic
+        ` + "`code`" + `               inline code, highlighted
+        **bold**             bold
+        ` + "```" + ` … ` + "```" + `            fenced block on its own lines: shown as is on
+                             a dark background, cut (not word-wrapped) at the
+                             box edge
+        blank line           paragraph break
+      Line breaks and leading indentation are kept (a tab is 4 spaces), and
+      long lines word-wrap to the box. Anything else — links, tables,
+      _italics_, HTML — shows as plain text, markers included.
 
   ntee --msg review <file>...
   git diff --name-only | ntee --msg review
@@ -54,8 +66,17 @@ history saves it (HEAD when none was given).
 
 Paths are relative to the current directory or absolute, and must be inside
 the folder the editor opened. The editor is found by walking up from the
-current directory; --msg-root <dir> names it instead. The --msg-* flags
-go before the command: ntee --msg --msg-note "…" open <file>#L<line>.
+current directory, then from the first path's folder, so an absolute path
+works from anywhere; --msg-root <dir> names it instead.
+
+When the editor opened a folder holding several git repos and works in one
+of them (Ctrl+W), an open of a file in another nested repo switches the
+editor to that repo (a file in none of them switches back to the whole
+folder); the user confirms first when busy:
+  ntee --msg open /work/ws/libs/core/lib.go#L12   # editor in /work/ws/apps/web
+
+The --msg-* flags go before the command:
+  ntee --msg --msg-note "…" open <file>#L<line>
 
 External messages are off by default: the user turns them on in ntee under
 Ctrl+T › external. The editor keeps the latest messages (10 by default) and
@@ -70,6 +91,20 @@ Reply (one line on stdout):
 Typical agent use, after changing files:
   ntee --msg review $(git diff --name-only HEAD)
   ntee --msg --msg-note "this guard is why the cache stays fresh" open internal/app/render.go#L571
+
+Teach a coding agent once — paste this rule into the project's CLAUDE.md or
+AGENTS.md:
+
+  ## Showing changes in ntee
+  The user edits in ntee-editor. After changing files, send them for review:
+  ` + "`ntee --msg review <changed files…>`" + ` (or pipe ` + "`git diff --name-only`" + `).
+  To point at a specific place: ` + "`ntee --msg open <file>#L<line>`" + `; to explain
+  it, add a note: ` + "`ntee --msg --msg-note \"<why>\" open <file>#L<line>`" + ` (markdown
+  is fine; ` + "`--msg-note -`" + ` reads a longer note from stdin).
+  Paths are relative to the current directory. The command prints ` + "`ok …`" + ` on
+  success; ` + "`error … disabled`" + ` means the user has not enabled external messages
+  (Ctrl+T → external) — mention it once and carry on. Run ` + "`ntee --msg help`" + `
+  for details.
 `
 
 // sendMessage is the --msg client: it resolves the paths, finds the running

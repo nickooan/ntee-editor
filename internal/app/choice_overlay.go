@@ -14,9 +14,10 @@ import (
 type choiceOverlayKind uint8
 
 const (
-	choiceNone            choiceOverlayKind = iota
-	choiceRemovePath                        // :rm confirmation — payload in confirmRm/confirmRmDir
-	choiceExternalRequest                   // an external open/review request — payload in external.pending
+	choiceNone              choiceOverlayKind = iota
+	choiceRemovePath                          // :rm confirmation — payload in confirmRm/confirmRmDir
+	choiceExternalRequest                     // an external open/review request — payload in external.pending
+	choiceQuitReviewSession                   // leaving a live review session — the agent is told to stop
 )
 
 // overlayLineStyle is how one body line of a choice overlay is drawn.
@@ -152,6 +153,10 @@ func (m Model) handleChoiceKey(key string) (tea.Model, tea.Cmd) {
 		m.notice = "rm cancelled"
 	case choiceExternalRequest:
 		return m.resolveExternalChoice(chosen == 0)
+	case choiceQuitReviewSession:
+		if chosen == 0 {
+			return m.quitReviewSession()
+		}
 	}
 	return m, nil
 }

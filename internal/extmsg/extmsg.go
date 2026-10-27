@@ -12,13 +12,15 @@ import (
 )
 
 // Message is one parsed request: the command line, then one path per line,
-// then for an open an optional note after a LineNoteSeparator line.
+// then for an open (or a review session's review) an optional note after a
+// LineNoteSeparator line.
 type Message struct {
-	Command  string   // CommandOpen, CommandReview, CommandEnd or CommandWait
-	Args     []string // tokens after the command, options aside: an optional base revision
-	Paths    []string // payload lines, trimmed, blanks dropped; may carry a #L<n> anchor
-	LineNote string   // open: free-form text shown next to the anchored line, "" = none
-	Session  string   // the --session=<id> option: a guided session's id, "" = none
+	Command     string      // CommandOpen, CommandReview, CommandEnd or CommandWait
+	Args        []string    // tokens after the command, options aside: an optional base revision
+	Paths       []string    // payload lines, trimmed, blanks dropped; may carry a #L<n> anchor
+	LineNote    string      // free-form text shown next to the anchored line (or the file's first change), "" = none
+	Session     string      // the session option's id, "" = none
+	SessionKind SessionKind // which session option named it; SessionNone without one
 }
 
 const (
@@ -28,8 +30,40 @@ const (
 	CommandWait   = "wait" // session: wait for the current step's answer
 )
 
-// SessionOption is the first-line option naming a guided session.
-const SessionOption = "--session="
+// SessionKind is what a session shows. The first-line option that names the
+// session picks it.
+type SessionKind uint8
+
+const (
+	SessionNone   SessionKind = iota
+	SessionNote               // --session=: each step opens its file with the note
+	SessionDiff               // --diff-session=: each step opens the file's diff with the note
+	SessionReview             // --review-session=: each review adds one file to a live review
+)
+
+const (
+	SessionOption       = "--session="
+	DiffSessionOption   = "--diff-session="
+	ReviewSessionOption = "--review-session="
+)
+
+// Option is the first-line option naming a session of this kind.
+func (kind SessionKind) Option() string {
+	switch kind {
+	case SessionNote:
+		return SessionOption
+	case SessionDiff:
+		return DiffSessionOption
+	case SessionReview:
+		return ReviewSessionOption
+	}
+	return ""
+}
+
+var sessionKinds = []SessionKind{SessionNote, SessionDiff, SessionReview}
+
+// sessionOptionsText lists the session options for error messages.
+const sessionOptionsText = SessionOption + "<id>, " + DiffSessionOption + "<id> or " + ReviewSessionOption + "<id>"
 
 var sessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
@@ -74,14 +108,19 @@ func Parse(text string) (Message, error) {
 			message.Command = strings.ToLower(fields[0])
 			message.Args = []string{}
 			for _, field := range fields[1:] {
+				kind := sessionKindOf(field)
 				switch {
-				case strings.HasPrefix(field, SessionOption):
-					message.Session = strings.TrimPrefix(field, SessionOption)
+				case kind != SessionNone:
+					if message.Session != "" {
+						return Message{}, errors.New("one session option only: " + sessionOptionsText)
+					}
+					message.SessionKind = kind
+					message.Session = strings.TrimPrefix(field, kind.Option())
 					if !sessionIDPattern.MatchString(message.Session) {
 						return Message{}, errors.New("bad session id " + message.Session + " — use 1–64 letters, digits, '.', '_' or '-'")
 					}
 				case strings.HasPrefix(field, "--"):
-					return Message{}, errors.New("unknown option " + field + " — the only option is " + SessionOption + "<id>")
+					return Message{}, errors.New("unknown option " + field + " — the options are " + sessionOptionsText)
 				default:
 					message.Args = append(message.Args, field)
 				}
@@ -105,8 +144,14 @@ func Parse(text string) (Message, error) {
 		if len(message.LineNote) > MaxLineNoteBytes {
 			return Message{}, fmt.Errorf("note is too long (max %d KiB)", MaxLineNoteBytes>>10)
 		}
+		if message.SessionKind == SessionReview {
+			return Message{}, errors.New("open takes no " + ReviewSessionOption + " — a review session sends review requests")
+		}
 		if message.Session != "" && message.LineNote == "" {
 			return Message{}, errors.New("a session step needs a note: open <file>#L<n>, then a --- line and the note")
+		}
+		if message.SessionKind == SessionNote && message.Base() != "" {
+			return Message{}, errors.New("a note session takes no base revision — walk diffs with " + DiffSessionOption + "<id>")
 		}
 	case CommandReview:
 		if err := checkBaseArgument(message.Command, message.Args); err != nil {
@@ -118,23 +163,43 @@ func Parse(text string) (Message, error) {
 		if len(message.Paths) > MaxReviewPaths {
 			return Message{}, fmt.Errorf("review takes at most %d paths, got %d", MaxReviewPaths, len(message.Paths))
 		}
-		if noteSeen {
-			return Message{}, errors.New("review takes no note — a note goes with open <file>#L<n>")
-		}
-		if message.Session != "" {
-			return Message{}, errors.New("review takes no session — a session steps through open requests")
+		switch message.SessionKind {
+		case SessionNone:
+			if noteSeen {
+				return Message{}, errors.New("review takes no note — a note goes with open <file>#L<n>, or with a review session's file")
+			}
+		case SessionReview:
+			if len(message.Paths) != 1 {
+				return Message{}, fmt.Errorf("a review session sends one file per review, got %d", len(message.Paths))
+			}
+			if len(message.LineNote) > MaxLineNoteBytes {
+				return Message{}, fmt.Errorf("note is too long (max %d KiB)", MaxLineNoteBytes>>10)
+			}
+		default:
+			return Message{}, errors.New("review takes no " + message.SessionKind.Option() + " — a review session uses " + ReviewSessionOption + "<id>")
 		}
 	case CommandEnd, CommandWait:
 		if message.Session == "" {
-			return Message{}, errors.New(message.Command + " needs " + SessionOption + "<id>")
+			return Message{}, errors.New(message.Command + " needs " + sessionOptionsText)
 		}
 		if len(message.Args) > 0 || len(message.Paths) > 0 || noteSeen {
-			return Message{}, errors.New(message.Command + " takes only " + SessionOption + "<id>")
+			return Message{}, errors.New(message.Command + " takes only the session option")
 		}
 	default:
 		return Message{}, fmt.Errorf("unknown command %q — use open, review, end or wait", message.Command)
 	}
 	return message, nil
+}
+
+// sessionKindOf is the session kind a first-line token names, SessionNone
+// when it is no session option.
+func sessionKindOf(field string) SessionKind {
+	for _, kind := range sessionKinds {
+		if strings.HasPrefix(field, kind.Option()) {
+			return kind
+		}
+	}
+	return SessionNone
 }
 
 // trimBlankLines joins lines, dropping the blank (whitespace-only) ones at

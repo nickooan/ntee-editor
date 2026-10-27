@@ -1081,6 +1081,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case reviewLoadedMsg:
 		return m.handleReviewLoaded(msg)
 
+	case reviewFileResolvedMsg:
+		return m.handleReviewFileResolved(msg)
+
 	case externalMessageMsg:
 		return m.handleExternalMessage(msg)
 
@@ -1331,10 +1334,19 @@ func (m Model) quit() (tea.Model, tea.Cmd) {
 	m = m.recordCursor()      // persist the active file's cursor for next launch
 	m = m.stashDraftIfDirty() // unsaved edits survive a relaunch
 	m.saveSession()
+	// Quitting the editor quits a live review too: it is saved and its agent
+	// hears it is over.
+	var saveReview tea.Cmd
+	if m.reviewSessionRunning() {
+		m, saveReview = m.quitReviewSession()
+	}
 	// The LSP shutdown handshake runs on the cmd goroutine (bounded inside
 	// ShutdownAll), not in the key handler — a wedged server must not be able
 	// to freeze the UI on its way out.
 	return m, func() tea.Msg {
+		if saveReview != nil {
+			saveReview()
+		}
 		m.lsp.ShutdownAll()
 		return tea.QuitMsg{}
 	}

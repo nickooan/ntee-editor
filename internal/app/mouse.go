@@ -117,6 +117,9 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		if _, onNote := m.lineNoteHit(mo.X, mo.Y); onNote {
 			return m, nil // the box covers the code under it: no cursor jump there
 		}
+		if _, onNote := m.reviewNoteHit(mo.X, mo.Y); onNote {
+			return m, nil
+		}
 		switch mo.Button {
 		case tea.MouseLeft, tea.MouseRight:
 			ctrl := mo.Mod.Contains(tea.ModCtrl)
@@ -175,6 +178,14 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				return m.scrollLineNote(box, -wheelScrollLines), nil
 			case tea.MouseWheelDown:
 				return m.scrollLineNote(box, wheelScrollLines), nil
+			}
+		}
+		if box, onNote := m.reviewNoteHit(mo.X, mo.Y); onNote {
+			switch mo.Button {
+			case tea.MouseWheelUp:
+				return m.scrollReviewNote(box, -wheelScrollLines), nil
+			case tea.MouseWheelDown:
+				return m.scrollReviewNote(box, wheelScrollLines), nil
 			}
 		}
 		switch mo.Button {

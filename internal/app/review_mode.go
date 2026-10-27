@@ -40,7 +40,22 @@ type reviewFile struct {
 	status       reviewFileStatus
 	document     diffDocument
 	corpus       string // the rows' text joined with \n: the search corpus (row == line)
-	note         string // why there is no diff (binary, too large, failure)
+	problem      string // why there is no diff (binary, too large, failure)
+	// loadGen counts the file's loads: a resent file reloads, and only the
+	// newest load's result lands.
+	loadGen int
+	// agentNote is the sender's note on the file ("" text = none), boxed on
+	// noteLine (1-based; 0 = the file's first change).
+	agentNote lineNoteOverlay
+	noteLine  int
+}
+
+// reviewRequest is one file asked for review: its workspace path, the line
+// its note sits on (1-based; 0 = none), and the note ("" = none).
+type reviewRequest struct {
+	workspaceRel string
+	line         int
+	note         string
 }
 
 func (file reviewFile) loaded() bool {
@@ -70,6 +85,15 @@ type reviewState struct {
 	rowByPath   map[string]int // entry RelativePath → row
 	fileByPath  map[string]int // workspace path → index into files
 	hiddenCount map[string]int // collapsed dir → reviewed files it hides
+
+	// A review session's live state (review_session.go): its id ("" = a
+	// plain review), whether the view follows each arriving file, the latest
+	// arrival, and the files that arrived while it didn't (replaced, never
+	// mutated, like collapsed).
+	session    string
+	follow     bool
+	newestPath string
+	unseen     map[string]bool
 }
 
 const (
@@ -85,10 +109,9 @@ type reviewPreparedMsg struct {
 }
 
 // reviewLoadedMsg delivers computed diffs. nextStart is the index the next
-// batch begins at, -1 for a one-off priority load (the selected file).
+// batch begins at, -1 for a one-off load (the selected or an arriving file).
 type reviewLoadedMsg struct {
 	gen       int
-	start     int
 	files     []reviewFile
 	nextStart int
 }
@@ -140,23 +163,23 @@ func (m Model) leaveToEditOrQuery() Model {
 	return m
 }
 
-// enterReview opens review mode over workspace-relative paths. Repo
-// resolution touches the disk, so the list is prepared off the UI goroutine
-// and the diffs then load in batches.
-func (m Model) enterReview(paths []string, base string) (Model, tea.Cmd) {
-	if len(paths) == 0 {
+// enterReview opens review mode over workspace-relative files, each with its
+// optional note. Repo resolution touches the disk, so the list is prepared
+// off the UI goroutine and the diffs then load in batches.
+func (m Model) enterReview(requests []reviewRequest, base string) (Model, tea.Cmd) {
+	if len(requests) == 0 {
 		m.errText = "review: no files"
 		return m, nil
 	}
 	m = m.leaveToEditOrQuery()
-	files := make([]reviewFile, 0, min(len(paths), maxReviewFiles))
-	seen := make(map[string]bool, len(paths))
-	for _, rel := range paths {
-		if seen[rel] || len(files) == maxReviewFiles {
+	files := make([]reviewFile, 0, min(len(requests), maxReviewFiles))
+	seen := make(map[string]bool, len(requests))
+	for _, request := range requests {
+		if seen[request.workspaceRel] || len(files) == maxReviewFiles {
 			continue
 		}
-		seen[rel] = true
-		files = append(files, reviewFile{workspaceRel: rel})
+		seen[request.workspaceRel] = true
+		files = append(files, m.newReviewFile(request))
 	}
 	m.review = reviewState{
 		files:        files,
@@ -169,6 +192,23 @@ func (m Model) enterReview(paths []string, base string) (Model, tea.Cmd) {
 	return m, reviewPrepareCmd(m.review.gen, m.workspaceRoot, files)
 }
 
+// newReviewFile is a requested file, not resolved or loaded yet, with its
+// note laid out for the file's tab size.
+func (m Model) newReviewFile(request reviewRequest) reviewFile {
+	file := reviewFile{workspaceRel: request.workspaceRel}
+	return m.withAgentNote(file, request)
+}
+
+// withAgentNote sets (or replaces, on a resend) a file's note.
+func (m Model) withAgentNote(file reviewFile, request reviewRequest) reviewFile {
+	file.agentNote, file.noteLine = lineNoteOverlay{}, 0
+	if request.note != "" {
+		file.agentNote = newLineNote(request.workspaceRel, max(0, request.line-1), request.note, 0, m.cfg.Editor.TabWidth)
+		file.noteLine = request.line
+	}
+	return file
+}
+
 // reviewPrepareCmd resolves each file's repo and puts the list in the left
 // pane's tree order, so Shift+↑/↓ walks files exactly as they are shown.
 func reviewPrepareCmd(gen int, workspaceRoot string, requested []reviewFile) tea.Cmd {
@@ -176,25 +216,32 @@ func reviewPrepareCmd(gen int, workspaceRoot string, requested []reviewFile) tea
 	return func() tea.Msg {
 		workspaceIsRepo := filetree.IsGitRepo(workspaceRoot)
 		for i := range files {
-			absolute := filepath.Join(workspaceRoot, filepath.FromSlash(files[i].workspaceRel))
-			repoRoot := filetree.FindRepoRoot(workspaceRoot, absolute)
-			if filepath.Clean(repoRoot) == filepath.Clean(workspaceRoot) && !workspaceIsRepo {
-				continue // in no repository: no base to diff against
-			}
-			repoRel, err := filepath.Rel(repoRoot, absolute)
-			if err != nil {
-				continue
-			}
-			label, err := filepath.Rel(workspaceRoot, repoRoot)
-			if err != nil {
-				continue
-			}
-			files[i].repoRoot = repoRoot
-			files[i].repoRel = filepath.ToSlash(repoRel)
-			files[i].repoLabel = filepath.ToSlash(label)
+			files[i] = resolveReviewFile(workspaceRoot, workspaceIsRepo, files[i])
 		}
 		return reviewPreparedMsg{gen: gen, files: inTreeOrder(files)}
 	}
+}
+
+// resolveReviewFile finds the repo a file lives in, so it can be diffed
+// there; a file in no repository is left without one. It touches the disk.
+func resolveReviewFile(workspaceRoot string, workspaceIsRepo bool, file reviewFile) reviewFile {
+	absolute := filepath.Join(workspaceRoot, filepath.FromSlash(file.workspaceRel))
+	repoRoot := filetree.FindRepoRoot(workspaceRoot, absolute)
+	if filepath.Clean(repoRoot) == filepath.Clean(workspaceRoot) && !workspaceIsRepo {
+		return file // in no repository: no base to diff against
+	}
+	repoRel, err := filepath.Rel(repoRoot, absolute)
+	if err != nil {
+		return file
+	}
+	label, err := filepath.Rel(workspaceRoot, repoRoot)
+	if err != nil {
+		return file
+	}
+	file.repoRoot = repoRoot
+	file.repoRel = filepath.ToSlash(repoRel)
+	file.repoLabel = filepath.ToSlash(label)
+	return file
 }
 
 // inTreeOrder orders files as the folder tree lists them: directories
@@ -342,7 +389,7 @@ func (m Model) reviewLoadCmd(start, end, nextStart int) tea.Cmd {
 		for i := range pending {
 			pending[i] = loadReviewFile(workspaceRoot, base, pending[i], highlightLimit, tabWidths[i])
 		}
-		return reviewLoadedMsg{gen: gen, start: start, files: pending, nextStart: nextStart}
+		return reviewLoadedMsg{gen: gen, files: pending, nextStart: nextStart}
 	}
 }
 
@@ -353,13 +400,13 @@ func loadReviewFile(workspaceRoot, base string, file reviewFile, highlightLimit,
 	exists := err == nil
 	switch {
 	case err != nil && !errors.Is(err, fs.ErrNotExist):
-		file.status, file.note = reviewFailed, err.Error()
+		file.status, file.problem = reviewFailed, err.Error()
 		return file
 	case binary:
-		file.status, file.note = reviewBinary, "binary file — not shown"
+		file.status, file.problem = reviewBinary, "binary file — not shown"
 		return file
 	case len(data) > maxReviewFileBytes:
-		file.status, file.note = reviewTooLarge, fmt.Sprintf("larger than %d MB — not shown", maxReviewFileBytes>>20)
+		file.status, file.problem = reviewTooLarge, fmt.Sprintf("larger than %d MB — not shown", maxReviewFileBytes>>20)
 		return file
 	}
 	var current []string
@@ -370,19 +417,19 @@ func loadReviewFile(workspaceRoot, base string, file reviewFile, highlightLimit,
 	var document diffDocument
 	if file.repoRoot == "" {
 		if !exists {
-			file.status, file.note = reviewMissing, "not found, and not in a git repository"
+			file.status, file.problem = reviewMissing, "not found, and not in a git repository"
 			return file
 		}
 		document = diffDocument{lines: current, newFile: true, adds: len(current), rows: make([]diffRow, len(current))}
 		for i := range current {
 			document.rows[i] = diffRow{kind: diffAdd, bufLine: i}
 		}
-		file.note = "not in a git repository"
+		file.problem = "not in a git repository"
 	} else {
 		var errText string
 		document, errText = computeDiffDocument(file.repoRoot, base, file.repoRel, current, exists)
 		if errText != "" {
-			file.status, file.note = reviewFailed, errText
+			file.status, file.problem = reviewFailed, errText
 			if !exists {
 				file.status = reviewMissing
 			}
@@ -445,22 +492,24 @@ func expandDocumentTabs(document diffDocument, tabWidth int) diffDocument {
 	return document
 }
 
-// handleReviewLoaded stores loaded diffs. A file that already loaded (the
-// priority load raced its batch) keeps its first result so the cursor on it
-// stays put. Landing the selected file puts the cursor on its first change.
+// handleReviewLoaded stores loaded diffs, found by path since a review
+// session inserts files while loads are in flight. A file that already loaded
+// (the priority load raced its batch) keeps its first result so the cursor on
+// it stays put, and a stale load of a resent file is dropped (loadGen).
+// Landing the selected file puts the cursor on its note or first change.
 func (m Model) handleReviewLoaded(msg reviewLoadedMsg) (tea.Model, tea.Cmd) {
 	if msg.gen != m.review.gen || m.mode != modeReview {
 		return m, nil
 	}
 	files := append([]reviewFile(nil), m.review.files...)
-	for offset, file := range msg.files {
-		index := msg.start + offset
-		if index >= len(files) || files[index].loaded() || files[index].workspaceRel != file.workspaceRel {
+	for _, file := range msg.files {
+		index, ok := m.review.fileByPath[file.workspaceRel]
+		if !ok || files[index].loaded() || files[index].loadGen != file.loadGen {
 			continue
 		}
 		files[index] = file
 		if index == m.review.selection.index {
-			m.review.position = rowCursor{}.anchoredAt(file.document.firstChangeRow(), m.reviewSpanFor(file))
+			m.review.position = rowCursor{}.anchoredAt(file.landingRow(), m.reviewSpanFor(file))
 		}
 	}
 	m.review.files = files
@@ -503,8 +552,20 @@ func (m Model) selectReviewFile(index int) (Model, tea.Cmd) {
 	m.review.search = documentSearch{}
 	file := m.review.files[m.review.selection.index]
 	m = m.unfoldReviewAncestors(file.workspaceRel)
-	m.review.position = rowCursor{}.anchoredAt(file.document.firstChangeRow(), m.reviewSpanFor(file))
+	m.review.position = rowCursor{}.anchoredAt(file.landingRow(), m.reviewSpanFor(file))
+	if m.review.session != "" {
+		m = m.reviewSessionSelected(file.workspaceRel)
+	}
 	return m, m.reviewLoadSelectedCmd()
+}
+
+// landingRow is where selecting the file puts the cursor: on its note's line
+// when the note names one, else on its first change.
+func (file reviewFile) landingRow() int {
+	if file.agentNote.text != "" && file.noteLine > 0 && len(file.document.rows) > 0 {
+		return diffRowForBufLine(file.document.rows, file.noteLine-1)
+	}
+	return file.document.firstChangeRow()
 }
 
 // selectReviewPath selects the file with workspace-relative path rel.

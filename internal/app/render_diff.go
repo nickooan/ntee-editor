@@ -13,12 +13,22 @@ import (
 )
 
 // renderDiff draws the diff review view: the edit buffer vs the git base,
-// reusing the edit session's highlight cache.
+// reusing the edit session's highlight cache, with a session step's box on
+// its line.
 func (m Model) renderDiff(width, height int) string {
 	if m.diffLoading {
 		return baseStyle.Render("computing diff…")
 	}
-	return renderDiffDocument(m.liveDiffDocument(), m.diffPosition, diffSearchOverlay{}, width, height, m.tabWidthFor(m.openRel))
+	body := renderDiffDocument(m.liveDiffDocument(), m.diffPosition, diffSearchOverlay{}, width, height, m.tabWidthFor(m.openRel))
+	if !m.lineNoteVisibleInDiff() {
+		return body
+	}
+	anchorRow, cursorRow, gutterWidth, ok := m.diffNoteRows(height)
+	if !ok {
+		return body
+	}
+	rows := m.overlayLineNote(strings.Split(body, "\n"), anchorRow, cursorRow, gutterWidth, max(1, width-gutterWidth-3), height)
+	return strings.Join(rows, "\n")
 }
 
 // diffSearchOverlay carries a document search's matches into the diff
@@ -174,6 +184,9 @@ func (m Model) renderDiffStatus() string {
 		base = "HEAD"
 	}
 	line := promptStyle.Render("@diff") + statusTextStyle.Render(" "+name+"   base "+base)
+	if m.session.id != "" {
+		line += statusTextStyle.Render("   ") + sessionBadgeStyle.Render(m.sessionBadge())
+	}
 	if m.diffDocument.newFile {
 		line += statusTextStyle.Render("   ") + noticeStyle.Render("new file")
 	}
@@ -190,6 +203,9 @@ func (m Model) renderDiffStatus() string {
 	}
 	if m.errText != "" {
 		line += statusTextStyle.Render("   ") + errStyle.Render(m.errText)
+	}
+	if m.sessionStepVisible() {
+		return line + statusTextStyle.Render("   ") + hintStyle.Render("↑/↓ review · Shift+↑/↓ hunk · PgUp/PgDn page · Esc end session")
 	}
 	return line + statusTextStyle.Render("   ") +
 		hintStyle.Render("↑/↓ review · Shift+↑/↓ hunk · PgUp/PgDn page · "+m.actionHints(

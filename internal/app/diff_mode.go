@@ -106,8 +106,11 @@ func (m Model) handleDiffReady(msg diffReadyMsg) (tea.Model, tea.Cmd) {
 	}
 	if msg.document.adds == 0 && msg.document.dels == 0 {
 		m.notice = "git diff: no changes"
-		m.mode = modeEdit
-		return m.clearDiffState(), nil
+		if !m.diffSessionStepOn(msg.rel) {
+			m.mode = modeEdit
+			return m.clearDiffState(), nil
+		}
+		// A diff session's step keeps the diff view: all context rows.
 	}
 	m.diffLoading = false
 	m.diffDocument = msg.document

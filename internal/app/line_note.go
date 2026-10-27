@@ -40,6 +40,9 @@ const (
 	// session" hint.
 	lineNoteSessionMinWidth = 40
 	lineNoteMaxWidth        = 100 // box width cap: prose past this gets hard to read
+	// lineNoteMaxBodyRows caps the note's visible rows (a third of the pane
+	// at most): a short box can step aside instead of covering the code.
+	lineNoteMaxBodyRows = 8
 )
 
 func newLineNote(rel string, line int, text string, editRevision, tabWidth int) lineNoteOverlay {
@@ -92,16 +95,18 @@ type lineNoteBox struct {
 
 func (box lineNoteBox) height() int { return box.bodyRows + 2 }
 
-// lineNoteGeometry places the box in renderFile's coordinates: right of the
-// gutter with a margin, as wide as the note needs up to the pane, below the
-// note's line — or above it when only that fits, or when below would hide
-// the cursor. ok=false when the pane is too narrow for a box.
-func (m Model) lineNoteGeometry(start, gutterWidth, contentWidth, height int) (lineNoteBox, bool) {
+// geometry places the box in the view's row coordinates (anchorRow
+// and cursorRow are viewport rows — buffer lines in the file view, diff rows
+// in the diff): right of the gutter with a margin, as wide as the note needs
+// up to the pane, below the note's row — or above it when only that fits, or
+// when below would hide the cursor. When neither side of the note's row
+// keeps the cursor clear, the box steps just below (or above) the cursor.
+// ok=false when the pane is too narrow.
+func (note lineNoteOverlay) geometry(anchorRow, cursorRow, gutterWidth, contentWidth, height int) (lineNoteBox, bool) {
 	available := contentWidth - 2*lineNoteMargin
 	if available < 12 || height < 4 {
 		return lineNoteBox{}, false
 	}
-	note := m.lineNote
 	box := lineNoteBox{left: gutterWidth + 3 + lineNoteMargin}
 	minimum := lineNoteMinWidth
 	if note.session != "" {
@@ -110,11 +115,9 @@ func (m Model) lineNoteGeometry(start, gutterWidth, contentWidth, height int) (l
 	box.width = input.Clamp(note.naturalWidth+4, min(minimum, available), min(available, lineNoteMaxWidth))
 	box.innerWidth = box.width - 4 // border + one cell of padding per side
 	box.lines = note.lines(box.innerWidth)
-	box.bodyRows = min(len(box.lines), max(3, height/2-2))
+	box.bodyRows = min(len(box.lines), max(3, min(lineNoteMaxBodyRows, height/3)))
 	box.scroll = input.Clamp(note.scroll, 0, len(box.lines)-box.bodyRows)
 
-	anchorRow := note.line - start
-	cursorRow := m.edit.cy - start
 	belowTop, aboveTop := anchorRow+1, anchorRow-box.height()
 	fitsBelow := belowTop+box.height() <= height
 	fitsAbove := aboveTop >= 0
@@ -130,22 +133,61 @@ func (m Model) lineNoteGeometry(start, gutterWidth, contentWidth, height int) (l
 	case box.top == aboveTop && covers(aboveTop) && fitsBelow && !covers(belowTop):
 		box.top = belowTop
 	}
+	if covers(box.top) {
+		switch {
+		case cursorRow+1+box.height() <= height:
+			box.top = cursorRow + 1
+		case cursorRow-box.height() >= 0:
+			box.top = cursorRow - box.height()
+		}
+	}
 	return box, true
 }
 
+// lineNoteVisibleInDiff reports whether a session step's box shows over the
+// diff view. Only a session step: a plain note waits for the user to leave
+// the diff, since Esc there must still mean "leave".
+func (m Model) lineNoteVisibleInDiff() bool {
+	note := m.lineNote
+	return note.text != "" && note.session != "" && m.mode == modeDiff && m.openFile != nil && m.openRel == note.rel
+}
+
+// diffNoteRows places the note in the diff view: its anchor and the cursor
+// as viewport rows, and the diff's gutter width. renderDiff and
+// lineNoteScreenBox share it so drawing and mouse hits agree. ok=false while
+// the diff is loading.
+func (m Model) diffNoteRows(height int) (anchorRow, cursorRow, gutterWidth int, ok bool) {
+	rows := m.diffDocument.rows
+	if m.diffLoading || len(rows) == 0 {
+		return 0, 0, 0, false
+	}
+	start := fileViewportTop(m.diffPosition.row, m.diffPosition.scrollY, height, len(rows))
+	gutterWidth = diffGutterWidth(m.liveDiffDocument(), height)
+	return diffRowForBufLine(rows, m.lineNote.line) - start, m.diffPosition.row - start, gutterWidth, true
+}
+
 // lineNoteScreenBox is the box's geometry for the mouse: renderFile's edit
-// mode inputs, as editClickTarget derives them.
+// mode inputs, as editClickTarget derives them, or the diff view's.
 func (m Model) lineNoteScreenBox() (lineNoteBox, bool) {
-	if !m.lineNoteVisible() || len(m.edit.lines) == 0 {
+	height := m.contentHeight() + 1
+	mainWidth := max(3, m.width-m.sidebarWidth())
+	var anchorRow, cursorRow, gutterWidth int
+	switch {
+	case m.lineNoteVisibleInDiff():
+		var ok bool
+		if anchorRow, cursorRow, gutterWidth, ok = m.diffNoteRows(height); !ok {
+			return lineNoteBox{}, false
+		}
+	case m.lineNoteVisible() && len(m.edit.lines) > 0:
+		total := len(m.edit.lines)
+		start := fileViewportTop(m.edit.cy, m.fileScrollY, height, total)
+		anchorRow, cursorRow = m.lineNote.line-start, m.edit.cy-start
+		gutterWidth = len(strconv.Itoa(max(total, height)))
+	default:
 		return lineNoteBox{}, false
 	}
-	height := m.contentHeight() + 1
-	total := len(m.edit.lines)
-	start := fileViewportTop(m.edit.cy, m.fileScrollY, height, total)
-	mainWidth := max(3, m.width-m.sidebarWidth())
-	gutterWidth := len(strconv.Itoa(max(total, height)))
 	contentWidth := max(1, (mainWidth-4)-gutterWidth-3)
-	box, ok := m.lineNoteGeometry(start, gutterWidth, contentWidth, height)
+	box, ok := m.lineNote.geometry(anchorRow, cursorRow, gutterWidth, contentWidth, height)
 	if !ok {
 		return lineNoteBox{}, false
 	}

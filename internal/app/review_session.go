@@ -29,32 +29,49 @@ func (m Model) reviewSessionRunning() bool {
 }
 
 // receiveReviewSessionFile takes a review session's file: it is remembered
-// in arrival order (a resent file keeps its place and takes the new note),
+// in arrival order, one entry per note — a note on a line the file already
+// has a note on replaces that one, a send without a note keeps the notes —
 // and once the user started the session it goes into the review at once.
 // The reply is what the agent hears.
 func (m Model) receiveReviewSessionFile(request reviewRequest) (Model, tea.Cmd, string) {
-	index := slices.IndexFunc(m.session.reviews, func(queued reviewRequest) bool {
+	listed := slices.ContainsFunc(m.session.reviews, func(queued reviewRequest) bool {
 		return queued.workspaceRel == request.workspaceRel
 	})
-	reviews := slices.Clone(m.session.reviews)
-	if index >= 0 {
-		reviews[index] = request
-	} else {
-		reviews = append(reviews, request)
-	}
-	m.session.reviews = reviews
-	count := strconv.Itoa(len(reviews))
+	m.session.reviews = withQueuedReview(m.session.reviews, request)
+	count := strconv.Itoa(reviewFileCount(m.session.reviews))
 	if !m.session.started {
-		if index >= 0 {
+		if listed {
 			return m, nil, "file " + request.workspaceRel + " updated — " + count + " files queued"
 		}
 		return m, nil, "file " + count + " queued"
 	}
-	m, cmd := m.addReviewSessionFile(request)
-	if index >= 0 {
+	m, cmd := m.addReviewSessionFile([]reviewRequest{request})
+	if listed {
 		return m, cmd, "file " + request.workspaceRel + " refreshed"
 	}
 	return m, cmd, "file " + count + " added to the review"
+}
+
+// withQueuedReview adds a request to a session's queue, keeping one entry
+// per (file, note line): a file's note-less entry gives way to its first
+// note, and a note-less resend of a queued file adds nothing.
+func withQueuedReview(queue []reviewRequest, request reviewRequest) []reviewRequest {
+	sameFile := func(queued reviewRequest) bool { return queued.workspaceRel == request.workspaceRel }
+	if request.note == "" {
+		if slices.ContainsFunc(queue, sameFile) {
+			return queue
+		}
+		return append(slices.Clip(queue), request)
+	}
+	index := slices.IndexFunc(queue, func(queued reviewRequest) bool {
+		return sameFile(queued) && (queued.note == "" || queued.line == request.line)
+	})
+	if index < 0 {
+		return append(slices.Clip(queue), request)
+	}
+	queue = slices.Clone(queue)
+	queue[index] = request
+	return queue
 }
 
 // enterReviewSession opens the live review of a review session the user just
@@ -72,10 +89,21 @@ func (m Model) enterReviewSession() (Model, tea.Cmd) {
 	}
 	m.mode = modeReview
 	m = m.refreshReviewTree()
-	cmds := make([]tea.Cmd, 0, len(m.session.reviews)+1)
+	// A file's queued notes go in together, so it resolves and loads once.
+	var byFile [][]reviewRequest
+	indexByPath := map[string]int{}
 	for _, request := range m.session.reviews {
+		if index, seen := indexByPath[request.workspaceRel]; seen {
+			byFile[index] = append(byFile[index], request)
+			continue
+		}
+		indexByPath[request.workspaceRel] = len(byFile)
+		byFile = append(byFile, []reviewRequest{request})
+	}
+	cmds := make([]tea.Cmd, 0, len(byFile)+1)
+	for _, requests := range byFile {
 		var cmd tea.Cmd
-		m, cmd = m.addReviewSessionFile(request)
+		m, cmd = m.addReviewSessionFile(requests)
 		cmds = append(cmds, cmd)
 	}
 	if m.session.complete {
@@ -86,15 +114,17 @@ func (m Model) enterReviewSession() (Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-// addReviewSessionFile puts an arriving file into the live review: a file
-// already listed reloads with its new note; a new one has its repo resolved
-// off the UI goroutine first (handleReviewFileResolved inserts it).
-func (m Model) addReviewSessionFile(request reviewRequest) (Model, tea.Cmd) {
-	m.review.newestPath = request.workspaceRel
-	if index, listed := m.review.fileByPath[request.workspaceRel]; listed {
-		return m.refreshReviewFile(index, request)
+// addReviewSessionFile puts an arriving file (requests all name it, one per
+// note) into the live review: a file already listed reloads with the notes
+// added; a new one has its repo resolved off the UI goroutine first
+// (handleReviewFileResolved inserts it).
+func (m Model) addReviewSessionFile(requests []reviewRequest) (Model, tea.Cmd) {
+	rel := requests[0].workspaceRel
+	m.review.newestPath = rel
+	if index, listed := m.review.fileByPath[rel]; listed {
+		return m.refreshReviewFile(index, requests)
 	}
-	return m, reviewResolveCmd(m.review.gen, m.workspaceRoot, m.newReviewFile(request))
+	return m, reviewResolveCmd(m.review.gen, m.workspaceRoot, m.newReviewFile(requests...))
 }
 
 // reviewResolveCmd resolves one arriving file's repo.
@@ -111,9 +141,8 @@ func (m Model) handleReviewFileResolved(msg reviewFileResolvedMsg) (tea.Model, t
 	if msg.gen != m.review.gen || m.mode != modeReview {
 		return m, nil
 	}
-	request := reviewRequest{workspaceRel: msg.file.workspaceRel, line: msg.file.noteLine, note: msg.file.agentNote.text}
 	if index, listed := m.review.fileByPath[msg.file.workspaceRel]; listed {
-		return m.refreshReviewFile(index, request)
+		return m.refreshReviewFile(index, msg.file.noteRequests())
 	}
 	selectedPath := ""
 	if file, ok := m.selectedReviewFile(); ok {
@@ -132,11 +161,14 @@ func (m Model) handleReviewFileResolved(msg reviewFileResolvedMsg) (tea.Model, t
 	return m.landReviewArrival(msg.file.workspaceRel, selectedPath == "")
 }
 
-// refreshReviewFile reloads a resent file with its new note: the newer load
-// wins over one still in flight (loadGen).
-func (m Model) refreshReviewFile(index int, request reviewRequest) (Model, tea.Cmd) {
+// refreshReviewFile reloads a resent file with the requests' notes added:
+// the newer load wins over one still in flight (loadGen).
+func (m Model) refreshReviewFile(index int, requests []reviewRequest) (Model, tea.Cmd) {
 	files := slices.Clone(m.review.files)
-	file := m.withAgentNote(files[index], request)
+	file := files[index]
+	for _, request := range requests {
+		file = m.addReviewNote(file, request)
+	}
 	file.loadGen++
 	file.status, file.document, file.corpus, file.problem = reviewLoading, diffDocument{}, "", ""
 	files[index] = file
@@ -144,7 +176,7 @@ func (m Model) refreshReviewFile(index int, request reviewRequest) (Model, tea.C
 	if index == m.review.selection.index {
 		m.review.search = documentSearch{}
 	}
-	return m.landReviewArrival(request.workspaceRel, false)
+	return m.landReviewArrival(file.workspaceRel, false)
 }
 
 // landReviewArrival follows an arriving (not yet loaded) file — selects it,
@@ -225,7 +257,14 @@ func (m Model) reviewNoteHit(x, y int) (lineNoteBox, bool) {
 func (m Model) scrollReviewNote(box lineNoteBox, delta int) Model {
 	index := m.review.selection.index
 	files := slices.Clone(m.review.files)
-	files[index].agentNote.scroll = input.Clamp(box.scroll+delta, 0, len(box.lines)-box.bodyRows)
+	file := files[index]
+	if len(file.notes) == 0 {
+		return m
+	}
+	notes := slices.Clone(file.notes)
+	active := min(file.activeNote, len(notes)-1)
+	notes[active].overlay.scroll = input.Clamp(box.scroll+delta, 0, len(box.lines)-box.bodyRows)
+	files[index].notes = notes
 	m.review.files = files
 	return m
 }
@@ -234,7 +273,7 @@ func (m Model) scrollReviewNote(box lineNoteBox, delta int) Model {
 // tells the agent to stop sending files.
 func (m Model) quitReviewSessionChoice() choiceOverlay {
 	choice := choiceOverlay{kind: choiceQuitReviewSession, title: "Quit the review session?", choices: []string{"Quit", "Stay"}}
-	files := fmt.Sprintf("%d files reviewed in session %s", len(m.session.reviews), m.session.id)
+	files := fmt.Sprintf("%d files reviewed in session %s", reviewFileCount(m.session.reviews), m.session.id)
 	if m.session.complete {
 		choice.body = []overlayLine{{text: files, style: overlayLineStrong}, {text: "the agent has finished sending files", style: overlayLineDim}}
 	} else {
@@ -251,7 +290,7 @@ func (m Model) quitReviewSession() (Model, tea.Cmd) {
 	if !m.reviewSessionRunning() {
 		return m.exitReview(), nil
 	}
-	id, files := m.session.id, len(m.session.reviews)
+	id, files := m.session.id, reviewFileCount(m.session.reviews)
 	m, save := m.saveReviewSession(store.ExternalReviewed, "the user quit the review")
 	if m.session.complete {
 		m = m.endSession("was finished — the user reviewed all "+strconv.Itoa(files)+" files", true)
@@ -286,8 +325,9 @@ func (m Model) saveReviewSession(status store.ExternalStatus, note string) (Mode
 }
 
 // reviewSessionRecord is the history record of the running review session:
-// a review of its files (anchors kept, so a replay puts each note back on
-// its line) against the session's base.
+// a review of its files against the session's base, one entry per note
+// (anchors kept, so a replay puts each note back on its line; enterReview
+// merges a file's entries again).
 func (m Model) reviewSessionRecord(status store.ExternalStatus, note string, at time.Time) store.ExternalRecord {
 	paths := make([]string, len(m.session.reviews))
 	notes := make([]string, len(m.session.reviews))
@@ -309,7 +349,7 @@ func (m Model) reviewSessionRecord(status store.ExternalStatus, note string, at 
 		Base:       cmp.Or(m.session.base, store.ExternalDefaultBase),
 		Paths:      paths,
 		PathNotes:  notes,
-		Raw:        fmt.Sprintf("review session %s · %d files", m.session.id, len(paths)),
+		Raw:        fmt.Sprintf("review session %s · %d files", m.session.id, reviewFileCount(m.session.reviews)),
 		ReceivedAt: at,
 		Status:     status,
 		Note:       note,

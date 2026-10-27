@@ -15,12 +15,13 @@ import (
 // then for an open (or a review session's review) an optional note after a
 // LineNoteSeparator line.
 type Message struct {
-	Command     string      // CommandOpen, CommandReview, CommandEnd or CommandWait
-	Args        []string    // tokens after the command, options aside: an optional base revision
-	Paths       []string    // payload lines, trimmed, blanks dropped; may carry a #L<n> anchor
-	LineNote    string      // free-form text shown next to the anchored line (or the file's first change), "" = none
-	Session     string      // the session option's id, "" = none
-	SessionKind SessionKind // which session option named it; SessionNone without one
+	Command     string        // CommandOpen, CommandReview, CommandEnd or CommandWait
+	Args        []string      // tokens after the command, options aside: an optional base revision
+	Paths       []string      // payload lines, trimmed, blanks dropped; may carry a #L<n> anchor
+	LineNote    string        // free-form text shown next to the anchored line (or the file's first change), "" = none
+	Session     string        // the session option's id, "" = none
+	SessionKind SessionKind   // which session option named it; SessionNone without one
+	WaitBudget  time.Duration // wait only: how long the sender waits for the reply, 0 = not given
 }
 
 const (
@@ -45,6 +46,10 @@ const (
 	SessionOption       = "--session="
 	DiffSessionOption   = "--diff-session="
 	ReviewSessionOption = "--review-session="
+	// WaitOption on a wait tells the editor how long the sender will wait,
+	// so the editor answers before then instead of holding the connection
+	// past the sender's exit.
+	WaitOption = "--wait="
 )
 
 // Option is the first-line option naming a session of this kind.
@@ -119,6 +124,12 @@ func Parse(text string) (Message, error) {
 					if !sessionIDPattern.MatchString(message.Session) {
 						return Message{}, errors.New("bad session id " + message.Session + " — use 1–64 letters, digits, '.', '_' or '-'")
 					}
+				case strings.HasPrefix(field, WaitOption):
+					budget, err := time.ParseDuration(strings.TrimPrefix(field, WaitOption))
+					if err != nil || budget <= 0 {
+						return Message{}, errors.New("bad " + field + " — give a duration such as " + WaitOption + "10m")
+					}
+					message.WaitBudget = budget
 				case strings.HasPrefix(field, "--"):
 					return Message{}, errors.New("unknown option " + field + " — the options are " + sessionOptionsText)
 				default:
@@ -132,6 +143,9 @@ func Parse(text string) (Message, error) {
 	}
 	if !commandSeen {
 		return Message{}, errors.New("empty message — the first line must be a command (open, review)")
+	}
+	if message.WaitBudget > 0 && message.Command != CommandWait {
+		return Message{}, errors.New(WaitOption + " goes with wait only")
 	}
 	switch message.Command {
 	case CommandOpen:

@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"sort"
+	"unicode/utf8"
 
 	"github.com/nickooan/ntee-editor/internal/diff"
 	"github.com/nickooan/ntee-editor/internal/gitcmd"
@@ -67,7 +68,7 @@ func (doc diffDocument) rowHighlights(i int) []view.HighlightSegment {
 }
 
 func (doc diffDocument) rowWidth(i int) int {
-	return len([]rune(doc.rowText(i)))
+	return utf8.RuneCountInString(doc.rowText(i))
 }
 
 // isHunkStart reports whether row i opens a hunk: a maximal run of non-ctx rows.
@@ -147,21 +148,45 @@ func diffRowForBufLine(rows []diffRow, line int) int {
 // no commits yet) is not an error — everything is new. It runs git, so call
 // it off the UI goroutine. The error is user-facing, without a mode prefix.
 func computeDiffDocument(repoRoot, base, repoRel string, current []string, currentExists bool) (diffDocument, string) {
-	doc := diffDocument{lines: current}
-	rev := base
-	if rev == "" {
-		rev = "HEAD"
+	revision := resolveDiffRevision(repoRoot, base)
+	if revision.problem != "" {
+		return diffDocument{}, revision.problem
 	}
-	revisionExists := true
-	if _, err := gitcmd.Out(repoRoot, "rev-parse", "--verify", "--end-of-options", rev+"^{commit}"); err != nil {
+	return diffAgainstRevision(repoRoot, revision, repoRel, current, currentExists)
+}
+
+// diffRevision is base resolved in one repo: name is what git show reads
+// from, and exists is false for an unborn HEAD (everything is new).
+type diffRevision struct {
+	name    string
+	exists  bool
+	problem string
+}
+
+// resolveDiffRevision checks base in the repo at repoRoot once, so a review
+// can share it across every file of that repo. It runs git.
+func resolveDiffRevision(repoRoot, base string) diffRevision {
+	revision := diffRevision{name: base, exists: true}
+	if revision.name == "" {
+		revision.name = "HEAD"
+	}
+	if _, err := gitcmd.Out(repoRoot, "rev-parse", "--verify", "--end-of-options", revision.name+"^{commit}"); err != nil {
 		if base != "" {
-			if line := firstStderrLine(err); line != "" {
-				return diffDocument{}, line
+			revision.problem = firstStderrLine(err)
+			if revision.problem == "" {
+				revision.problem = "bad revision: " + base
 			}
-			return diffDocument{}, "bad revision: " + base
+			return revision
 		}
-		revisionExists = false
+		revision.exists = false
 	}
+	return revision
+}
+
+// diffAgainstRevision is computeDiffDocument past the revision check.
+func diffAgainstRevision(repoRoot string, revision diffRevision, repoRel string, current []string, currentExists bool) (diffDocument, string) {
+	doc := diffDocument{lines: current}
+	rev, revisionExists := revision.name, revision.exists
 	var old []string
 	inBase := false
 	if revisionExists {

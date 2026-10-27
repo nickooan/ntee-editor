@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -44,10 +45,13 @@ type reviewFile struct {
 	// loadGen counts the file's loads: a resent file reloads, and only the
 	// newest load's result lands.
 	loadGen int
-	// agentNote is the sender's note on the file ("" text = none), boxed on
-	// noteLine (1-based; 0 = the file's first change).
-	agentNote lineNoteOverlay
-	noteLine  int
+	// notes are the sender's notes on the file, one per line, in line order;
+	// the box shows the active one.
+	notes      []reviewNote
+	activeNote int
+	// contentHash identifies the loaded content (0 = none): notes shown with
+	// another one are earlier notes.
+	contentHash uint64
 }
 
 // reviewRequest is one file asked for review: its workspace path, the line
@@ -99,8 +103,19 @@ type reviewState struct {
 const (
 	maxReviewFiles     = 500
 	maxReviewFileBytes = 2 << 20
-	reviewLoadBatch    = 8
+	reviewLoadBatch    = 32
 )
+
+// reviewLoadSlots bounds review loads (git spawns, diff, highlight) across
+// the whole process: batch workers and one-file session arrivals share it,
+// so a burst of agent sends can't start hundreds of git processes at once.
+var reviewLoadSlots = make(chan struct{}, runtime.NumCPU())
+
+func withReviewLoadSlot(work func()) {
+	reviewLoadSlots <- struct{}{}
+	defer func() { <-reviewLoadSlots }()
+	work()
+}
 
 // reviewPreparedMsg delivers the resolved and sorted file list.
 type reviewPreparedMsg struct {
@@ -173,12 +188,18 @@ func (m Model) enterReview(requests []reviewRequest, base string) (Model, tea.Cm
 	}
 	m = m.leaveToEditOrQuery()
 	files := make([]reviewFile, 0, min(len(requests), maxReviewFiles))
-	seen := make(map[string]bool, len(requests))
+	indexByPath := make(map[string]int, len(requests))
 	for _, request := range requests {
-		if seen[request.workspaceRel] || len(files) == maxReviewFiles {
+		// A path repeated with another anchor is another note on the file
+		// (a replayed review session saves one entry per note).
+		if index, seen := indexByPath[request.workspaceRel]; seen {
+			files[index] = m.addReviewNote(files[index], request)
 			continue
 		}
-		seen[request.workspaceRel] = true
+		if len(files) == maxReviewFiles {
+			continue
+		}
+		indexByPath[request.workspaceRel] = len(files)
 		files = append(files, m.newReviewFile(request))
 	}
 	m.review = reviewState{
@@ -192,19 +213,12 @@ func (m Model) enterReview(requests []reviewRequest, base string) (Model, tea.Cm
 	return m, reviewPrepareCmd(m.review.gen, m.workspaceRoot, files)
 }
 
-// newReviewFile is a requested file, not resolved or loaded yet, with its
-// note laid out for the file's tab size.
-func (m Model) newReviewFile(request reviewRequest) reviewFile {
-	file := reviewFile{workspaceRel: request.workspaceRel}
-	return m.withAgentNote(file, request)
-}
-
-// withAgentNote sets (or replaces, on a resend) a file's note.
-func (m Model) withAgentNote(file reviewFile, request reviewRequest) reviewFile {
-	file.agentNote, file.noteLine = lineNoteOverlay{}, 0
-	if request.note != "" {
-		file.agentNote = newLineNote(request.workspaceRel, max(0, request.line-1), request.note, 0, m.cfg.Editor.TabWidth)
-		file.noteLine = request.line
+// newReviewFile is a requested file, not resolved or loaded yet, with the
+// requests' notes laid out for the file's tab size.
+func (m Model) newReviewFile(requests ...reviewRequest) reviewFile {
+	file := reviewFile{workspaceRel: requests[0].workspaceRel}
+	for _, request := range requests {
+		file = m.addReviewNote(file, request)
 	}
 	return file
 }
@@ -215,9 +229,9 @@ func reviewPrepareCmd(gen int, workspaceRoot string, requested []reviewFile) tea
 	files := append([]reviewFile(nil), requested...)
 	return func() tea.Msg {
 		workspaceIsRepo := filetree.IsGitRepo(workspaceRoot)
-		for i := range files {
+		forEachParallel(len(files), func(i int) {
 			files[i] = resolveReviewFile(workspaceRoot, workspaceIsRepo, files[i])
-		}
+		})
 		return reviewPreparedMsg{gen: gen, files: inTreeOrder(files)}
 	}
 }
@@ -276,7 +290,12 @@ func (m Model) handleReviewPrepared(msg reviewPreparedMsg) (tea.Model, tea.Cmd) 
 		m.review.fileByPath[file.workspaceRel] = i
 	}
 	m = m.refreshReviewTree()
-	return m, m.reviewLoadBatchCmd(0)
+	if len(m.review.files) == 0 {
+		return m, nil
+	}
+	// The first file (selected) loads alone so it shows before a whole
+	// batch is done; the batch chain continues after it.
+	return m, m.reviewLoadCmd(0, 1, 1)
 }
 
 // refreshReviewTree rebuilds the folder tree's visible rows and the folded
@@ -377,25 +396,59 @@ func (m Model) reviewLoadSelectedCmd() tea.Cmd {
 	return m.reviewLoadCmd(index, index+1, -1)
 }
 
+// reviewLoadCmd loads files[start:end] in parallel, skipping any already
+// loaded (the selected file may have been loaded ahead of its batch). The
+// base is resolved once per repo of the batch, not per file — and only per
+// batch, since an agent may commit while a review session runs.
 func (m Model) reviewLoadCmd(start, end, nextStart int) tea.Cmd {
 	gen, base, workspaceRoot := m.review.gen, m.review.base, m.workspaceRoot
-	pending := append([]reviewFile(nil), m.review.files[start:end]...)
+	var pending []reviewFile
+	for _, file := range m.review.files[start:end] {
+		if !file.loaded() {
+			pending = append(pending, file)
+		}
+	}
 	highlightLimit := m.cfg.Editor.MaxHighlightKB * 1024
 	tabWidths := make([]int, len(pending)) // resolved here: the cmd never reads m.cfg
 	for i, file := range pending {
 		tabWidths[i] = m.tabWidthFor(file.workspaceRel)
 	}
 	return func() tea.Msg {
-		for i := range pending {
-			pending[i] = loadReviewFile(workspaceRoot, base, pending[i], highlightLimit, tabWidths[i])
-		}
+		revisions := resolveReviewRevisions(base, pending)
+		forEachParallel(len(pending), func(i int) {
+			withReviewLoadSlot(func() {
+				pending[i] = loadReviewFile(workspaceRoot, revisions[pending[i].repoRoot], pending[i], highlightLimit, tabWidths[i])
+			})
+		})
 		return reviewLoadedMsg{gen: gen, files: pending, nextStart: nextStart}
 	}
 }
 
+// resolveReviewRevisions resolves base in each distinct repo of files.
+func resolveReviewRevisions(base string, files []reviewFile) map[string]diffRevision {
+	var repoRoots []string
+	seen := map[string]bool{}
+	for _, file := range files {
+		if file.repoRoot != "" && !seen[file.repoRoot] {
+			seen[file.repoRoot] = true
+			repoRoots = append(repoRoots, file.repoRoot)
+		}
+	}
+	resolved := make([]diffRevision, len(repoRoots))
+	forEachParallel(len(repoRoots), func(i int) {
+		withReviewLoadSlot(func() { resolved[i] = resolveDiffRevision(repoRoots[i], base) })
+	})
+	revisions := make(map[string]diffRevision, len(repoRoots))
+	for i, repoRoot := range repoRoots {
+		revisions[repoRoot] = resolved[i]
+	}
+	return revisions
+}
+
 // loadReviewFile reads the working-tree side through the workspace file jail
-// and diffs it against the base in the file's own repo.
-func loadReviewFile(workspaceRoot, base string, file reviewFile, highlightLimit, tabWidth int) reviewFile {
+// and diffs it against the base, already resolved in the file's own repo.
+// It is safe to run concurrently.
+func loadReviewFile(workspaceRoot string, revision diffRevision, file reviewFile, highlightLimit, tabWidth int) reviewFile {
 	data, binary, err := filetree.ReadContainedFile(workspaceRoot, file.workspaceRel)
 	exists := err == nil
 	switch {
@@ -412,6 +465,7 @@ func loadReviewFile(workspaceRoot, base string, file reviewFile, highlightLimit,
 	var current []string
 	if exists {
 		current = splitBufferLines(string(data))
+		file.contentHash = reviewContentHash(data)
 	}
 
 	var document diffDocument
@@ -426,8 +480,10 @@ func loadReviewFile(workspaceRoot, base string, file reviewFile, highlightLimit,
 		}
 		file.problem = "not in a git repository"
 	} else {
-		var errText string
-		document, errText = computeDiffDocument(file.repoRoot, base, file.repoRel, current, exists)
+		errText := revision.problem
+		if errText == "" {
+			document, errText = diffAgainstRevision(file.repoRoot, revision, file.repoRel, current, exists)
+		}
 		if errText != "" {
 			file.status, file.problem = reviewFailed, errText
 			if !exists {
@@ -507,6 +563,10 @@ func (m Model) handleReviewLoaded(msg reviewLoadedMsg) (tea.Model, tea.Cmd) {
 		if !ok || files[index].loaded() || files[index].loadGen != file.loadGen {
 			continue
 		}
+		// The notes may have moved on while it loaded (a step to another
+		// note); the load only brings the diff.
+		file.notes = stampReviewNotes(files[index].notes, file.contentHash)
+		file.activeNote = files[index].activeNote
 		files[index] = file
 		if index == m.review.selection.index {
 			m.review.position = rowCursor{}.anchoredAt(file.landingRow(), m.reviewSpanFor(file))
@@ -559,11 +619,11 @@ func (m Model) selectReviewFile(index int) (Model, tea.Cmd) {
 	return m, m.reviewLoadSelectedCmd()
 }
 
-// landingRow is where selecting the file puts the cursor: on its note's line
-// when the note names one, else on its first change.
+// landingRow is where selecting the file puts the cursor: on its active
+// note's line, else on its first change.
 func (file reviewFile) landingRow() int {
-	if file.agentNote.text != "" && file.noteLine > 0 && len(file.document.rows) > 0 {
-		return diffRowForBufLine(file.document.rows, file.noteLine-1)
+	if note, ok := file.activeReviewNote(); ok {
+		return file.noteRow(note)
 	}
 	return file.document.firstChangeRow()
 }

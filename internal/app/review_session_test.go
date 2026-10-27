@@ -139,11 +139,90 @@ func TestReviewSessionResendRefreshesTheFile(t *testing.T) {
 	must(t, os.WriteFile(filepath.Join(root, "apps", "web", "main.go"), []byte("package main\n\nfunc main() { run(); stop() }\n\nfunc stop() {}\n"), 0o644))
 	m, outcome := sendReviewFile(t, m, "r1", "apps/web/main.go#L5", "stop added")
 	file := m.review.files[m.review.fileByPath["apps/web/main.go"]]
-	if outcome != "file apps/web/main.go refreshed" || !file.loaded() || file.document.adds != 3 || file.agentNote.text != "stop added" || file.noteLine != 5 {
-		t.Fatalf("a resend reloads with the new note: reply=%q adds=%d note=%q line=%d", outcome, file.document.adds, file.agentNote.text, file.noteLine)
+	if outcome != "file apps/web/main.go refreshed" || !file.loaded() || file.document.adds != 3 {
+		t.Fatalf("a resend reloads the diff: reply=%q adds=%d", outcome, file.document.adds)
 	}
-	if len(m.session.reviews) != 2 || m.session.reviews[0].note != "stop added" {
-		t.Fatalf("a resent file keeps its place with the latest note: %+v", m.session.reviews)
+	// A note on another line is added, not swapped in: the file now has
+	// both, the new one active, the first written against the old content.
+	if len(file.notes) != 2 || file.notes[0].line != 3 || file.notes[1].line != 5 || file.notes[1].overlay.text != "stop added" || file.activeNote != 1 {
+		t.Fatalf("a note on a new line is added and active: %+v active=%d", file.notes, file.activeNote)
+	}
+	if !file.noteIsEarlier(file.notes[0]) || file.noteIsEarlier(file.notes[1]) {
+		t.Fatal("the note sent before the change is earlier, the new one is not")
+	}
+	if len(m.session.reviews) != 3 || reviewFileCount(m.session.reviews) != 2 {
+		t.Fatalf("the queue keeps one entry per note: %+v", m.session.reviews)
+	}
+
+	// The same line again replaces that note; no note keeps them all.
+	m, _ = sendReviewFile(t, m, "r1", "apps/web/main.go#L5", "stop added, now tested")
+	m, outcome = sendReviewFile(t, m, "r1", "apps/web/main.go", "")
+	file = m.review.files[m.review.fileByPath["apps/web/main.go"]]
+	if outcome != "file apps/web/main.go refreshed" || len(file.notes) != 2 || file.notes[1].overlay.text != "stop added, now tested" {
+		t.Fatalf("same line replaces, no note keeps: reply=%q notes=%+v", outcome, file.notes)
+	}
+	if len(m.session.reviews) != 3 {
+		t.Fatalf("neither resend adds a queue entry: %+v", m.session.reviews)
+	}
+}
+
+func TestReviewSessionStepsThroughAFilesNotes(t *testing.T) {
+	m, root, _ := startedReviewSession(t)
+	must(t, os.WriteFile(filepath.Join(root, "apps", "web", "main.go"), []byte("package main\n\nfunc main() { run(); stop() }\n\nfunc stop() {}\n"), 0o644))
+	m, _ = sendReviewFile(t, m, "r1", "apps/web/main.go#L5", "stop added")
+	if selectedReviewPath(m) != "apps/web/main.go" {
+		t.Fatalf("the resent file is followed: %q", selectedReviewPath(m))
+	}
+	plain := ansi.Strip(m.View().Content)
+	if !strings.Contains(plain, "note 2/2 · L5") || !strings.Contains(plain, "stop added") || !strings.Contains(plain, "[/] note") {
+		t.Fatalf("the active note's box counts the notes and the hint names the keys:\n%s", plain)
+	}
+	if !strings.Contains(plain, "◆2") {
+		t.Fatalf("the left pane counts the file's notes:\n%s", plain)
+	}
+	file, _ := m.selectedReviewFile()
+	markers := file.noteMarkerRows()
+	if len(markers) != 1 || !markers[file.noteRow(file.notes[0])] {
+		t.Fatalf("only the note not on screen is marked: %v", markers)
+	}
+
+	m = key(m, keyPress(']')) // wraps to the first note
+	file, _ = m.selectedReviewFile()
+	if file.activeNote != 0 || m.review.position.row != file.noteRow(file.notes[0]) {
+		t.Fatalf("] steps to the next note and its line: active=%d row=%d", file.activeNote, m.review.position.row)
+	}
+	plain = ansi.Strip(m.View().Content)
+	if !strings.Contains(plain, "note 1/2 · L3 · earlier") || !strings.Contains(plain, "main now runs") {
+		t.Fatalf("the first note shows, marked earlier:\n%s", plain)
+	}
+	// The box may cover the line's text, never the gutter.
+	if !strings.Contains(plain, " 5◆│") || strings.Contains(plain, " 3◆│") {
+		t.Fatalf("the other note's line carries the gutter mark:\n%s", plain)
+	}
+	m = key(m, keyPress('['))
+	if file, _ = m.selectedReviewFile(); file.activeNote != 1 {
+		t.Fatalf("[ steps back: active=%d", file.activeNote)
+	}
+}
+
+func TestQueuedReviewKeepsOneEntryPerNoteLine(t *testing.T) {
+	bare := reviewRequest{workspaceRel: "a.go"}
+	at3 := reviewRequest{workspaceRel: "a.go", line: 3, note: "three"}
+	at3again := reviewRequest{workspaceRel: "a.go", line: 3, note: "three, again"}
+	at9 := reviewRequest{workspaceRel: "a.go", line: 9, note: "nine"}
+	other := reviewRequest{workspaceRel: "b.go"}
+
+	queue := withQueuedReview(nil, bare)
+	queue = withQueuedReview(queue, other)
+	queue = withQueuedReview(queue, at3)
+	if len(queue) != 2 || queue[0] != at3 {
+		t.Fatalf("a first note takes the bare entry's place: %+v", queue)
+	}
+	queue = withQueuedReview(queue, at9)
+	queue = withQueuedReview(queue, at3again)
+	queue = withQueuedReview(queue, bare)
+	if len(queue) != 3 || queue[0] != at3again || queue[2] != at9 || reviewFileCount(queue) != 2 {
+		t.Fatalf("one entry per note line, a bare resend adds none: %+v", queue)
 	}
 }
 
@@ -266,8 +345,30 @@ func TestReviewSessionReplayShowsTheNotes(t *testing.T) {
 		t.Fatalf("a replay is a plain review: mode=%v session=%q files=%d", m.mode, m.review.session, len(m.review.files))
 	}
 	file := m.review.files[m.review.fileByPath["apps/web/main.go"]]
-	if file.agentNote.text != "# Why\nmain now runs" || file.noteLine != 3 {
-		t.Fatalf("the replay keeps each note on its line: %q L%d", file.agentNote.text, file.noteLine)
+	if len(file.notes) != 1 || file.notes[0].overlay.text != "# Why\nmain now runs" || file.notes[0].line != 3 {
+		t.Fatalf("the replay keeps each note on its line: %+v", file.notes)
+	}
+}
+
+func TestReviewSessionReplayBringsBackEveryNote(t *testing.T) {
+	m, _, history := startedReviewSession(t)
+	m, _ = sendReviewFile(t, m, "r1", "apps/web/main.go#L1", "the package line")
+	m = key(m, keyPress(tea.KeyEscape))
+	m = keySettled(m, keyPress(tea.KeyEnter)) // Quit
+	records, _ := history.LoadExternal()
+	if got := strings.Join(records[0].Paths, " "); got != "apps/web/main.go#L3 apps/web/new.go apps/web/main.go#L1" || records[0].Raw != "review session r1 · 2 files" {
+		t.Fatalf("the record repeats a file once per note: %q raw=%q", got, records[0].Raw)
+	}
+	m.externalHistory.records = records
+	if plain := ansi.Strip(strings.Join(m.externalDetailLines(80), "\n")); !strings.Contains(plain, "review · 2 files") {
+		t.Fatalf("the detail counts files, not notes:\n%s", plain)
+	}
+
+	next, cmd := m.handleExternalMessage(externalMessageMsg{record: records[0], replay: true})
+	m = settleExternal(next.(Model), cmd)
+	file := m.review.files[m.review.fileByPath["apps/web/main.go"]]
+	if len(m.review.files) != 2 || len(file.notes) != 2 || file.notes[0].line != 1 || file.notes[1].line != 3 {
+		t.Fatalf("the replay merges the file's notes again: files=%d notes=%+v", len(m.review.files), file.notes)
 	}
 }
 

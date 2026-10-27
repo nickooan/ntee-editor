@@ -355,7 +355,7 @@ func (m Model) completeSession(id string, reply chan<- string) (Model, tea.Cmd) 
 	}
 	m.session.complete = true
 	if m.session.kind == extmsg.SessionReview {
-		sendExternalReply(reply, "session "+id+" complete — the user is reviewing "+strconv.Itoa(len(m.session.reviews))+" files")
+		sendExternalReply(reply, "session "+id+" complete — the user is reviewing "+strconv.Itoa(reviewFileCount(m.session.reviews))+" files")
 		if !m.session.started {
 			return m, nil
 		}

@@ -1,7 +1,9 @@
 package syntax
 
 import (
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/alecthomas/chroma/v2"
@@ -346,5 +348,41 @@ func TestHighlightLinesWithStyleLeavesActiveStyle(t *testing.T) {
 	}
 	if got := keywordColor(t, HighlightLinesWithStyle("x.go", source, "no-such-style")); got != "#fb4934" {
 		t.Fatalf("unknown style should fall back to gruvbox: %q", got)
+	}
+}
+
+func TestHighlightLinesConcurrentMatchesSerial(t *testing.T) {
+	SetStyle("gruvbox")
+	t.Cleanup(func() { SetStyle("gruvbox") })
+	source := "package main\n\n// greet says hi\nfunc main() {\n\tprintln(\"hi\", 42)\n}\n"
+	want := HighlightLines("x.go", source)
+
+	var wg sync.WaitGroup
+	results := make([][][]view.HighlightSegment, 16)
+	for index := range results {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results[index] = HighlightLines("x.go", source)
+		}()
+	}
+	wg.Wait()
+	for index, got := range results {
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("pass %d differs from the serial highlight", index)
+		}
+	}
+}
+
+func TestSetStyleAppliesToNextHighlight(t *testing.T) {
+	SetStyle("gruvbox")
+	t.Cleanup(func() { SetStyle("gruvbox") })
+	source := "package main\n\nfunc main() {}\n"
+	if got := keywordColor(t, HighlightLines("x.go", source)); got != "#fb4934" {
+		t.Fatalf("gruvbox keyword = %q", got)
+	}
+	SetStyle("monokai")
+	if got := keywordColor(t, HighlightLines("x.go", source)); got != "#66d9ef" {
+		t.Fatalf("after SetStyle(monokai) keyword = %q", got)
 	}
 }

@@ -8,7 +8,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -181,30 +180,17 @@ func (m Model) grepLoadBatchCmd(gen, start int) tea.Cmd {
 		end := min(start+grepLoadBatch, len(corpus))
 		batch := corpus[start:end]
 		slots := make([]*grepFile, len(batch))
-		var next atomic.Int64
-		var wg sync.WaitGroup
-		for w := 0; w < min(runtime.NumCPU(), len(batch)); w++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for {
-					i := int(next.Add(1)) - 1
-					if i >= len(batch) {
-						return
-					}
-					f, ok := filetree.ReadViewFile(root, batch[i])
-					if !ok || f.Binary {
-						continue
-					}
-					if sizeCap > 0 && len(f.Content) > sizeCap {
-						continue
-					}
-					file := newGrepFile(batch[i], f.Content)
-					slots[i] = &file
-				}
-			}()
-		}
-		wg.Wait()
+		forEachParallel(len(batch), func(i int) {
+			f, ok := filetree.ReadViewFile(root, batch[i])
+			if !ok || f.Binary {
+				return
+			}
+			if sizeCap > 0 && len(f.Content) > sizeCap {
+				return
+			}
+			file := newGrepFile(batch[i], f.Content)
+			slots[i] = &file
+		})
 		files := make([]grepFile, 0, len(batch))
 		for _, gf := range slots {
 			if gf != nil {

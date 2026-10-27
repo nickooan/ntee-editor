@@ -48,8 +48,14 @@ type ExternalReceiver struct {
 	settings      store.ExternalSettingsStore
 	history       store.ExternalHistoryStore
 	queue         chan externalMessageMsg
-	sessionWait   time.Duration // how long a session request waits for the user
+	replyWait     time.Duration // how long a request waits for the UI's outcome
+	sessionWait   time.Duration // how long a session's wait waits for the user
 }
+
+// waitReplyMargin is how much earlier than the sender's --wait= budget a
+// wait is answered, so the reply lands before the sender gives up and no
+// connection is held past it.
+const waitReplyMargin = 2 * time.Second
 
 func NewExternalReceiver(workspaceRoot string, settings store.ExternalSettingsStore, history store.ExternalHistoryStore) *ExternalReceiver {
 	return &ExternalReceiver{
@@ -57,6 +63,7 @@ func NewExternalReceiver(workspaceRoot string, settings store.ExternalSettingsSt
 		settings:      settings,
 		history:       history,
 		queue:         make(chan externalMessageMsg, externalQueueSize),
+		replyWait:     externalReplyWait,
 		sessionWait:   extmsg.MaxSessionWait,
 	}
 }
@@ -135,21 +142,38 @@ func (r *ExternalReceiver) Handle(text string) string {
 	default:
 		return extmsg.ErrorReply("the editor is busy — try again shortly")
 	}
-	// A session request is answered by the user (Enter/Esc), so it waits for
-	// them; anything else gets the UI's immediate outcome.
-	wait := externalReplyWait
-	if message.Session != "" {
-		wait = r.sessionWait
+	// Only a session's wait is answered by the user (when the session is
+	// over); every other request, session steps included, gets the UI's
+	// immediate outcome.
+	isWait := message.Command == extmsg.CommandWait
+	wait := r.replyWait
+	if isWait {
+		wait = r.waitFor(message.WaitBudget)
 	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
 	select {
 	case outcome := <-reply:
 		return replyFromOutcome(outcome) + historyWarning
-	case <-time.After(wait):
-		if message.Session != "" {
+	case <-timer.C:
+		if isWait {
 			return extmsg.OkReply(sessionWaitingReply(message.Session, message.SessionKind))
 		}
 		return extmsg.OkReply("delivered" + historyWarning)
 	}
+}
+
+// waitFor is how long a wait is held: up to sessionWait, and short of the
+// sender's budget when it gave one (older clients send none).
+func (r *ExternalReceiver) waitFor(budget time.Duration) time.Duration {
+	if budget <= 0 {
+		return r.sessionWait
+	}
+	held := budget - waitReplyMargin
+	if held < budget/2 {
+		held = budget / 2
+	}
+	return min(held, r.sessionWait)
 }
 
 // sessionWaitingReply tells a session's agent the user hasn't answered yet

@@ -156,9 +156,16 @@ Review sessions — a live review the user follows while you write code:
       go: the review page keeps growing, one file per send, each with its
       git diff (against HEAD, or the first send's --msg-base) and your note
       in a box on its #L<line>, or on the file's first change when you name
-      no line. Send a file again after changing it again: its diff refreshes
-      and the new note replaces the old one. Keep each note to a few short
-      lines (see "Keep notes short" above).
+      no line. Send a file again after changing it again: its diff refreshes.
+      A file can carry several notes, one per line: a note on another
+      #L<line> adds one, a note on a line that already has one replaces it,
+      and a send without a note keeps the notes. The user steps through a
+      file's notes with [ and ]; notes sent before the file changed again
+      are marked "earlier". Keep each note to a few short lines (see "Keep
+      notes short" above).
+      Don't scatter notes on lines close to each other: when notes point at
+      the same change or the same function, merge them into one note on its
+      first changed line. Add another note only for a separate change.
       The first send asks the user to start the session; files sent before
       they answer queue. The view follows each new file until the user moves
       to another one; after that new files are marked • for them to visit.
@@ -246,7 +253,10 @@ AGENTS.md:
   hold it (exit 0 finished, 3 closed early, 4 still going — wait again).
   While implementing, forward each file you change to a live review instead
   of showing diffs yourself: ` + "`ntee --msg --msg-review-session <id> [--msg-note \"<why>\"] review <file>`" + `
-  (one file per send; exit 3 means the user quit the review — stop sending),
+  (one file per send; resend a file with a note on another #L<line> to add a
+  note — merge notes that point at the same change or function into one
+  instead of scattering them on nearby lines; exit 3 means the user quit
+  the review — stop sending),
   then ` + "`ntee --msg --msg-review-session <id> end`" + ` when you are done.
   Paths are relative to the current directory. The command prints ` + "`ok …`" + ` on
   success; ` + "`error … disabled`" + ` means the user has not enabled external messages
@@ -369,11 +379,13 @@ func sendMessage(args []string, options msgOptions) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	timeout := 10 * time.Second
+	var output string
+	var code int
 	if command == extmsg.CommandWait {
-		timeout = options.wait
+		output, code = deliverWait(socketPath, session, options.wait)
+	} else {
+		output, code = deliverRequest(socketPath, buildRequest(command, options.base, session.option(), paths, note), session, 10*time.Second)
 	}
-	output, code := deliverRequest(socketPath, buildRequest(command, options.base, session.option(), paths, note), session, timeout)
 	if code == 1 && !extmsg.IsErrorReply(output) {
 		fmt.Fprintln(os.Stderr, output)
 		return code
@@ -395,6 +407,19 @@ func deliverRequest(socketPath, request string, session msgSession, timeout time
 		return "cannot reach the editor: " + err.Error(), 1
 	}
 	return reply, exitCodeForReply(reply)
+}
+
+// deliverWait sends a session's wait with this process's budget, so the
+// editor answers before it gives up instead of holding the connection past
+// its exit. An editor older than the budget option refuses it; the bare wait
+// then goes out once.
+func deliverWait(socketPath string, session msgSession, timeout time.Duration) (string, int) {
+	budgeted := buildRequest(extmsg.CommandWait, "", session.option()+" "+extmsg.WaitOption+timeout.String(), nil, "")
+	output, code := deliverRequest(socketPath, budgeted, session, timeout)
+	if strings.HasPrefix(output, extmsg.ErrorReply("unknown option "+extmsg.WaitOption)) {
+		return deliverRequest(socketPath, buildRequest(extmsg.CommandWait, "", session.option(), nil, ""), session, timeout)
+	}
+	return output, code
 }
 
 // exitCodeForReply maps a reply line to the exit code an agent branches on.

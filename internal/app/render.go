@@ -1363,7 +1363,11 @@ var (
 	// not the row tints) in the spacer column after the line number — the same
 	// slot the diagnostics gutter uses for its ● badge.
 	diffMarkAddStyle = lipgloss.NewStyle().Foreground(colGreen).Bold(true).Background(colDiffAddBg)
-	diffMarkDelStyle = lipgloss.NewStyle().Foreground(colRed).Bold(true).Background(colDiffDelBg)
+	// A review note's line, in the +/- column.
+	diffNoteMarkStyle    = lipgloss.NewStyle().Foreground(colAqua).Bold(true).Background(colBg)
+	diffNoteMarkAddStyle = diffNoteMarkStyle.Background(colDiffAddBg)
+	diffNoteMarkDelStyle = diffNoteMarkStyle.Background(colDiffDelBg)
+	diffMarkDelStyle     = lipgloss.NewStyle().Foreground(colRed).Bold(true).Background(colDiffDelBg)
 
 	// Blame mode gutter: author pops in aqua, the date recedes into the gutter
 	// gray, and uncommitted lines dim the whole annotation to a faint

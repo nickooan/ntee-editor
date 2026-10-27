@@ -307,6 +307,46 @@ func TestReceiverWaitsForASessionToEnd(t *testing.T) {
 	}
 }
 
+func TestReceiverHoldsOnlyWaitAndWithinTheSenderBudget(t *testing.T) {
+	_, root := newTestModel(t, nil)
+	must(t, os.WriteFile(filepath.Join(root, "a.go"), []byte("package a\n"), 0o644))
+	settings := store.NewMemoryExternalSettings(store.ExternalSettings{Enabled: true, HistoryLimit: 10})
+	receiver := NewExternalReceiver(root, settings, store.NewMemoryExternalHistory())
+	receiver.replyWait = 20 * time.Millisecond
+	receiver.sessionWait = time.Hour
+	delivered := make(chan externalMessageMsg, 4)
+	receiver.SetSink(func(msg any) { delivered <- msg.(externalMessageMsg) })
+
+	// A step the UI hasn't answered yet comes back after the plain reply
+	// wait, not the hour a wait may take.
+	started := time.Now()
+	reply := receiver.Handle("open --session=w\na.go#L1\n---\nwhy\n")
+	<-delivered
+	if reply != "ok delivered" || time.Since(started) > 10*time.Second {
+		t.Fatalf("a session step is not held for the user: %q after %v", reply, time.Since(started))
+	}
+
+	if got := receiver.waitFor(10 * time.Minute); got != 10*time.Minute-waitReplyMargin {
+		t.Fatalf("wait held %v for a 10m budget", got)
+	}
+	if got := receiver.waitFor(time.Second); got != 500*time.Millisecond {
+		t.Fatalf("a tiny budget is halved, not zeroed: %v", got)
+	}
+	if got := receiver.waitFor(0); got != time.Hour {
+		t.Fatalf("no budget (an older client) keeps the full wait: %v", got)
+	}
+	if got := receiver.waitFor(3 * time.Hour); got != time.Hour {
+		t.Fatalf("a budget never exceeds the cap: %v", got)
+	}
+
+	started = time.Now()
+	reply = receiver.Handle("wait --session=w --wait=100ms\n")
+	<-delivered
+	if !strings.HasPrefix(reply, "ok waiting") || time.Since(started) > 10*time.Second {
+		t.Fatalf("a wait answers within the sender's budget: %q after %v", reply, time.Since(started))
+	}
+}
+
 // sendDiffSession delivers a diff session request (--diff-session=) and
 // returns the channel its sender waits on.
 func sendDiffSession(m Model, record store.ExternalRecord) (Model, chan string) {

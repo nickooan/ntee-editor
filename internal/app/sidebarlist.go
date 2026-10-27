@@ -28,9 +28,27 @@ type sidebarRow struct {
 
 // sidebarList is the left pane's content. selectedIndex is -1 when nothing
 // is highlighted. Modes fill the rows; they do not scroll or draw the bar.
+// A long list can set rowCount and rowAt instead of rows, so a frame builds
+// only the rows it shows.
 type sidebarList struct {
 	rows          []sidebarRow
+	rowCount      int
+	rowAt         func(index int) sidebarRow
 	selectedIndex int
+}
+
+func (list sidebarList) count() int {
+	if list.rowAt != nil {
+		return list.rowCount
+	}
+	return len(list.rows)
+}
+
+func (list sidebarList) row(index int) sidebarRow {
+	if list.rowAt != nil {
+		return list.rowAt(index)
+	}
+	return list.rows[index]
 }
 
 // sidebarWindowStart is the first visible row. A negative selectedIndex
@@ -50,14 +68,15 @@ func sidebarWindowStart(rowCount, height, selectedIndex int) int {
 
 // renderSidebarList draws the visible window of a sidebar list.
 func renderSidebarList(list sidebarList, width, height int) string {
-	if width < 1 || height < 1 || len(list.rows) == 0 {
+	rowCount := list.count()
+	if width < 1 || height < 1 || rowCount == 0 {
 		return ""
 	}
-	start := sidebarWindowStart(len(list.rows), height, list.selectedIndex)
-	end := min(start+height, len(list.rows))
+	start := sidebarWindowStart(rowCount, height, list.selectedIndex)
+	end := min(start+height, rowCount)
 	lines := make([]string, 0, end-start)
 	for index := start; index < end; index++ {
-		lines = append(lines, renderSidebarRow(list.rows[index], width, index == list.selectedIndex))
+		lines = append(lines, renderSidebarRow(list.row(index), width, index == list.selectedIndex))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -236,8 +255,8 @@ func (m Model) sidebarListClickIndex(x, y int) (int, bool) {
 		return 0, false
 	}
 	list := m.sidebarListForMode(m.sidebarWidth() - 4)
-	index := sidebarWindowStart(len(list.rows), height, list.selectedIndex) + row
-	if index < 0 || index >= len(list.rows) {
+	index := sidebarWindowStart(list.count(), height, list.selectedIndex) + row
+	if index < 0 || index >= list.count() {
 		return 0, false
 	}
 	return index, true

@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -99,8 +100,19 @@ type reviewState struct {
 const (
 	maxReviewFiles     = 500
 	maxReviewFileBytes = 2 << 20
-	reviewLoadBatch    = 8
+	reviewLoadBatch    = 32
 )
+
+// reviewLoadSlots bounds review loads (git spawns, diff, highlight) across
+// the whole process: batch workers and one-file session arrivals share it,
+// so a burst of agent sends can't start hundreds of git processes at once.
+var reviewLoadSlots = make(chan struct{}, runtime.NumCPU())
+
+func withReviewLoadSlot(work func()) {
+	reviewLoadSlots <- struct{}{}
+	defer func() { <-reviewLoadSlots }()
+	work()
+}
 
 // reviewPreparedMsg delivers the resolved and sorted file list.
 type reviewPreparedMsg struct {
@@ -215,9 +227,9 @@ func reviewPrepareCmd(gen int, workspaceRoot string, requested []reviewFile) tea
 	files := append([]reviewFile(nil), requested...)
 	return func() tea.Msg {
 		workspaceIsRepo := filetree.IsGitRepo(workspaceRoot)
-		for i := range files {
+		forEachParallel(len(files), func(i int) {
 			files[i] = resolveReviewFile(workspaceRoot, workspaceIsRepo, files[i])
-		}
+		})
 		return reviewPreparedMsg{gen: gen, files: inTreeOrder(files)}
 	}
 }
@@ -276,7 +288,12 @@ func (m Model) handleReviewPrepared(msg reviewPreparedMsg) (tea.Model, tea.Cmd) 
 		m.review.fileByPath[file.workspaceRel] = i
 	}
 	m = m.refreshReviewTree()
-	return m, m.reviewLoadBatchCmd(0)
+	if len(m.review.files) == 0 {
+		return m, nil
+	}
+	// The first file (selected) loads alone so it shows before a whole
+	// batch is done; the batch chain continues after it.
+	return m, m.reviewLoadCmd(0, 1, 1)
 }
 
 // refreshReviewTree rebuilds the folder tree's visible rows and the folded
@@ -377,25 +394,59 @@ func (m Model) reviewLoadSelectedCmd() tea.Cmd {
 	return m.reviewLoadCmd(index, index+1, -1)
 }
 
+// reviewLoadCmd loads files[start:end] in parallel, skipping any already
+// loaded (the selected file may have been loaded ahead of its batch). The
+// base is resolved once per repo of the batch, not per file — and only per
+// batch, since an agent may commit while a review session runs.
 func (m Model) reviewLoadCmd(start, end, nextStart int) tea.Cmd {
 	gen, base, workspaceRoot := m.review.gen, m.review.base, m.workspaceRoot
-	pending := append([]reviewFile(nil), m.review.files[start:end]...)
+	var pending []reviewFile
+	for _, file := range m.review.files[start:end] {
+		if !file.loaded() {
+			pending = append(pending, file)
+		}
+	}
 	highlightLimit := m.cfg.Editor.MaxHighlightKB * 1024
 	tabWidths := make([]int, len(pending)) // resolved here: the cmd never reads m.cfg
 	for i, file := range pending {
 		tabWidths[i] = m.tabWidthFor(file.workspaceRel)
 	}
 	return func() tea.Msg {
-		for i := range pending {
-			pending[i] = loadReviewFile(workspaceRoot, base, pending[i], highlightLimit, tabWidths[i])
-		}
+		revisions := resolveReviewRevisions(base, pending)
+		forEachParallel(len(pending), func(i int) {
+			withReviewLoadSlot(func() {
+				pending[i] = loadReviewFile(workspaceRoot, revisions[pending[i].repoRoot], pending[i], highlightLimit, tabWidths[i])
+			})
+		})
 		return reviewLoadedMsg{gen: gen, files: pending, nextStart: nextStart}
 	}
 }
 
+// resolveReviewRevisions resolves base in each distinct repo of files.
+func resolveReviewRevisions(base string, files []reviewFile) map[string]diffRevision {
+	var repoRoots []string
+	seen := map[string]bool{}
+	for _, file := range files {
+		if file.repoRoot != "" && !seen[file.repoRoot] {
+			seen[file.repoRoot] = true
+			repoRoots = append(repoRoots, file.repoRoot)
+		}
+	}
+	resolved := make([]diffRevision, len(repoRoots))
+	forEachParallel(len(repoRoots), func(i int) {
+		withReviewLoadSlot(func() { resolved[i] = resolveDiffRevision(repoRoots[i], base) })
+	})
+	revisions := make(map[string]diffRevision, len(repoRoots))
+	for i, repoRoot := range repoRoots {
+		revisions[repoRoot] = resolved[i]
+	}
+	return revisions
+}
+
 // loadReviewFile reads the working-tree side through the workspace file jail
-// and diffs it against the base in the file's own repo.
-func loadReviewFile(workspaceRoot, base string, file reviewFile, highlightLimit, tabWidth int) reviewFile {
+// and diffs it against the base, already resolved in the file's own repo.
+// It is safe to run concurrently.
+func loadReviewFile(workspaceRoot string, revision diffRevision, file reviewFile, highlightLimit, tabWidth int) reviewFile {
 	data, binary, err := filetree.ReadContainedFile(workspaceRoot, file.workspaceRel)
 	exists := err == nil
 	switch {
@@ -426,8 +477,10 @@ func loadReviewFile(workspaceRoot, base string, file reviewFile, highlightLimit,
 		}
 		file.problem = "not in a git repository"
 	} else {
-		var errText string
-		document, errText = computeDiffDocument(file.repoRoot, base, file.repoRel, current, exists)
+		errText := revision.problem
+		if errText == "" {
+			document, errText = diffAgainstRevision(file.repoRoot, revision, file.repoRel, current, exists)
+		}
 		if errText != "" {
 			file.status, file.problem = reviewFailed, errText
 			if !exists {

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -144,7 +145,7 @@ func TestReviewAcrossReposShowsModifiedAddedDeleted(t *testing.T) {
 	}
 	// The change counts are their own segments, green for additions and red
 	// for deletions.
-	counts := list.rows[3].segments[2:]
+	counts := list.row(3).segments[2:]
 	if len(counts) != 2 || counts[0].text != "  +4" || counts[0].style.GetForeground() != colGreen ||
 		counts[1].text != " −0" || counts[1].style.GetForeground() != colRed {
 		t.Fatalf("count segments = %+v", counts)
@@ -246,9 +247,9 @@ func TestReviewFileOutsideAnyRepoIsAllAdded(t *testing.T) {
 // reviewTreeText is the review's left pane as plain text, one row per line.
 func reviewTreeText(m Model) string {
 	list := m.reviewSidebarList()
-	lines := make([]string, len(list.rows))
-	for i, row := range list.rows {
-		lines[i] = strings.TrimRight(sidebarRowPlain(row), " ")
+	lines := make([]string, list.count())
+	for i := range lines {
+		lines[i] = strings.TrimRight(sidebarRowPlain(list.row(i)), " ")
 	}
 	return strings.Join(lines, "\n")
 }
@@ -313,5 +314,64 @@ func TestReviewExpandsTabsForDisplayOnly(t *testing.T) {
 	}
 	if !strings.Contains(m.review.files[0].corpus, "    var tabbed = 1") {
 		t.Fatalf("search corpus matches what is shown: %q", m.review.files[0].corpus)
+	}
+}
+
+func TestReviewLoadsBatchLargerThanWorkerPoolInParallel(t *testing.T) {
+	m, root := gitReviewWorkspace(t)
+	var paths []string
+	for i := range 40 {
+		rel := filepath.Join("apps", "web", "gen", fmt.Sprintf("f%02d.go", i))
+		must(t, os.MkdirAll(filepath.Dir(filepath.Join(root, rel)), 0o755))
+		must(t, os.WriteFile(filepath.Join(root, rel), []byte("package gen\n"), 0o644))
+		paths = append(paths, filepath.ToSlash(rel))
+	}
+	paths = append(paths, "apps/web/main.go", "libs/core/lib.go")
+	m = reviewOf(t, m, paths...)
+	if len(m.review.files) != len(paths) {
+		t.Fatalf("files = %d, want %d", len(m.review.files), len(paths))
+	}
+	for _, file := range m.review.files {
+		want := reviewAdded
+		switch file.workspaceRel {
+		case "apps/web/main.go":
+			want = reviewModified
+		case "libs/core/lib.go":
+			want = reviewDeleted
+		}
+		if file.status != want {
+			t.Fatalf("%s: status=%v want %v (problem %q)", file.workspaceRel, file.status, want, file.problem)
+		}
+	}
+}
+
+func TestReviewBatchSkipsFilesAlreadyLoaded(t *testing.T) {
+	m, _ := gitReviewWorkspace(t)
+	m = reviewOf(t, m, "apps/web/main.go", "apps/web/new.go")
+	loaded := m.review.files[0]
+	msg, ok := m.reviewLoadCmd(0, 2, -1)().(reviewLoadedMsg)
+	if !ok {
+		t.Fatal("load cmd must deliver reviewLoadedMsg")
+	}
+	if len(msg.files) != 0 {
+		t.Fatalf("a batch must not recompute loaded files, got %d", len(msg.files))
+	}
+	if m.review.files[0].document.adds != loaded.document.adds {
+		t.Fatal("loaded file must stay as it was")
+	}
+}
+
+func TestReviewBadBaseFailsEveryFileOfTheRepo(t *testing.T) {
+	m, _ := gitReviewWorkspace(t)
+	m, cmd := m.enterReview(reviewRequestsFor("apps/web/main.go", "apps/web/new.go", "libs/core/lib.go"), "no-such-rev")
+	m = settleExternal(m, cmd)
+	for _, file := range m.review.files {
+		wantStatus := reviewFailed
+		if file.workspaceRel == "libs/core/lib.go" {
+			wantStatus = reviewMissing // gone from the working tree too
+		}
+		if file.status != wantStatus || file.problem == "" {
+			t.Fatalf("%s: status=%v problem=%q", file.workspaceRel, file.status, file.problem)
+		}
 	}
 }

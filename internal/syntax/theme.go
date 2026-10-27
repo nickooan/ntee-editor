@@ -14,13 +14,13 @@ import (
 // the classic Sublime/vim gruvbox pattern). Style.Get resolves
 // category/subcategory inheritance, so every token gets a concrete hex color.
 
-// styleMu guards activeStyle/entryCache: highlighting runs on tea.Cmd
-// goroutines (grep and def-picker previews) while SetStyle can fire from the
-// UI goroutine's inspect command.
+// styleMu guards activeStyle: highlighting runs on tea.Cmd goroutines (grep,
+// review loads, def-picker previews) while SetStyle can fire from the UI
+// goroutine's inspect command. A highlight pass reads the style once and
+// caches its segments locally, so parallel passes never contend per token.
 var (
 	styleMu     sync.Mutex
 	activeStyle *chroma.Style
-	entryCache  map[chroma.TokenType]view.HighlightSegment
 )
 
 func init() { SetStyle("gruvbox") }
@@ -59,21 +59,33 @@ func SetStyle(name string) {
 	style := resolveStyle(name)
 	styleMu.Lock()
 	activeStyle = style
-	entryCache = map[chroma.TokenType]view.HighlightSegment{}
 	styleMu.Unlock()
 }
 
-// segmentFor maps a token type to its styled segment (hex color + attrs).
-// Text is filled in by the caller.
-func segmentFor(t chroma.TokenType) view.HighlightSegment {
+func currentStyle() *chroma.Style {
 	styleMu.Lock()
 	defer styleMu.Unlock()
-	if seg, ok := entryCache[t]; ok {
+	return activeStyle
+}
+
+// segmentFor maps a token type to its styled segment (hex color + attrs) in
+// the active style. Text is filled in by the caller.
+func segmentFor(t chroma.TokenType) view.HighlightSegment {
+	return segmentFromStyle(currentStyle(), t)
+}
+
+// segmentLookup memoizes one style's segments for a single highlight pass;
+// the map is never shared, so it needs no lock.
+func segmentLookup(style *chroma.Style) func(chroma.TokenType) view.HighlightSegment {
+	cache := map[chroma.TokenType]view.HighlightSegment{}
+	return func(t chroma.TokenType) view.HighlightSegment {
+		seg, ok := cache[t]
+		if !ok {
+			seg = segmentFromStyle(style, t)
+			cache[t] = seg
+		}
 		return seg
 	}
-	seg := segmentFromStyle(activeStyle, t)
-	entryCache[t] = seg
-	return seg
 }
 
 func segmentFromStyle(style *chroma.Style, t chroma.TokenType) view.HighlightSegment {

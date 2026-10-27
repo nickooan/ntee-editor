@@ -90,22 +90,13 @@ func LexerFor(filename string) chroma.Lexer {
 // line. The result always has exactly len(NormalizeLines(content)) rows; nil
 // when the file has no lexer (render plain).
 func HighlightLines(filename, content string) [][]view.HighlightSegment {
-	return highlightWith(filename, content, segmentFor)
+	return highlightWith(filename, content, segmentLookup(currentStyle()))
 }
 
 // HighlightLinesWithStyle is HighlightLines in the named style, for previews.
 // It never touches the active style, so a preview can't recolor the editor.
 func HighlightLinesWithStyle(filename, content, styleName string) [][]view.HighlightSegment {
-	style := resolveStyle(styleName)
-	cache := map[chroma.TokenType]view.HighlightSegment{}
-	return highlightWith(filename, content, func(t chroma.TokenType) view.HighlightSegment {
-		seg, ok := cache[t]
-		if !ok {
-			seg = segmentFromStyle(style, t)
-			cache[t] = seg
-		}
-		return seg
-	})
+	return highlightWith(filename, content, segmentLookup(resolveStyle(styleName)))
 }
 
 func highlightWith(filename, content string, segment func(chroma.TokenType) view.HighlightSegment) [][]view.HighlightSegment {

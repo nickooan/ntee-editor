@@ -293,3 +293,37 @@ func TestDeliverRequestExitCodes(t *testing.T) {
 		}
 	}
 }
+
+func TestDeliverWaitSendsItsBudgetAndFallsBackForAnOlderEditor(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "nteecli")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	session := msgSession{id: "walk1", kind: extmsg.SessionNote}
+
+	for _, olderEditor := range []bool{false, true} {
+		socketPath := filepath.Join(dir, "s.sock")
+		var received []string
+		server, err := extmsg.Listen(socketPath, func(text string) string {
+			received = append(received, strings.TrimSpace(text))
+			if strings.Contains(text, extmsg.WaitOption) && olderEditor {
+				// What an editor that predates the budget answers.
+				return extmsg.ErrorReply("unknown option --wait=5s — the options are …")
+			}
+			return "ok finished"
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		output, code := deliverWait(socketPath, session, 5*time.Second)
+		server.Close()
+		want := []string{"wait --session=walk1 --wait=5s"}
+		if olderEditor {
+			want = append(want, "wait --session=walk1")
+		}
+		if code != 0 || output != "ok finished" || strings.Join(received, "|") != strings.Join(want, "|") {
+			t.Fatalf("older editor %v: %q exit %d, requests %q", olderEditor, output, code, received)
+		}
+	}
+}

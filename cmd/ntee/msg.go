@@ -369,11 +369,13 @@ func sendMessage(args []string, options msgOptions) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	timeout := 10 * time.Second
+	var output string
+	var code int
 	if command == extmsg.CommandWait {
-		timeout = options.wait
+		output, code = deliverWait(socketPath, session, options.wait)
+	} else {
+		output, code = deliverRequest(socketPath, buildRequest(command, options.base, session.option(), paths, note), session, 10*time.Second)
 	}
-	output, code := deliverRequest(socketPath, buildRequest(command, options.base, session.option(), paths, note), session, timeout)
 	if code == 1 && !extmsg.IsErrorReply(output) {
 		fmt.Fprintln(os.Stderr, output)
 		return code
@@ -395,6 +397,19 @@ func deliverRequest(socketPath, request string, session msgSession, timeout time
 		return "cannot reach the editor: " + err.Error(), 1
 	}
 	return reply, exitCodeForReply(reply)
+}
+
+// deliverWait sends a session's wait with this process's budget, so the
+// editor answers before it gives up instead of holding the connection past
+// its exit. An editor older than the budget option refuses it; the bare wait
+// then goes out once.
+func deliverWait(socketPath string, session msgSession, timeout time.Duration) (string, int) {
+	budgeted := buildRequest(extmsg.CommandWait, "", session.option()+" "+extmsg.WaitOption+timeout.String(), nil, "")
+	output, code := deliverRequest(socketPath, budgeted, session, timeout)
+	if strings.HasPrefix(output, extmsg.ErrorReply("unknown option "+extmsg.WaitOption)) {
+		return deliverRequest(socketPath, buildRequest(extmsg.CommandWait, "", session.option(), nil, ""), session, timeout)
+	}
+	return output, code
 }
 
 // exitCodeForReply maps a reply line to the exit code an agent branches on.

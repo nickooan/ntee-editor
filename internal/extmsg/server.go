@@ -20,10 +20,19 @@ type Handler func(text string) string
 
 // Server accepts requests on a unix socket.
 type Server struct {
-	listener net.Listener
-	path     string
-	closed   atomic.Bool
+	listener        net.Listener
+	path            string
+	closed          atomic.Bool
+	connectionSlots chan struct{}
 }
+
+// maxConnections caps the requests being served at once — a wait holds its
+// connection until the user is done — so a misbehaving sender can't pile up
+// goroutines and file descriptors. A var so tests can lower it.
+var maxConnections = 128
+
+// busyReply answers a connection past maxConnections.
+var busyReply = ErrorReply("the editor is busy — try again shortly")
 
 // staleDialTimeout bounds the probe that tells a live socket from a leftover
 // file of a crashed instance.
@@ -58,7 +67,7 @@ func Listen(socketPath string, handler Handler) (*Server, error) {
 		listener.Close()
 		return nil, err
 	}
-	server := &Server{listener: listener, path: socketPath}
+	server := &Server{listener: listener, path: socketPath, connectionSlots: make(chan struct{}, maxConnections)}
 	go server.acceptLoop(handler)
 	return server, nil
 }
@@ -78,7 +87,17 @@ func (s *Server) acceptLoop(handler Handler) {
 			time.Sleep(50 * time.Millisecond) // transient (fd exhaustion): don't spin
 			continue
 		}
-		go serve(conn, handler)
+		select {
+		case s.connectionSlots <- struct{}{}:
+			go func() {
+				defer func() { <-s.connectionSlots }()
+				serve(conn, handler)
+			}()
+		default:
+			// Still read the request (bounded by the read deadline) so the
+			// sender sees the reply instead of a reset.
+			go serve(conn, func(string) string { return busyReply })
+		}
 	}
 }
 

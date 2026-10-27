@@ -52,33 +52,35 @@ func (m Model) reviewSidebarList() sidebarList {
 	if len(m.review.files) == 0 && m.review.session != "" {
 		return sidebarList{rows: []sidebarRow{sidebarHeaderRow("waiting for files…")}, selectedIndex: -1}
 	}
-	rows := make([]sidebarRow, len(m.review.entries))
-	for row, entry := range m.review.entries {
-		indent := strings.Repeat("  ", entry.Depth)
-		if entry.Type == "directory" {
-			label := strings.TrimRight(filetree.FormatFileTreeEntryLabel(entry, len([]rune(indent))+len([]rune(entry.Name))+2), " ")
-			if hidden := m.review.hiddenCount[entry.RelativePath]; hidden > 0 {
-				label += fmt.Sprintf("  %d", hidden)
-			}
-			rows[row] = sidebarRow{segments: []sidebarSegment{{text: label, style: dirStyle}}}
-			continue
+	return sidebarList{rowCount: len(m.review.entries), rowAt: m.reviewSidebarRow, selectedIndex: m.reviewSelectedRow()}
+}
+
+// reviewSidebarRow builds one row of the review tree; the list builds rows
+// lazily, so a large review formats only what is on screen.
+func (m Model) reviewSidebarRow(row int) sidebarRow {
+	entry := m.review.entries[row]
+	indent := strings.Repeat("  ", entry.Depth)
+	if entry.Type == "directory" {
+		label := strings.TrimRight(filetree.FormatFileTreeEntryLabel(entry, len([]rune(indent))+len([]rune(entry.Name))+2), " ")
+		if hidden := m.review.hiddenCount[entry.RelativePath]; hidden > 0 {
+			label += fmt.Sprintf("  %d", hidden)
 		}
-		file := m.review.files[m.review.fileByPath[entry.RelativePath]]
-		badge, color := reviewBadge(file.status)
-		fileRow := sidebarBadgeRow(indent, badge, 2, color, entry.Name, fileStyle)
-		if m.review.unseen[file.workspaceRel] {
-			// Next to the name, so a narrow pane cuts the counts first.
-			fileRow.segments = append(fileRow.segments, sidebarSegment{text: " •", style: reviewUnseenStyle})
-		}
-		if file.status == reviewModified || file.status == reviewAdded || file.status == reviewDeleted {
-			// Counts colored like the diff itself: additions green, deletions red.
-			fileRow.segments = append(fileRow.segments,
-				sidebarSegment{text: fmt.Sprintf("  +%d", file.document.adds), style: reviewHeaderAddStyle},
-				sidebarSegment{text: fmt.Sprintf(" −%d", file.document.dels), style: reviewHeaderDelStyle})
-		}
-		rows[row] = fileRow
+		return sidebarRow{segments: []sidebarSegment{{text: label, style: dirStyle}}}
 	}
-	return sidebarList{rows: rows, selectedIndex: m.reviewSelectedRow()}
+	file := m.review.files[m.review.fileByPath[entry.RelativePath]]
+	badge, color := reviewBadge(file.status)
+	fileRow := sidebarBadgeRow(indent, badge, 2, color, entry.Name, fileStyle)
+	if m.review.unseen[file.workspaceRel] {
+		// Next to the name, so a narrow pane cuts the counts first.
+		fileRow.segments = append(fileRow.segments, sidebarSegment{text: " •", style: reviewUnseenStyle})
+	}
+	if file.status == reviewModified || file.status == reviewAdded || file.status == reviewDeleted {
+		// Counts colored like the diff itself: additions green, deletions red.
+		fileRow.segments = append(fileRow.segments,
+			sidebarSegment{text: fmt.Sprintf("  +%d", file.document.adds), style: reviewHeaderAddStyle},
+			sidebarSegment{text: fmt.Sprintf(" −%d", file.document.dels), style: reviewHeaderDelStyle})
+	}
+	return fileRow
 }
 
 // activateReviewRow applies a click on a left-pane row: a directory folds or

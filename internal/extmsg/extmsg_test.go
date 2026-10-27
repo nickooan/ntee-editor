@@ -90,6 +90,11 @@ func TestParseSession(t *testing.T) {
 		{name: "end without id", text: "end\n", wantErr: "end needs --session"},
 		{name: "wait with a path", text: "wait --session=w\na.go\n", wantErr: "takes only"},
 		{name: "end with a note", text: "end --session=w\n---\nhi\n", wantErr: "takes only"},
+		{name: "wait with a budget", text: "wait --review-session=r --wait=10m\n", wantSession: "r", wantKind: SessionReview},
+		{name: "bad wait budget", text: "wait --session=w --wait=soon\n", wantErr: "bad --wait=soon"},
+		{name: "zero wait budget", text: "wait --session=w --wait=0s\n", wantErr: "bad --wait=0s"},
+		{name: "budget off wait", text: "end --session=w --wait=1m\n", wantErr: "--wait= goes with wait only"},
+		{name: "budget on open", text: "open --wait=1m\na.go\n", wantErr: "--wait= goes with wait only"},
 	}
 	for _, c := range cases {
 		got, err := Parse(c.text)
@@ -102,6 +107,12 @@ func TestParseSession(t *testing.T) {
 		if err != nil || got.Session != c.wantSession || got.Base() != c.wantBase || got.SessionKind != c.wantKind {
 			t.Errorf("%s: Parse = %+v, %v", c.name, got, err)
 		}
+	}
+	if got, _ := Parse("wait --session=w --wait=90s"); got.WaitBudget != 90*time.Second {
+		t.Fatalf("wait budget = %v", got.WaitBudget)
+	}
+	if got, _ := Parse("wait --session=w"); got.WaitBudget != 0 {
+		t.Fatalf("no budget given = %v", got.WaitBudget)
 	}
 	if !IsEndedReply(EndedReply("closed by\nthe user")) || EndedReply("x y") != "ended x y" || IsEndedReply("ok ended") || IsErrorReply(EndedReply("x")) {
 		t.Fatal("ended replies")
@@ -290,5 +301,59 @@ func TestSendReadsAnEarlyReply(t *testing.T) {
 	reply, err := Send(socketPath, strings.Repeat("x", 8<<20))
 	if err != nil || reply != "error message too large" {
 		t.Fatalf("reply = %q, %v", reply, err)
+	}
+}
+
+func TestServerRefusesPastTheConnectionCap(t *testing.T) {
+	previous := maxConnections
+	maxConnections = 2
+	t.Cleanup(func() { maxConnections = previous })
+
+	socketPath := filepath.Join(shortSocketDir(t), "ntee.sock")
+	entered, release := make(chan struct{}), make(chan struct{})
+	server, err := Listen(socketPath, func(string) string {
+		entered <- struct{}{}
+		<-release
+		return OkReply("served")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+
+	replies := make(chan string, 2)
+	for range 2 {
+		go func() {
+			reply, _ := Send(socketPath, "open\na.go\n")
+			replies <- reply
+		}()
+	}
+	<-entered
+	<-entered
+	if reply, err := Send(socketPath, "open\nb.go\n"); reply != busyReply {
+		t.Fatalf("past the cap: reply = %q, %v", reply, err)
+	}
+	close(release)
+	for range 2 {
+		if reply := <-replies; reply != "ok served" {
+			t.Fatalf("held request reply = %q", reply)
+		}
+	}
+	// The slots free up once the held requests are answered (just after the
+	// reply is written, so allow a moment).
+	go func() {
+		for range entered {
+		}
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		reply, _ := Send(socketPath, "open\nc.go\n")
+		if reply == "ok served" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after release: reply = %q", reply)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

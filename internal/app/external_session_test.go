@@ -31,7 +31,7 @@ func sessionRecord(command, session, path, note string) store.ExternalRecord {
 // waits on.
 func sendSession(m Model, record store.ExternalRecord) (Model, chan string) {
 	reply := make(chan string, 1)
-	m, cmd := deliver(m, externalMessageMsg{record: record, reply: reply})
+	m, cmd := deliver(m, externalMessageMsg{record: record, sessionKind: extmsg.SessionNote, reply: reply})
 	return settleExternal(m, cmd), reply
 }
 
@@ -294,12 +294,12 @@ func TestReceiverWaitsForASessionToEnd(t *testing.T) {
 	if records, _ := history.LoadExternal(); len(records) != 1 || records[0].Session != "w" {
 		t.Fatalf("only the step is recorded, with its session: %+v", records)
 	}
-	if msg.diffSession {
+	if msg.sessionKind != extmsg.SessionNote {
 		t.Fatal("--session= is a note session")
 	}
 
 	go func() { replies <- receiver.Handle("wait --diff-session=d\n") }()
-	if msg := <-delivered; !msg.diffSession || msg.record.Session != "d" {
+	if msg := <-delivered; msg.sessionKind != extmsg.SessionDiff || msg.record.Session != "d" {
 		t.Fatalf("--diff-session= reaches the editor as a diff session: %+v", msg)
 	}
 	if reply := <-replies; !strings.Contains(reply, "--msg-diff-session d wait") {
@@ -311,7 +311,7 @@ func TestReceiverWaitsForASessionToEnd(t *testing.T) {
 // returns the channel its sender waits on.
 func sendDiffSession(m Model, record store.ExternalRecord) (Model, chan string) {
 	reply := make(chan string, 1)
-	m, cmd := deliver(m, externalMessageMsg{record: record, diffSession: true, reply: reply})
+	m, cmd := deliver(m, externalMessageMsg{record: record, sessionKind: extmsg.SessionDiff, reply: reply})
 	return settleExternal(m, cmd), reply
 }
 
@@ -360,7 +360,7 @@ func startedDiffSession(t *testing.T) Model {
 	}
 	m = queueDiffStep(t, m, "walk1", "apps/web/same.go#L3", "step two")
 	m = keySettled(m, keyPress(tea.KeyEnter)) // Start session
-	if !m.session.started || !m.session.diff || m.mode != modeDiff || m.openRel != "apps/web/main.go" || !m.sessionStepVisible() {
+	if !m.session.started || m.session.kind != extmsg.SessionDiff || m.mode != modeDiff || m.openRel != "apps/web/main.go" || !m.sessionStepVisible() {
 		t.Fatalf("started: mode=%v open=%q visible=%v err=%q session=%+v", m.mode, m.openRel, m.sessionStepVisible(), m.errText, m.session)
 	}
 	return m

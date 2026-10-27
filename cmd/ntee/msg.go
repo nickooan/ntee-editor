@@ -94,7 +94,7 @@ Guided sessions — walk the user through code, one note at a time:
               ended …            exit 3  the user closed or declined it
               ok waiting …       exit 4  not over yet: run wait again
 
-  Waiting for the user (both session kinds):
+  Waiting for the user (every session kind):
       The user reads at their own pace — a tour can take many minutes. To
       learn how it went, run wait, but don't block on it: start it as a
       background task (your tool's background mode, or "… wait > file &")
@@ -130,10 +130,49 @@ Diff sessions — walk the user through changes, one note at a time:
       (the diff stays open; Esc again leaves it). A file outside any git
       repo, or a bad revision, shows the note on the plain file instead.
       Replies and exit codes are those of a guided session.
-      The editor runs one session at a time: while one is running or waiting
-      to start, a step of another id — or of the same id as the other kind
-      of session — is refused with an error.
       On the wire: "open --diff-session=<id> [<rev>]".
+
+Review sessions — a live review the user follows while you write code:
+
+  ntee --msg --msg-review-session <id> review <file>
+  ntee --msg --msg-review-session <id> --msg-note "<why>" review <file>[#L<line>]
+  ntee --msg --msg-review-session <id> --msg-base <rev> review <file>   # first file only
+  ntee --msg --msg-review-session <id> end
+  ntee --msg --msg-review-session <id> wait
+      Use it while you implement: each time you change a file, forward it
+      here — with a note explaining the change, or without — instead of
+      printing the diff in your own UI. The user reviews it in ntee as you
+      go: the review page keeps growing, one file per send, each with its
+      git diff (against HEAD, or the first send's --msg-base) and your note
+      in a box on its #L<line>, or on the file's first change when you name
+      no line. Send a file again after changing it again: its diff refreshes
+      and the new note replaces the old one.
+      The first send asks the user to start the session; files sent before
+      they answer queue. The view follows each new file until the user moves
+      to another one; after that new files are marked • for them to visit.
+      The user quits with Esc (they confirm first); you are then told to
+      stop. Send end when you are done changing files — the review stays
+      open for the user. Nothing goes to the editor's history until the
+      session is over; then the whole review is saved as one entry, notes
+      included, that the user can replay.
+      What each command prints:
+        review  ok file N queued      exit 0  before the user started it
+                ok file N added …     exit 0  keep sending files
+                ok file … refreshed   exit 0  a resent file
+                ended …               exit 3  the user quit (or declined)
+                                              the review: stop sending
+                error …               exit 1  bad path, another session
+                                              running, a different --msg-base, …
+        end     ok session … complete — the user is reviewing N files
+        wait    as above: ok finished … (exit 0) once the user quits after
+                your end, ended … (exit 3) if they quit before it
+      On the wire: "review --review-session=<id> [<rev>]", one path, then
+      the optional note after a "---" line.
+
+  The editor runs one session at a time, of any kind: while one is running
+  or waiting to start, a request of another id — or of the same id as
+  another kind of session — is refused with an error. While a review
+  session is open, plain open/review requests are refused too.
 
 A base revision (a commit hash, tag, branch, HEAD~2, …) is always compared
 with the current files on disk, uncommitted changes included. It travels on
@@ -155,6 +194,7 @@ The --msg-* flags go before the command:
   ntee --msg --msg-note "…" open <file>#L<line>
   ntee --msg --msg-session tour1 --msg-note "…" open <file>#L<line>
   ntee --msg --msg-diff-session tour2 --msg-base main --msg-note "…" open <file>#L<line>
+  ntee --msg --msg-review-session impl1 --msg-note "…" review <file>
 
 External messages are off by default: the user turns them on in ntee under
 Ctrl+T › external. The editor keeps the latest messages (10 by default) and
@@ -163,8 +203,8 @@ can replay them from there.
 Reply (one line on stdout):
   ok <detail>       accepted — "opened …", "reviewing N files", or
                     "waiting for the user to confirm"; for a session
-                    "step N queued", "finished …", or from wait
-                    "waiting …" (exit 4)
+                    "step N queued", "file N added …", "finished …", or
+                    from wait "waiting …" (exit 4)
   ended <reason>    a session is over — stop sending steps; the exit code
                     is 3
   error <reason>    refused (disabled, path outside the project, …); the
@@ -191,6 +231,10 @@ AGENTS.md:
   shows the diff with the note on its line. To hear when the user is done,
   run ` + "`ntee --msg --msg-session <id> --msg-wait 1h wait`" + ` as a background task and
   hold it (exit 0 finished, 3 closed early, 4 still going — wait again).
+  While implementing, forward each file you change to a live review instead
+  of showing diffs yourself: ` + "`ntee --msg --msg-review-session <id> [--msg-note \"<why>\"] review <file>`" + `
+  (one file per send; exit 3 means the user quit the review — stop sending),
+  then ` + "`ntee --msg --msg-review-session <id> end`" + ` when you are done.
   Paths are relative to the current directory. The command prints ` + "`ok …`" + ` on
   success; ` + "`error … disabled`" + ` means the user has not enabled external messages
   (Ctrl+T → external) — mention it once and carry on. Run ` + "`ntee --msg help`" + `
@@ -199,49 +243,61 @@ AGENTS.md:
 
 // msgOptions are the --msg-* flags.
 type msgOptions struct {
-	root        string        // --msg-root: the editor's folder
-	base        string        // --msg-base: the revision to compare against
-	note        string        // --msg-note: the note text, "-" = stdin
-	session     string        // --msg-session: a guided note session's id
-	diffSession string        // --msg-diff-session: a guided diff session's id
-	wait        time.Duration // --msg-wait: how long a session request waits for the user
+	root          string        // --msg-root: the editor's folder
+	base          string        // --msg-base: the revision to compare against
+	note          string        // --msg-note: the note text, "-" = stdin
+	session       string        // --msg-session: a guided note session's id
+	diffSession   string        // --msg-diff-session: a guided diff session's id
+	reviewSession string        // --msg-review-session: a live review session's id
+	wait          time.Duration // --msg-wait: how long a session request waits for the user
 }
 
-// msgSession is the guided session a request belongs to: its id, and whether
-// it is a diff session (every step in the diff view) or a note session.
+// msgSession is the session a request belongs to: its id and kind.
 type msgSession struct {
 	id   string
-	diff bool
+	kind extmsg.SessionKind
 }
 
-// sessionFromOptions picks the session flag; both at once is refused.
+// sessionFromOptions picks the session flag; more than one is refused.
 func sessionFromOptions(options msgOptions) (msgSession, error) {
-	if options.session != "" && options.diffSession != "" {
-		return msgSession{}, errors.New("use either --msg-session or --msg-diff-session, not both")
+	var picked []msgSession
+	for _, candidate := range []msgSession{
+		{id: options.session, kind: extmsg.SessionNote},
+		{id: options.diffSession, kind: extmsg.SessionDiff},
+		{id: options.reviewSession, kind: extmsg.SessionReview},
+	} {
+		if candidate.id != "" {
+			picked = append(picked, candidate)
+		}
 	}
-	if options.diffSession != "" {
-		return msgSession{id: options.diffSession, diff: true}, nil
+	switch len(picked) {
+	case 0:
+		return msgSession{}, nil
+	case 1:
+		return picked[0], nil
 	}
-	return msgSession{id: options.session}, nil
+	return msgSession{}, errors.New("use one of --msg-session, --msg-diff-session or --msg-review-session")
 }
 
-// flag is the CLI flag naming this session.
-func (session msgSession) flag() string {
-	if session.diff {
+// sessionFlag is the CLI flag naming a session of kind.
+func sessionFlag(kind extmsg.SessionKind) string {
+	switch kind {
+	case extmsg.SessionDiff:
 		return "--msg-diff-session"
+	case extmsg.SessionReview:
+		return "--msg-review-session"
 	}
 	return "--msg-session"
 }
 
+func (session msgSession) flag() string { return sessionFlag(session.kind) }
+
 // option is the session's first-line wire option, "" for none.
 func (session msgSession) option() string {
-	switch {
-	case session.id == "":
+	if session.id == "" {
 		return ""
-	case session.diff:
-		return extmsg.DiffSessionOption + session.id
 	}
-	return extmsg.SessionOption + session.id
+	return session.kind.Option() + session.id
 }
 
 // Exit codes beyond 0 (ok) and 1 (error) for guided sessions.
@@ -274,7 +330,7 @@ func sendMessage(args []string, options msgOptions) int {
 			return 1
 		}
 	}
-	if err := checkLineNote(command, paths, note); err != nil {
+	if err := checkLineNote(command, paths, note, session); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
@@ -342,23 +398,32 @@ func exitCodeForReply(reply string) int {
 }
 
 // checkSessionCommand checks the session flag against the command: end and
-// wait act on a session and take no paths; review takes none; a note
-// session's open takes no base revision.
+// wait act on a session and take no paths; a review session's review sends
+// one file; note and diff sessions step through opens; a note session's
+// open takes no base revision.
 func checkSessionCommand(command string, paths []string, session msgSession, base string) error {
 	switch command {
 	case extmsg.CommandEnd, extmsg.CommandWait:
 		if session.id == "" {
-			return fmt.Errorf("%s needs --msg-session <id> or --msg-diff-session <id>", command)
+			return fmt.Errorf("%s needs --msg-session, --msg-diff-session or --msg-review-session <id>", command)
 		}
 		if len(paths) > 0 {
 			return fmt.Errorf("%s takes no paths: ntee --msg %s %s %s", command, session.flag(), session.id, command)
 		}
 	case extmsg.CommandReview:
-		if session.id != "" {
-			return errors.New(session.flag() + " goes with open (each step is an open with a note)")
+		switch {
+		case session.id == "":
+		case session.kind != extmsg.SessionReview:
+			return errors.New(session.flag() + " goes with open (each step is an open with a note) — a live review uses --msg-review-session")
+		case len(paths) != 1:
+			return fmt.Errorf("a review session sends one file per review, got %d", len(paths))
 		}
 	case extmsg.CommandOpen:
-		if session.id != "" && !session.diff && base != "" {
+		switch {
+		case session.id == "":
+		case session.kind == extmsg.SessionReview:
+			return errors.New("--msg-review-session goes with review: ntee --msg --msg-review-session " + session.id + " review <file>")
+		case session.kind == extmsg.SessionNote && base != "":
 			return errors.New("--msg-session steps are notes only — to walk diffs use --msg-diff-session <id> [--msg-base <rev>]")
 		}
 	}
@@ -387,13 +452,17 @@ func buildRequest(command, base, sessionOption string, paths []string, note stri
 }
 
 // checkLineNote refuses a note the editor would refuse, before the request
-// is sent: only an open takes one, and only with a line to sit next to.
-func checkLineNote(command string, paths []string, note string) error {
+// is sent: an open takes one with a line to sit next to; a review session's
+// file takes one with or without a line (none = its first change).
+func checkLineNote(command string, paths []string, note string, session msgSession) error {
 	if strings.TrimSpace(note) == "" {
 		return nil
 	}
+	if command == extmsg.CommandReview && session.kind == extmsg.SessionReview {
+		return nil
+	}
 	if command != extmsg.CommandOpen {
-		return errors.New("--msg-note goes with open <file>#L<n>")
+		return errors.New("--msg-note goes with open <file>#L<n>, or with a --msg-review-session review")
 	}
 	for _, path := range paths {
 		if _, line := app.SplitLineAnchor(path); line == 0 {

@@ -60,25 +60,33 @@ func TestParse(t *testing.T) {
 func TestParseSession(t *testing.T) {
 	cases := []struct {
 		name, text, wantSession, wantBase, wantErr string
-		wantDiff                                   bool
+		wantKind                                   SessionKind
 	}{
-		{name: "open step", text: "open --session=walk-1.a\na.go#L3\n---\nwhy\n", wantSession: "walk-1.a"},
+		{name: "open step", text: "open --session=walk-1.a\na.go#L3\n---\nwhy\n", wantSession: "walk-1.a", wantKind: SessionNote},
 		{name: "note session refuses a base", text: "open HEAD~1 --session=w\na.go#L3\n---\nwhy\n", wantErr: "a note session takes no base revision"},
-		{name: "diff step", text: "open --diff-session=w\na.go#L3\n---\nwhy\n", wantSession: "w", wantDiff: true},
-		{name: "diff step with a base", text: "open HEAD~1 --diff-session=w\na.go#L3\n---\nwhy\n", wantSession: "w", wantBase: "HEAD~1", wantDiff: true},
+		{name: "diff step", text: "open --diff-session=w\na.go#L3\n---\nwhy\n", wantSession: "w", wantKind: SessionDiff},
+		{name: "diff step with a base", text: "open HEAD~1 --diff-session=w\na.go#L3\n---\nwhy\n", wantSession: "w", wantBase: "HEAD~1", wantKind: SessionDiff},
 		{name: "both options", text: "open --session=w --diff-session=w\na.go#L3\n---\nwhy\n", wantErr: "one session option only"},
 		{name: "bad diff id", text: "open --diff-session=a/b\na.go#L3\n---\nwhy\n", wantErr: "bad session id"},
 		{name: "diff step without a note", text: "open --diff-session=w\na.go#L3\n", wantErr: "needs a note"},
-		{name: "review refuses a diff session", text: "review --diff-session=w\na.go\n", wantErr: "review takes no session"},
-		{name: "end a diff session", text: "end --diff-session=w\n", wantSession: "w", wantDiff: true},
-		{name: "wait a diff session", text: "wait --diff-session=w\n", wantSession: "w", wantDiff: true},
+		{name: "review refuses a diff session", text: "review --diff-session=w\na.go\n", wantErr: "review takes no --diff-session="},
+		{name: "end a diff session", text: "end --diff-session=w\n", wantSession: "w", wantKind: SessionDiff},
+		{name: "wait a diff session", text: "wait --diff-session=w\n", wantSession: "w", wantKind: SessionDiff},
 		{name: "bad id", text: "open --session=a/b\na.go#L3\n---\nwhy\n", wantErr: "bad session id"},
 		{name: "empty id", text: "open --session=\na.go#L3\n---\nwhy\n", wantErr: "bad session id"},
 		{name: "unknown option", text: "open --force\na.go\n", wantErr: "unknown option --force"},
 		{name: "step without a note", text: "open --session=w\na.go#L3\n", wantErr: "needs a note"},
-		{name: "review refuses", text: "review --session=w\na.go\n", wantErr: "review takes no session"},
-		{name: "end", text: "end --session=w\n", wantSession: "w"},
-		{name: "wait", text: "WAIT --session=w", wantSession: "w"},
+		{name: "review refuses", text: "review --session=w\na.go\n", wantErr: "review takes no --session="},
+		{name: "end", text: "end --session=w\n", wantSession: "w", wantKind: SessionNote},
+		{name: "wait", text: "WAIT --session=w", wantSession: "w", wantKind: SessionNote},
+		{name: "review session", text: "review --review-session=r\na.go\n", wantSession: "r", wantKind: SessionReview},
+		{name: "review session with a base", text: "review main --review-session=r\na.go\n", wantSession: "r", wantBase: "main", wantKind: SessionReview},
+		{name: "review session note, anchored", text: "review --review-session=r\na.go#L3\n---\nwhy\n", wantSession: "r", wantKind: SessionReview},
+		{name: "review session note, no anchor", text: "review --review-session=r\na.go\n---\nwhy\n", wantSession: "r", wantKind: SessionReview},
+		{name: "review session, two files", text: "review --review-session=r\na.go\nb.go\n", wantErr: "one file per review, got 2"},
+		{name: "open refuses a review session", text: "open --review-session=r\na.go#L3\n---\nwhy\n", wantErr: "open takes no --review-session="},
+		{name: "end a review session", text: "end --review-session=r\n", wantSession: "r", wantKind: SessionReview},
+		{name: "review and diff options", text: "review --review-session=r --diff-session=r\na.go\n", wantErr: "one session option only"},
 		{name: "end without id", text: "end\n", wantErr: "end needs --session"},
 		{name: "wait with a path", text: "wait --session=w\na.go\n", wantErr: "takes only"},
 		{name: "end with a note", text: "end --session=w\n---\nhi\n", wantErr: "takes only"},
@@ -91,7 +99,7 @@ func TestParseSession(t *testing.T) {
 			}
 			continue
 		}
-		if err != nil || got.Session != c.wantSession || got.Base() != c.wantBase || got.DiffSession != c.wantDiff {
+		if err != nil || got.Session != c.wantSession || got.Base() != c.wantBase || got.SessionKind != c.wantKind {
 			t.Errorf("%s: Parse = %+v, %v", c.name, got, err)
 		}
 	}

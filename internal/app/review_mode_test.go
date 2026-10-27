@@ -42,6 +42,15 @@ func gitReviewWorkspace(t *testing.T) (Model, string) {
 	return rebuildCorpusNow(m), root
 }
 
+// reviewRequestsFor is a plain review's request list: paths without notes.
+func reviewRequestsFor(paths ...string) []reviewRequest {
+	requests := make([]reviewRequest, len(paths))
+	for i, path := range paths {
+		requests[i] = reviewRequest{workspaceRel: path}
+	}
+	return requests
+}
+
 // settleExternal runs cmd and delivers every review/external/diff message it
 // leads to, dropping the rest (corpus walks, git polls) so the chain stays
 // finite.
@@ -51,7 +60,7 @@ func settleExternal(m Model, cmd tea.Cmd) Model {
 		msg := queue[0]
 		queue = queue[1:]
 		switch msg.(type) {
-		case reviewPreparedMsg, reviewLoadedMsg, externalStatusSavedMsg, externalHistoryLoadedMsg, externalSettingsMsg, diffReadyMsg:
+		case reviewPreparedMsg, reviewLoadedMsg, reviewFileResolvedMsg, externalStatusSavedMsg, externalHistoryLoadedMsg, externalSettingsMsg, diffReadyMsg:
 			var next tea.Cmd
 			m, next = deliver(m, msg)
 			queue = append(queue, execCmds(next)...)
@@ -62,7 +71,7 @@ func settleExternal(m Model, cmd tea.Cmd) Model {
 
 func reviewOf(t *testing.T, m Model, paths ...string) Model {
 	t.Helper()
-	m, cmd := m.enterReview(paths, "")
+	m, cmd := m.enterReview(reviewRequestsFor(paths...), "")
 	if m.mode != modeReview {
 		t.Fatalf("review did not open: mode=%v err=%q", m.mode, m.errText)
 	}
@@ -90,7 +99,7 @@ func TestReviewAcrossReposShowsModifiedAddedDeleted(t *testing.T) {
 	for i, w := range want {
 		file := m.review.files[i]
 		if file.workspaceRel != w.rel || file.status != w.status || file.repoLabel != w.repo {
-			t.Fatalf("file %d = %s status=%v repo=%q note=%q", i, file.workspaceRel, file.status, file.repoLabel, file.note)
+			t.Fatalf("file %d = %s status=%v repo=%q note=%q", i, file.workspaceRel, file.status, file.repoLabel, file.problem)
 		}
 	}
 	for _, row := range m.review.files[1].document.rows {
@@ -214,7 +223,7 @@ func TestReviewScopedFinderAndGrep(t *testing.T) {
 
 func TestReviewDropsStaleLoads(t *testing.T) {
 	m, _ := gitReviewWorkspace(t)
-	m, cmd := m.enterReview([]string{"apps/web/main.go"}, "")
+	m, cmd := m.enterReview(reviewRequestsFor("apps/web/main.go"), "")
 	prepared := execCmds(cmd)
 	m = key(m, keyPress(tea.KeyEscape))
 	for _, msg := range prepared {
@@ -229,8 +238,8 @@ func TestReviewFileOutsideAnyRepoIsAllAdded(t *testing.T) {
 	m, _ := newTestModel(t, nil)
 	m = reviewOf(t, m, "lib/util.ts")
 	file := m.review.files[0]
-	if file.status != reviewAdded || file.repoRoot != "" || file.note == "" {
-		t.Fatalf("no-repo file: status=%v repo=%q note=%q", file.status, file.repoRoot, file.note)
+	if file.status != reviewAdded || file.repoRoot != "" || file.problem == "" {
+		t.Fatalf("no-repo file: status=%v repo=%q problem=%q", file.status, file.repoRoot, file.problem)
 	}
 }
 

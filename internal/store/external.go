@@ -135,20 +135,28 @@ type ExternalRecord struct {
 	Note       string         `json:"note"`     // what became of the request (written with the status)
 	LineNote   string         `json:"lineNote"` // open: the sender's note shown next to the line, "" = none
 	Session    string         `json:"session"`  // the guided session the request is a step of, "" = none
+	// PathNotes are per-file notes, one per Paths entry ("" = none): a review
+	// session's files each carry the agent's note.
+	PathNotes []string `json:"pathNotes"`
 }
 
 // ExternalDefaultBase is the stored base of a request that named no revision.
 const ExternalDefaultBase = "HEAD"
 
-// withDefaultBase fills in the base of a record saved before the field
-// existed: a review's base was its single argument, anything else HEAD.
-func (record ExternalRecord) withDefaultBase() ExternalRecord {
-	if record.Base != "" {
-		return record
+// withDefaults fills in fields a record saved before they existed lacks: the
+// base (a review's was its single argument, anything else HEAD), and one
+// empty note per path.
+func (record ExternalRecord) withDefaults() ExternalRecord {
+	if record.Base == "" {
+		record.Base = ExternalDefaultBase
+		if record.Command == "review" && len(record.Args) == 1 {
+			record.Base = record.Args[0]
+		}
 	}
-	record.Base = ExternalDefaultBase
-	if record.Command == "review" && len(record.Args) == 1 {
-		record.Base = record.Args[0]
+	if len(record.PathNotes) < len(record.Paths) {
+		notes := make([]string, len(record.Paths))
+		copy(notes, record.PathNotes)
+		record.PathNotes = notes
 	}
 	return record
 }
@@ -225,7 +233,7 @@ func (h *ExternalHistory) withDB(limit int, run func(db *nteedb.DB) error) error
 }
 
 func (h *ExternalHistory) AppendExternal(record ExternalRecord, limit int) error {
-	data, err := json.Marshal(record.withDefaultBase())
+	data, err := json.Marshal(record.withDefaults())
 	if err != nil {
 		return err
 	}
@@ -248,7 +256,7 @@ func (h *ExternalHistory) LoadExternal() ([]ExternalRecord, error) {
 		for index := range keys {
 			var record ExternalRecord
 			if found[index] && json.Unmarshal(values[index], &record) == nil {
-				records = append(records, record.withDefaultBase())
+				records = append(records, record.withDefaults())
 			}
 		}
 		return nil
@@ -268,7 +276,7 @@ func (h *ExternalHistory) UpdateExternalStatus(key string, status ExternalStatus
 			return err
 		}
 		record.Status, record.Note = status, note
-		updated, err := json.Marshal(record.withDefaultBase())
+		updated, err := json.Marshal(record.withDefaults())
 		if err != nil {
 			return err
 		}
@@ -308,7 +316,7 @@ func NewMemoryExternalHistory() *MemoryExternalHistory {
 func (m *MemoryExternalHistory) AppendExternal(record ExternalRecord, limit int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.records[record.Key] = record.withDefaultBase()
+	m.records[record.Key] = record.withDefaults()
 	m.trimLocked(limit)
 	return nil
 }
@@ -318,7 +326,7 @@ func (m *MemoryExternalHistory) LoadExternal() ([]ExternalRecord, error) {
 	defer m.mu.Unlock()
 	records := make([]ExternalRecord, 0, len(m.records))
 	for _, record := range m.records {
-		records = append(records, record.withDefaultBase())
+		records = append(records, record.withDefaults())
 	}
 	sortExternalNewestFirst(records)
 	return records, nil

@@ -28,19 +28,20 @@ type externalState struct {
 // pendingExternal is a resolved request: what it targets, and for an open,
 // which repo the editor must be rooted at to reach the file.
 type pendingExternal struct {
-	record      store.ExternalRecord
-	replay      bool
-	rootRel     string // open: the file relative to the target root
-	line        int    // open: 1-based line, 0 = remembered position
-	targetRepo  string // open: the activeRepo to switch to ("" = the workspace)
-	reviewPaths []string
-	base        string // the revision to compare with, "" = HEAD (diffBaseOf)
-	lineNote    string // open: the sender's note for the line, "" = none
-	// session is the guided session this open is a step of ("" = none; a
-	// replay is never one). diffSession: a diff session's step, shown in the
-	// diff against base even when base is HEAD.
+	record     store.ExternalRecord
+	replay     bool
+	rootRel    string // open: the file relative to the target root
+	line       int    // open: 1-based line, 0 = remembered position
+	targetRepo string // open: the activeRepo to switch to ("" = the workspace)
+	reviews    []reviewRequest
+	base       string // the revision to compare with, "" = HEAD (diffBaseOf)
+	lineNote   string // open: the sender's note for the line, "" = none
+	// session is the session this request belongs to ("" = none; a replay is
+	// never one), sessionKind its kind: a diff session's step shows in the
+	// diff against base even when base is HEAD; a review session's review
+	// adds its one file to the live review.
 	session     string
-	diffSession bool
+	sessionKind extmsg.SessionKind
 }
 
 // WithExternal attaches the external-message stores and the socket's status
@@ -64,6 +65,12 @@ type externalStatusSavedMsg struct{ err error }
 func (m Model) handleExternalMessage(msg externalMessageMsg) (tea.Model, tea.Cmd) {
 	if msg.record.Session != "" && !msg.replay {
 		return m.handleSessionMessage(msg)
+	}
+	if m.reviewSessionRunning() {
+		// Carrying it out would leave the review the user is in the middle of.
+		problem := "a review session (" + m.session.id + ") is running — the user is reviewing its files"
+		sendExternalReply(msg.reply, extmsg.ErrorReply(problem))
+		return m, nil
 	}
 	pending, problem := m.resolveExternal(msg.record)
 	pending.replay = msg.replay
@@ -142,9 +149,16 @@ func (m Model) resolveExternal(record store.ExternalRecord) (pendingExternal, st
 			pending.rootRel = strings.TrimPrefix(workspaceRel, pending.targetRepo+"/")
 		}
 	case extmsg.CommandReview:
-		for _, path := range record.Paths {
-			workspaceRel, _ := splitLineAnchor(path)
-			pending.reviewPaths = append(pending.reviewPaths, workspaceRel)
+		for index, path := range record.Paths {
+			workspaceRel, line := splitLineAnchor(path)
+			note := ""
+			if index < len(record.PathNotes) {
+				note = record.PathNotes[index]
+			}
+			if note == "" && len(record.Paths) == 1 {
+				note = record.LineNote // a review session's file carries its note there
+			}
+			pending.reviews = append(pending.reviews, reviewRequest{workspaceRel: workspaceRel, line: line, note: note})
 		}
 	default:
 		return pending, "unknown command " + record.Command
@@ -176,7 +190,7 @@ func (m Model) deepestRepoFor(workspaceRel string) string {
 // carryOutExternal performs a resolved request from wherever the user is.
 func (m Model) carryOutExternal(pending pendingExternal) (Model, tea.Cmd) {
 	if pending.record.Command == extmsg.CommandReview {
-		m, cmd := m.enterReview(pending.reviewPaths, pending.base)
+		m, cmd := m.enterReview(pending.reviews, pending.base)
 		if m.mode != modeReview {
 			return m, tea.Batch(cmd, m.saveExternalStatusCmd(pending, store.ExternalFailed, m.errText))
 		}
@@ -205,7 +219,7 @@ func (m Model) carryOutExternal(pending pendingExternal) (Model, tea.Cmd) {
 		m.lineNote.session = pending.session
 	}
 	note := ""
-	if pending.base != "" || pending.diffSession {
+	if pending.base != "" || pending.sessionKind == extmsg.SessionDiff {
 		// A named revision (or a diff session's step) lands in the diff of the
 		// file against it. A refusal (no repo, bad revision) leaves the file
 		// open with the reason shown.
@@ -268,19 +282,19 @@ func (m Model) externalChoice(pending pendingExternal) choiceOverlay {
 	choice := choiceOverlay{kind: choiceExternalRequest, title: "External request · " + pending.record.Command}
 	if pending.record.Command == extmsg.CommandReview {
 		repos := map[string]bool{}
-		for _, path := range pending.reviewPaths {
-			repos[m.deepestRepoFor(path)] = true
+		for _, review := range pending.reviews {
+			repos[m.deepestRepoFor(review.workspaceRel)] = true
 		}
-		summary := fmt.Sprintf("%d files", len(pending.reviewPaths))
+		summary := fmt.Sprintf("%d files", len(pending.reviews))
 		if len(repos) > 1 {
 			summary += fmt.Sprintf(" across %d repos", len(repos))
 		}
 		choice.body = append(choice.body, overlayLine{text: summary + " · against " + cmp.Or(pending.base, store.ExternalDefaultBase), style: overlayLineStrong})
 		const shown = 5
-		for _, path := range pending.reviewPaths[:min(shown, len(pending.reviewPaths))] {
-			choice.body = append(choice.body, overlayLine{text: "  " + path})
+		for _, review := range pending.reviews[:min(shown, len(pending.reviews))] {
+			choice.body = append(choice.body, overlayLine{text: "  " + review.workspaceRel})
 		}
-		if extra := len(pending.reviewPaths) - shown; extra > 0 {
+		if extra := len(pending.reviews) - shown; extra > 0 {
 			choice.body = append(choice.body, overlayLine{text: fmt.Sprintf("  +%d more", extra), style: overlayLineDim})
 		}
 		choice.choices = []string{"Review", "Ignore"}

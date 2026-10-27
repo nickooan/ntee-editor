@@ -105,23 +105,27 @@ func TestBuildRequestPutsTheNoteAfterTheSeparator(t *testing.T) {
 }
 
 func TestCheckLineNote(t *testing.T) {
+	review := msgSession{id: "r1", kind: extmsg.SessionReview}
 	cases := []struct {
 		command string
 		paths   []string
 		note    string
+		session msgSession
 		wantErr string
 	}{
-		{"open", []string{"/p/a.go"}, "", ""},
-		{"open", []string{"/p/a.go#L3"}, "why", ""},
-		{"open", []string{"/p/a.go#L3-L9"}, "why", ""},
-		{"open", []string{"/p/a.go"}, "why", "a note needs a line"},
-		{"open", []string{"/p/a.go#L"}, "why", "a note needs a line"},
-		{"review", []string{"/p/a.go#L3"}, "why", "goes with open"},
+		{"open", []string{"/p/a.go"}, "", msgSession{}, ""},
+		{"open", []string{"/p/a.go#L3"}, "why", msgSession{}, ""},
+		{"open", []string{"/p/a.go#L3-L9"}, "why", msgSession{}, ""},
+		{"open", []string{"/p/a.go"}, "why", msgSession{}, "a note needs a line"},
+		{"open", []string{"/p/a.go#L"}, "why", msgSession{}, "a note needs a line"},
+		{"review", []string{"/p/a.go#L3"}, "why", msgSession{}, "goes with open"},
+		{"review", []string{"/p/a.go#L3"}, "why", review, ""},
+		{"review", []string{"/p/a.go"}, "why", review, ""},
 	}
 	for _, c := range cases {
-		err := checkLineNote(c.command, c.paths, c.note)
+		err := checkLineNote(c.command, c.paths, c.note, c.session)
 		if (c.wantErr == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), c.wantErr)) {
-			t.Errorf("checkLineNote(%q, %v, %q) = %v, want %q", c.command, c.paths, c.note, err, c.wantErr)
+			t.Errorf("checkLineNote(%q, %v, %q, %+v) = %v, want %q", c.command, c.paths, c.note, c.session, err, c.wantErr)
 		}
 	}
 }
@@ -144,7 +148,7 @@ func TestReadNoteFromStdinKeepsTheText(t *testing.T) {
 }
 
 func TestBuildRequestCarriesTheSession(t *testing.T) {
-	note, diff := msgSession{id: "walk1"}, msgSession{id: "walk1", diff: true}
+	note, diff := msgSession{id: "walk1", kind: extmsg.SessionNote}, msgSession{id: "walk1", kind: extmsg.SessionDiff}
 	if got, want := buildRequest("open", "", note.option(), []string{"/p/a.go#L3"}, "why"), "open --session=walk1\n/p/a.go#L3\n---\nwhy\n"; got != want {
 		t.Fatalf("note step = %q, want %q", got, want)
 	}
@@ -163,26 +167,50 @@ func TestBuildRequestCarriesTheSession(t *testing.T) {
 		{buildRequest("open", "v1", diff.option(), []string{"/p/a.go#L3"}, "why"), true},
 		{buildRequest("end", "", diff.option(), nil, ""), true},
 	} {
-		if message, err := extmsg.Parse(c.request); err != nil || message.Session != "walk1" || message.DiffSession != c.wantDiff {
+		wantKind := extmsg.SessionNote
+		if c.wantDiff {
+			wantKind = extmsg.SessionDiff
+		}
+		if message, err := extmsg.Parse(c.request); err != nil || message.Session != "walk1" || message.SessionKind != wantKind {
 			t.Fatalf("the editor reads %q as %+v, %v", c.request, message, err)
 		}
 	}
 }
 
+func TestBuildRequestForAReviewSession(t *testing.T) {
+	review := msgSession{id: "r1", kind: extmsg.SessionReview}
+	request := buildRequest("review", "main", review.option(), []string{"/p/a.go"}, "why")
+	if want := "review --review-session=r1 main\n/p/a.go\n---\nwhy\n"; request != want {
+		t.Fatalf("review session request = %q, want %q", request, want)
+	}
+	if message, err := extmsg.Parse(request); err != nil || message.SessionKind != extmsg.SessionReview || message.LineNote != "why" || message.Base() != "main" {
+		t.Fatalf("the editor reads %q as %+v, %v", request, message, err)
+	}
+}
+
 func TestSessionFromOptions(t *testing.T) {
-	if session, err := sessionFromOptions(msgOptions{diffSession: "d1"}); err != nil || session != (msgSession{id: "d1", diff: true}) {
+	if session, err := sessionFromOptions(msgOptions{diffSession: "d1"}); err != nil || session != (msgSession{id: "d1", kind: extmsg.SessionDiff}) {
 		t.Fatalf("diff session = %+v, %v", session, err)
 	}
-	if session, err := sessionFromOptions(msgOptions{session: "n1"}); err != nil || session != (msgSession{id: "n1"}) {
+	if session, err := sessionFromOptions(msgOptions{session: "n1"}); err != nil || session != (msgSession{id: "n1", kind: extmsg.SessionNote}) {
 		t.Fatalf("note session = %+v, %v", session, err)
 	}
-	if _, err := sessionFromOptions(msgOptions{session: "n1", diffSession: "d1"}); err == nil || !strings.Contains(err.Error(), "not both") {
-		t.Fatalf("both flags = %v", err)
+	if session, err := sessionFromOptions(msgOptions{reviewSession: "r1"}); err != nil || session != (msgSession{id: "r1", kind: extmsg.SessionReview}) {
+		t.Fatalf("review session = %+v, %v", session, err)
+	}
+	if session, err := sessionFromOptions(msgOptions{}); err != nil || session != (msgSession{}) {
+		t.Fatalf("no session = %+v, %v", session, err)
+	}
+	for _, options := range []msgOptions{{session: "n1", diffSession: "d1"}, {diffSession: "d1", reviewSession: "r1"}} {
+		if _, err := sessionFromOptions(options); err == nil || !strings.Contains(err.Error(), "use one of") {
+			t.Fatalf("two flags %+v = %v", options, err)
+		}
 	}
 }
 
 func TestCheckSessionCommand(t *testing.T) {
-	note, diff := msgSession{id: "walk1"}, msgSession{id: "walk1", diff: true}
+	note, diff := msgSession{id: "walk1", kind: extmsg.SessionNote}, msgSession{id: "walk1", kind: extmsg.SessionDiff}
+	review := msgSession{id: "walk1", kind: extmsg.SessionReview}
 	cases := []struct {
 		command string
 		session msgSession
@@ -201,6 +229,11 @@ func TestCheckSessionCommand(t *testing.T) {
 		{"end", diff, "", []string{"a.go"}, "--msg-diff-session walk1 end"},
 		{"review", note, "", []string{"a.go"}, "goes with open"},
 		{"review", diff, "", []string{"a.go"}, "--msg-diff-session goes with open"},
+		{"review", review, "main", []string{"a.go"}, ""},
+		{"review", review, "", []string{"a.go", "b.go"}, "one file per review, got 2"},
+		{"review", review, "", nil, "one file per review, got 0"},
+		{"open", review, "", []string{"a.go#L3"}, "--msg-review-session goes with review"},
+		{"end", review, "", nil, ""},
 	}
 	for _, c := range cases {
 		err := checkSessionCommand(c.command, c.paths, c.session, c.base)
@@ -244,13 +277,14 @@ func TestDeliverRequestExitCodes(t *testing.T) {
 		wantCode int
 		wantText string
 	}{
-		{"next\n", msgSession{id: "walk1"}, 0, "ok step 2 queued"},
-		{"finished\n", msgSession{id: "walk1"}, 0, "ok finished"},
-		{"ended\n", msgSession{id: "walk1"}, exitSessionEnded, "ended session walk1"},
-		{"waiting\n", msgSession{id: "walk1"}, exitSessionWaiting, "ok waiting"},
+		{"next\n", msgSession{id: "walk1", kind: extmsg.SessionNote}, 0, "ok step 2 queued"},
+		{"finished\n", msgSession{id: "walk1", kind: extmsg.SessionNote}, 0, "ok finished"},
+		{"ended\n", msgSession{id: "walk1", kind: extmsg.SessionNote}, exitSessionEnded, "ended session walk1"},
+		{"waiting\n", msgSession{id: "walk1", kind: extmsg.SessionNote}, exitSessionWaiting, "ok waiting"},
 		{"bad\n", msgSession{}, 1, "error nope"},
-		{"slow\n", msgSession{id: "walk1"}, exitSessionWaiting, "--msg-session walk1 wait"},
-		{"slow\n", msgSession{id: "diff1", diff: true}, exitSessionWaiting, "--msg-diff-session diff1 wait"},
+		{"slow\n", msgSession{id: "walk1", kind: extmsg.SessionNote}, exitSessionWaiting, "--msg-session walk1 wait"},
+		{"slow\n", msgSession{id: "diff1", kind: extmsg.SessionDiff}, exitSessionWaiting, "--msg-diff-session diff1 wait"},
+		{"slow\n", msgSession{id: "rev1", kind: extmsg.SessionReview}, exitSessionWaiting, "--msg-review-session rev1 wait"},
 	}
 	for _, c := range cases {
 		output, code := deliverRequest(socketPath, c.request, c.session, 200*time.Millisecond)

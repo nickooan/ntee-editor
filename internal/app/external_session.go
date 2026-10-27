@@ -12,21 +12,29 @@ import (
 	"github.com/nickooan/ntee-editor/internal/store"
 )
 
-// externalSession is a guided session an agent runs through the editor: a
-// queue of open-with-note steps the user confirmed once. The agent sends
-// steps as fast as it likes; the user walks them at their own pace — Enter
-// next, Backspace back — so moving on never waits for the agent. current
-// is the step on screen; len(steps) means the user is past the last one,
-// waiting for the agent's next. waiters are `wait` requests, answered when
-// the session is over.
+// externalSession is a session an agent runs through the editor, confirmed
+// by the user once. A note or diff session is a queue of open-with-note
+// steps: the agent sends them as fast as it likes and the user walks them at
+// their own pace — Enter next, Backspace back — so moving on never waits for
+// the agent. current is the step on screen; len(steps) means the user is
+// past the last one, waiting for the agent's next. A review session instead
+// grows a live review, one file per request (review_session.go). waiters
+// are `wait` requests, answered when the session is over.
 type externalSession struct {
-	id       string // "" = no session
-	diff     bool   // a diff session: every step shows in the diff view
-	started  bool   // the user accepted it
+	id       string             // "" = no session
+	kind     extmsg.SessionKind // what each request shows
+	started  bool               // the user accepted it
 	steps    []pendingExternal
 	current  int
 	complete bool // the agent sent end: no more steps will come
 	waiters  []chan<- string
+
+	// A review session's files in arrival order (a resent file keeps its
+	// place, with its latest note), the base its first request named, and
+	// whether its history record was written.
+	reviews []reviewRequest
+	base    string
+	saved   bool
 }
 
 // endedSession remembers how a session ended, so its agent is told to stop
@@ -48,7 +56,7 @@ func (m Model) handleSessionMessage(msg externalMessageMsg) (tea.Model, tea.Cmd)
 	case extmsg.CommandWait:
 		return m.waitForSessionEnd(id, msg.reply), nil
 	case extmsg.CommandEnd:
-		return m.completeSession(id, msg.reply), nil
+		return m.completeSession(id, msg.reply)
 	}
 
 	if m.session.id == "" {
@@ -59,13 +67,13 @@ func (m Model) handleSessionMessage(msg externalMessageMsg) (tea.Model, tea.Cmd)
 	} else if m.session.id != id {
 		sendExternalReply(msg.reply, extmsg.ErrorReply("another "+m.session.kindName()+" ("+m.session.id+") is running — end it first: ntee --msg "+m.session.flag()+" "+m.session.id+" end"))
 		return m, nil
-	} else if m.session.diff != msg.diffSession {
-		sendExternalReply(msg.reply, extmsg.ErrorReply("session "+id+" is a "+m.session.kindName()+" — send its steps with "+m.session.flag()))
+	} else if m.session.kind != msg.sessionKind {
+		sendExternalReply(msg.reply, extmsg.ErrorReply("session "+id+" is a "+m.session.kindName()+" — send its "+m.session.requestsName()+" with "+m.session.flag()))
 		return m, nil
 	}
 
 	pending, problem := m.resolveExternal(msg.record)
-	pending.session, pending.diffSession = id, msg.diffSession
+	pending.session, pending.sessionKind = id, msg.sessionKind
 	if problem != "" {
 		sendExternalReply(msg.reply, extmsg.ErrorReply(problem))
 		m.errText = "session " + id + ": " + problem
@@ -76,6 +84,15 @@ func (m Model) handleSessionMessage(msg externalMessageMsg) (tea.Model, tea.Cmd)
 		if m.session.complete {
 			sendExternalReply(msg.reply, extmsg.ErrorReply("session "+id+" already got end — start a new session for more steps"))
 			return m, nil
+		}
+		if m.session.kind == extmsg.SessionReview {
+			if len(msg.record.Args) > 0 && pending.base != m.session.base {
+				sendExternalReply(msg.reply, extmsg.ErrorReply("review session "+id+" compares against "+cmp.Or(m.session.base, store.ExternalDefaultBase)+" — leave --msg-base off after the first file"))
+				return m, nil
+			}
+			next, cmd, reply := m.receiveReviewSessionFile(pending.reviews[0])
+			sendExternalReply(msg.reply, reply)
+			return next, cmd
 		}
 		m.session.steps = append(slices.Clip(m.session.steps), pending)
 		count := len(m.session.steps)
@@ -93,9 +110,14 @@ func (m Model) handleSessionMessage(msg externalMessageMsg) (tea.Model, tea.Cmd)
 		m.confirmRm, m.confirmRmDir = "", false
 		m.notice = "rm cancelled"
 	}
-	m.session = externalSession{id: id, diff: msg.diffSession, steps: []pendingExternal{pending}}
+	m.session = externalSession{id: id, kind: msg.sessionKind, steps: []pendingExternal{pending}, base: pending.base}
 	m.external.pending = &pending
 	m.choice = m.sessionChoice(pending)
+	if m.session.kind == extmsg.SessionReview {
+		m.session.reviews = []reviewRequest{pending.reviews[0]}
+		sendExternalReply(msg.reply, "file 1 queued — waiting for the user to start the review session")
+		return m, tea.Batch(cmds...)
+	}
 	sendExternalReply(msg.reply, "step 1 queued — waiting for the user to start the session")
 	return m, tea.Batch(cmds...)
 }
@@ -103,23 +125,33 @@ func (m Model) handleSessionMessage(msg externalMessageMsg) (tea.Model, tea.Cmd)
 // sessionChoice is the confirm overlay that starts a session: who asks, the
 // first step, and what agreeing allows.
 func (m Model) sessionChoice(pending pendingExternal) choiceOverlay {
-	title := "Agent session · "
-	if pending.diffSession {
-		title = "Agent diff session · "
-	}
-	choice := choiceOverlay{kind: choiceExternalRequest, title: title + pending.session}
+	choice := choiceOverlay{kind: choiceExternalRequest, title: "Agent " + externalSession{kind: pending.sessionKind}.kindName() + " · " + pending.session}
 	firstLine, _, _ := strings.Cut(strings.TrimSpace(pending.lineNote), "\n")
-	choice.body = append(choice.body,
-		overlayLine{text: truncateRunes(strings.TrimLeft(strings.TrimSpace(firstLine), "# "), 56), style: overlayLineStrong},
-		overlayLine{text: "first step: " + pending.record.Paths[0]},
-	)
-	if pending.diffSession {
-		choice.body = append(choice.body, overlayLine{text: "each step shows the diff, first against " + cmp.Or(pending.base, store.ExternalDefaultBase), style: overlayLineHighlight})
+	if firstLine != "" {
+		choice.body = append(choice.body, overlayLine{text: truncateRunes(strings.TrimLeft(strings.TrimSpace(firstLine), "# "), 56), style: overlayLineStrong})
 	}
-	choice.body = append(choice.body,
-		overlayLine{text: "steps jump files and repos without asking", style: overlayLineHighlight},
-		overlayLine{text: "on each step: Enter next · Backspace back · Esc end", style: overlayLineDim},
-	)
+	base := cmp.Or(pending.base, store.ExternalDefaultBase)
+	switch pending.sessionKind {
+	case extmsg.SessionReview:
+		choice.body = append(choice.body,
+			overlayLine{text: "first file: " + pending.record.Paths[0]},
+			overlayLine{text: "a live review: files keep arriving as the agent works, diffed against " + base, style: overlayLineHighlight},
+			overlayLine{text: "Esc in the review asks first, then tells the agent to stop", style: overlayLineDim},
+		)
+	case extmsg.SessionDiff:
+		choice.body = append(choice.body,
+			overlayLine{text: "first step: " + pending.record.Paths[0]},
+			overlayLine{text: "each step shows the diff, first against " + base, style: overlayLineHighlight},
+		)
+	default:
+		choice.body = append(choice.body, overlayLine{text: "first step: " + pending.record.Paths[0]})
+	}
+	if pending.sessionKind != extmsg.SessionReview {
+		choice.body = append(choice.body,
+			overlayLine{text: "steps jump files and repos without asking", style: overlayLineHighlight},
+			overlayLine{text: "on each step: Enter next · Backspace back · Esc end", style: overlayLineDim},
+		)
+	}
 	if m.openFile != nil && m.edit.dirty {
 		choice.body = append(choice.body, overlayLine{text: "unsaved edits in " + m.openRel + " are kept as a draft", style: overlayLineDim})
 	}
@@ -133,11 +165,20 @@ func (m Model) resolveSessionStart(pending pendingExternal, accept bool) (Model,
 		return m, nil // it ended while the confirm was up
 	}
 	if !accept {
+		if m.session.kind == extmsg.SessionReview {
+			m, save := m.saveReviewSession(store.ExternalIgnored, "session declined")
+			m = m.endSession("was declined by the user", false)
+			m.notice = "review session " + pending.session + " declined"
+			return m, save
+		}
 		m = m.endSession("was declined by the user", false)
 		m.notice = "session " + pending.session + " declined"
 		return m, m.saveExternalStatusCmd(pending, store.ExternalIgnored, "session declined")
 	}
 	m.session.started = true
+	if m.session.kind == extmsg.SessionReview {
+		return m.enterReviewSession()
+	}
 	return m.showSessionStep(0)
 }
 
@@ -185,24 +226,30 @@ func (m Model) sessionStepVisible() bool {
 // diffSessionStepOn reports whether rel is the file of the diff session's
 // step on screen: its diff stays even with no changes.
 func (m Model) diffSessionStepOn(rel string) bool {
-	return m.session.diff && m.lineNote.session != "" && m.lineNote.session == m.session.id && m.lineNote.rel == rel
+	return m.session.kind == extmsg.SessionDiff && m.lineNote.session != "" && m.lineNote.session == m.session.id && m.lineNote.rel == rel
 }
 
 // kindName names the session's kind for the user.
 func (session externalSession) kindName() string {
-	if session.diff {
+	switch session.kind {
+	case extmsg.SessionDiff:
 		return "diff session"
+	case extmsg.SessionReview:
+		return "review session"
 	}
 	return "session"
 }
 
-// flag is the --msg flag that sends the session's requests.
-func (session externalSession) flag() string {
-	if session.diff {
-		return "--msg-diff-session"
+// requestsName names what the agent sends to the session.
+func (session externalSession) requestsName() string {
+	if session.kind == extmsg.SessionReview {
+		return "files"
 	}
-	return "--msg-session"
+	return "steps"
 }
+
+// flag is the --msg flag that sends the session's requests.
+func (session externalSession) flag() string { return sessionFlag(session.kind) }
 
 // handleSessionStepKey walks a visible step: Enter next, Backspace back,
 // Esc ends the session. Moving and scrolling pass through (handled=false);
@@ -294,22 +341,32 @@ func (m Model) sessionStepHint() string {
 }
 
 // completeSession is the agent's end: no more steps will come. The user
-// keeps walking the queued ones; Enter on the last finishes the session.
-func (m Model) completeSession(id string, reply chan<- string) Model {
+// keeps walking the queued ones; Enter on the last finishes the session. A
+// review session stays open for the user, and its history record is
+// written now (or when the user starts it).
+func (m Model) completeSession(id string, reply chan<- string) (Model, tea.Cmd) {
 	if m.session.id != id {
 		if ended, ok := m.endedSessionFor(id); ok {
 			sendExternalReply(reply, ended.reply())
 		} else {
 			sendExternalReply(reply, extmsg.ErrorReply("no session "+id+" is running"))
 		}
-		return m
+		return m, nil
 	}
 	m.session.complete = true
+	if m.session.kind == extmsg.SessionReview {
+		sendExternalReply(reply, "session "+id+" complete — the user is reviewing "+strconv.Itoa(len(m.session.reviews))+" files")
+		if !m.session.started {
+			return m, nil
+		}
+		m.notice = "the agent finished sending files"
+		return m.saveReviewSession(store.ExternalReviewed, "the agent ended the session")
+	}
 	sendExternalReply(reply, "session "+id+" complete — it ends after step "+strconv.Itoa(len(m.session.steps)))
 	if m.session.started && m.session.current >= len(m.session.steps) {
-		return m.finishSession() // the user is already past the last step
+		return m.finishSession(), nil // the user is already past the last step
 	}
-	return m
+	return m, nil
 }
 
 // waitForSessionEnd is the agent's wait: it is answered when the session is

@@ -23,20 +23,42 @@ var (
 	lineNoteQuoteStyle        = lipgloss.NewStyle().Foreground(colComment).Italic(true).Background(colBgChrome)
 )
 
+// noteBoxLabels are what a note box says on its borders: the title (in
+// orange when highlighted, a session step), and the keys that close and
+// scroll it, each long and short ("" = none).
+type noteBoxLabels struct {
+	title       string
+	highlighted bool
+	closeHints  [2]string
+	scrollHints [2]string
+}
+
+// lineNoteScrollHints are the scroll keys of a note over the file or diff.
+var lineNoteScrollHints = [2]string{"shift+↑↓/wheel", "shift+↑↓"}
+
 // overlayLineNote splices the note box onto the rendered rows of the file or
 // diff view; anchorRow and cursorRow are viewport rows.
 func (m Model) overlayLineNote(rows []string, anchorRow, cursorRow, gutterWidth, contentWidth, height int) []string {
-	box, ok := m.lineNoteGeometry(anchorRow, cursorRow, gutterWidth, contentWidth, height)
+	box, ok := m.lineNote.geometry(anchorRow, cursorRow, gutterWidth, contentWidth, height)
 	if !ok {
 		return rows
 	}
-	title := fmt.Sprintf(" note · L%d ", m.lineNote.line+1)
-	closeHints := [2]string{"esc close", "esc"}
-	if note := m.lineNote; note.session != "" {
-		title = fmt.Sprintf(" %s · step %d/%d · L%d ", note.session, m.session.current+1, len(m.session.steps), note.line+1)
-		closeHints = m.sessionBoxHints()
+	labels := noteBoxLabels{
+		title:       fmt.Sprintf(" note · L%d ", m.lineNote.line+1),
+		closeHints:  [2]string{"esc close", "esc"},
+		scrollHints: lineNoteScrollHints,
 	}
-	boxRows := renderLineNoteBox(box, title, m.lineNote.session != "", closeHints)
+	if note := m.lineNote; note.session != "" {
+		labels.title = fmt.Sprintf(" %s · step %d/%d · L%d ", note.session, m.session.current+1, len(m.session.steps), note.line+1)
+		labels.highlighted = true
+		labels.closeHints = m.sessionBoxHints()
+	}
+	return spliceNoteBox(rows, box, renderLineNoteBox(box, labels))
+}
+
+// spliceNoteBox lays a drawn note box over rows at the box's place; rows
+// above or below the view are clipped.
+func spliceNoteBox(rows []string, box lineNoteBox, boxRows []string) []string {
 	for i, boxRow := range boxRows {
 		rowIndex := box.top + i
 		if rowIndex < 0 || rowIndex >= len(rows) {
@@ -49,12 +71,12 @@ func (m Model) overlayLineNote(rows []string, anchorRow, cursorRow, gutterWidth,
 
 // renderLineNoteBox draws the bordered box, every row exactly box.width
 // cells: the title on the top border, the scroll state and key hints on the
-// bottom one. A session step's title stands out in orange.
-func renderLineNoteBox(box lineNoteBox, title string, session bool, closeHints [2]string) []string {
+// bottom one.
+func renderLineNoteBox(box lineNoteBox, labels noteBoxLabels) []string {
 	horizontal := box.width - 2
-	title = ansi.Truncate(title, max(0, horizontal-1), "")
+	title := ansi.Truncate(labels.title, max(0, horizontal-1), "")
 	titleStyle := lineNoteTitleStyle
-	if session {
+	if labels.highlighted {
 		titleStyle = lineNoteSessionTitleStyle
 	}
 	top := lineNoteBorderStyle.Render("╭─") + titleStyle.Render(title) +
@@ -62,7 +84,7 @@ func renderLineNoteBox(box lineNoteBox, title string, session bool, closeHints [
 
 	// The longest hint that fits the border wins.
 	hint := ""
-	for _, candidate := range lineNoteHints(box, closeHints) {
+	for _, candidate := range lineNoteHints(box, labels) {
 		if ansi.StringWidth(candidate) <= horizontal-2 {
 			hint = candidate
 			break
@@ -97,10 +119,23 @@ func (m Model) sessionBoxHints() [2]string {
 
 // lineNoteHints are the bottom-border hints, longest first: the rows
 // scrolled past and still below, the scroll keys, and the keys that close
-// the box (closeHints, long and short).
-func lineNoteHints(box lineNoteBox, closeHints [2]string) []string {
+// the box (long and short). Empty parts are left out.
+func lineNoteHints(box lineNoteBox, labels noteBoxLabels) []string {
+	join := func(parts ...string) string {
+		kept := parts[:0:0]
+		for _, part := range parts {
+			if part != "" {
+				kept = append(kept, part)
+			}
+		}
+		if len(kept) == 0 {
+			return ""
+		}
+		return " " + strings.Join(kept, " · ") + " "
+	}
+	closeHints, scrollHints := labels.closeHints, labels.scrollHints
 	if len(box.lines) <= box.bodyRows {
-		return []string{" " + closeHints[0] + " ", " " + closeHints[1] + " "}
+		return []string{join(closeHints[0]), join(closeHints[1])}
 	}
 	position := []string{}
 	if above := box.scroll; above > 0 {
@@ -111,10 +146,10 @@ func lineNoteHints(box lineNoteBox, closeHints [2]string) []string {
 	}
 	where := strings.Join(position, " · ")
 	return []string{
-		" " + where + " · shift+↑↓/wheel · " + closeHints[0] + " ",
-		" " + where + " · shift+↑↓ · " + closeHints[1] + " ",
-		" " + where + " · " + closeHints[1] + " ",
-		" " + where + " ",
+		join(where, scrollHints[0], closeHints[0]),
+		join(where, scrollHints[1], closeHints[1]),
+		join(where, closeHints[1]),
+		join(where),
 	}
 }
 

@@ -41,6 +41,10 @@ func (m Model) handleReviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	file, _ := m.selectedReviewFile()
 	switch k {
 	case "esc":
+		if m.reviewSessionRunning() {
+			m.choice = m.quitReviewSessionChoice()
+			return m, nil
+		}
 		return m.exitReview(), nil
 	case "shift+up":
 		return m.selectReviewFile(m.review.selection.index - 1)

@@ -252,9 +252,17 @@ func (m Model) externalDetailLines(width int) []string {
 			{label: "received", pieces: []string{panelStrongStyle.Render(record.ReceivedAt.Local().Format("2006-01-02 15:04:05"))}},
 			{label: "status", pieces: []string{status}},
 		}
-		paths := make([]string, len(record.Paths))
+		paths := make([]string, 0, len(record.Paths))
 		for i, path := range record.Paths {
-			paths[i] = panelDimStyle.Render(fmt.Sprintf("%3d ", i+1)) + panelLabelStyle.Render(path)
+			paths = append(paths, panelDimStyle.Render(fmt.Sprintf("%3d ", i+1))+panelLabelStyle.Render(path))
+			if i < len(record.PathNotes) && record.PathNotes[i] != "" {
+				// A review session's note on the file: its first line.
+				firstLine, _, more := strings.Cut(strings.TrimSpace(record.PathNotes[i]), "\n")
+				if more {
+					firstLine += " …"
+				}
+				paths = append(paths, panelDimStyle.Render(truncateRunes("      ↳ "+strings.TrimLeft(firstLine, "# "), width)))
+			}
 		}
 		panel.rows = append(panel.rows, panelRow{label: "paths", pieces: paths, stacked: true})
 		panel.after = append(panel.after, panelHeaderStyle.Render("RAW MESSAGE"))

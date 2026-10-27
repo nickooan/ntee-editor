@@ -21,9 +21,9 @@ import (
 type externalMessageMsg struct {
 	record store.ExternalRecord
 	replay bool
-	// diffSession: record.Session is a diff session (--diff-session=). Not
-	// stored — a replay is never a session.
-	diffSession bool
+	// sessionKind is which kind of session record.Session is. Not stored —
+	// a replay is never a session.
+	sessionKind extmsg.SessionKind
 	reply       chan<- string
 }
 
@@ -93,7 +93,9 @@ func (r *ExternalReceiver) Handle(text string) string {
 		}
 		paths[i] = rel
 	}
-	if message.LineNote != "" {
+	// A review session's note may go without a line: it then sits at the
+	// file's first change.
+	if message.LineNote != "" && message.SessionKind != extmsg.SessionReview {
 		if _, line := splitLineAnchor(paths[0]); line == 0 {
 			return extmsg.ErrorReply("a note needs a line: " + message.Paths[0] + "#L<n>")
 		}
@@ -112,13 +114,16 @@ func (r *ExternalReceiver) Handle(text string) string {
 		Paths:      paths,
 		Raw:        raw,
 		LineNote:   message.LineNote,
+		PathNotes:  make([]string, len(paths)),
 		Session:    message.Session,
 		ReceivedAt: now,
 		Status:     store.ExternalPending,
 	}
 	historyWarning := ""
+	// A session's end/wait is no request to replay, and a review session is
+	// saved whole by the editor once it is over.
 	control := message.Command == extmsg.CommandEnd || message.Command == extmsg.CommandWait
-	if !control { // a session's end/wait is no request to replay
+	if !control && message.SessionKind != extmsg.SessionReview {
 		if err := r.history.AppendExternal(record, settings.HistoryLimit); err != nil {
 			historyWarning = " (not saved to history: " + err.Error() + ")"
 		}
@@ -126,7 +131,7 @@ func (r *ExternalReceiver) Handle(text string) string {
 
 	reply := make(chan string, 1)
 	select {
-	case r.queue <- externalMessageMsg{record: record, diffSession: message.DiffSession, reply: reply}:
+	case r.queue <- externalMessageMsg{record: record, sessionKind: message.SessionKind, reply: reply}:
 	default:
 		return extmsg.ErrorReply("the editor is busy — try again shortly")
 	}
@@ -141,7 +146,7 @@ func (r *ExternalReceiver) Handle(text string) string {
 		return replyFromOutcome(outcome) + historyWarning
 	case <-time.After(wait):
 		if message.Session != "" {
-			return extmsg.OkReply(sessionWaitingReply(message.Session, message.DiffSession))
+			return extmsg.OkReply(sessionWaitingReply(message.Session, message.SessionKind))
 		}
 		return extmsg.OkReply("delivered" + historyWarning)
 	}
@@ -149,12 +154,19 @@ func (r *ExternalReceiver) Handle(text string) string {
 
 // sessionWaitingReply tells a session's agent the user hasn't answered yet
 // and how to keep waiting.
-func sessionWaitingReply(session string, diffSession bool) string {
-	flag := "--msg-session"
-	if diffSession {
-		flag = "--msg-diff-session"
+func sessionWaitingReply(session string, kind extmsg.SessionKind) string {
+	return "waiting — the user hasn't answered yet; run: ntee --msg " + sessionFlag(kind) + " " + session + " wait"
+}
+
+// sessionFlag is the --msg flag that sends a session's requests.
+func sessionFlag(kind extmsg.SessionKind) string {
+	switch kind {
+	case extmsg.SessionDiff:
+		return "--msg-diff-session"
+	case extmsg.SessionReview:
+		return "--msg-review-session"
 	}
-	return "waiting — the user hasn't answered yet; run: ntee --msg " + flag + " " + session + " wait"
+	return "--msg-session"
 }
 
 // replyFromOutcome turns the UI's outcome into the sender's reply line: an

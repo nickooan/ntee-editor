@@ -92,17 +92,16 @@ type lineNoteBox struct {
 
 func (box lineNoteBox) height() int { return box.bodyRows + 2 }
 
-// lineNoteGeometry places the box in the view's row coordinates (anchorRow
+// geometry places the box in the view's row coordinates (anchorRow
 // and cursorRow are viewport rows — buffer lines in the file view, diff rows
 // in the diff): right of the gutter with a margin, as wide as the note needs
 // up to the pane, below the note's row — or above it when only that fits, or
 // when below would hide the cursor. ok=false when the pane is too narrow.
-func (m Model) lineNoteGeometry(anchorRow, cursorRow, gutterWidth, contentWidth, height int) (lineNoteBox, bool) {
+func (note lineNoteOverlay) geometry(anchorRow, cursorRow, gutterWidth, contentWidth, height int) (lineNoteBox, bool) {
 	available := contentWidth - 2*lineNoteMargin
 	if available < 12 || height < 4 {
 		return lineNoteBox{}, false
 	}
-	note := m.lineNote
 	box := lineNoteBox{left: gutterWidth + 3 + lineNoteMargin}
 	minimum := lineNoteMinWidth
 	if note.session != "" {
@@ -175,7 +174,7 @@ func (m Model) lineNoteScreenBox() (lineNoteBox, bool) {
 		return lineNoteBox{}, false
 	}
 	contentWidth := max(1, (mainWidth-4)-gutterWidth-3)
-	box, ok := m.lineNoteGeometry(anchorRow, cursorRow, gutterWidth, contentWidth, height)
+	box, ok := m.lineNote.geometry(anchorRow, cursorRow, gutterWidth, contentWidth, height)
 	if !ok {
 		return lineNoteBox{}, false
 	}

@@ -2,6 +2,7 @@ package app
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -292,5 +293,171 @@ func TestReceiverWaitsForASessionToEnd(t *testing.T) {
 	}
 	if records, _ := history.LoadExternal(); len(records) != 1 || records[0].Session != "w" {
 		t.Fatalf("only the step is recorded, with its session: %+v", records)
+	}
+	if msg.diffSession {
+		t.Fatal("--session= is a note session")
+	}
+
+	go func() { replies <- receiver.Handle("wait --diff-session=d\n") }()
+	if msg := <-delivered; !msg.diffSession || msg.record.Session != "d" {
+		t.Fatalf("--diff-session= reaches the editor as a diff session: %+v", msg)
+	}
+	if reply := <-replies; !strings.Contains(reply, "--msg-diff-session d wait") {
+		t.Fatalf("a diff session's wait names its flag: %q", reply)
+	}
+}
+
+// sendDiffSession delivers a diff session request (--diff-session=) and
+// returns the channel its sender waits on.
+func sendDiffSession(m Model, record store.ExternalRecord) (Model, chan string) {
+	reply := make(chan string, 1)
+	m, cmd := deliver(m, externalMessageMsg{record: record, diffSession: true, reply: reply})
+	return settleExternal(m, cmd), reply
+}
+
+// keySettled presses a key and runs what it starts (a step's diff).
+func keySettled(m Model, msg tea.KeyPressMsg) Model {
+	next, cmd := m.Update(msg)
+	return settleExternal(next.(Model), cmd)
+}
+
+// diffSessionWorkspace is gitReviewWorkspace plus apps/web/same.go, committed
+// and unchanged, with external messages on and the nested repos scanned.
+func diffSessionWorkspace(t *testing.T) Model {
+	t.Helper()
+	m, root := gitReviewWorkspace(t)
+	web := filepath.Join(root, "apps", "web")
+	must(t, os.WriteFile(filepath.Join(web, "same.go"), []byte("package main\n\nvar same = 1\n"), 0o644))
+	for _, args := range [][]string{{"add", "same.go"}, {"commit", "-q", "-m", "same"}} {
+		cmd := exec.Command("git", append([]string{"-C", web, "-c", "user.email=t@t", "-c", "user.name=t"}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	m, _ = deliver(m, workspaceReposMsg{repos: []string{"apps/web", "libs/core"}})
+	m, _, _ = externalModel(t, m, true)
+	return m
+}
+
+// queueDiffStep sends a diff session step and checks it was queued.
+func queueDiffStep(t *testing.T, m Model, session, path, note string) Model {
+	t.Helper()
+	m, reply := sendDiffSession(m, sessionRecord("open", session, path, note))
+	if outcome := gotReply(t, reply); !strings.Contains(outcome, "queued") {
+		t.Fatalf("a diff step returns at once as queued: %q", outcome)
+	}
+	return m
+}
+
+// startedDiffSession is diff session "walk1" with two steps the user
+// accepted: a changed file, then an unchanged one.
+func startedDiffSession(t *testing.T) Model {
+	t.Helper()
+	m := diffSessionWorkspace(t)
+	m = queueDiffStep(t, m, "walk1", "apps/web/main.go#L3", "# Step one\nwhy run")
+	if !m.choice.open() || !strings.Contains(m.choice.title, "Agent diff session · walk1") {
+		t.Fatalf("a diff session asks first: %+v", m.choice)
+	}
+	m = queueDiffStep(t, m, "walk1", "apps/web/same.go#L3", "step two")
+	m = keySettled(m, keyPress(tea.KeyEnter)) // Start session
+	if !m.session.started || !m.session.diff || m.mode != modeDiff || m.openRel != "apps/web/main.go" || !m.sessionStepVisible() {
+		t.Fatalf("started: mode=%v open=%q visible=%v err=%q session=%+v", m.mode, m.openRel, m.sessionStepVisible(), m.errText, m.session)
+	}
+	return m
+}
+
+func TestDiffSessionShowsTheStepBoxInTheDiff(t *testing.T) {
+	m := startedDiffSession(t)
+	plain := ansi.Strip(m.View().Content)
+	for _, want := range []string{"@diff", "walk1 · step 1/2 · L3", "Step one", "● diff session walk1 · step 1/2", "Esc end session"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("view is missing %q:\n%s", want, plain)
+		}
+	}
+}
+
+func TestDiffSessionKeysWalkTheStepsInTheDiff(t *testing.T) {
+	m := startedDiffSession(t)
+	m = keySettled(m, keyPress(tea.KeyEnter))
+	if m.mode != modeDiff || m.openRel != "apps/web/same.go" || m.session.current != 1 || !m.sessionStepVisible() {
+		t.Fatalf("Enter shows step 2 in its diff, even unchanged: mode=%v open=%q current=%d err=%q", m.mode, m.openRel, m.session.current, m.errText)
+	}
+	if plain := ansi.Strip(m.View().Content); !strings.Contains(plain, "step two") || !strings.Contains(plain, "+0 -0") {
+		t.Fatalf("the unchanged file's diff shows with its note:\n%s", plain)
+	}
+	m = keySettled(m, keyPress(tea.KeyBackspace))
+	if m.mode != modeDiff || m.openRel != "apps/web/main.go" || m.session.current != 0 || !m.sessionStepVisible() {
+		t.Fatalf("Backspace goes back to step 1's diff: mode=%v open=%q current=%d", m.mode, m.openRel, m.session.current)
+	}
+	m = key(m, keyPress(tea.KeyEscape))
+	if m.session.id != "" || m.mode != modeDiff || m.lineNoteVisibleInDiff() {
+		t.Fatalf("Esc ends the session and keeps the diff: session=%q mode=%v", m.session.id, m.mode)
+	}
+	m = key(m, keyPress(tea.KeyEscape))
+	if m.mode != modeEdit || m.lineNoteVisible() {
+		t.Fatalf("a second Esc leaves the diff, no note left behind: mode=%v", m.mode)
+	}
+}
+
+func TestDiffSessionStepIsReadOnly(t *testing.T) {
+	m := startedDiffSession(t)
+	m = key(m, typeRune('x'))
+	if m.mode != modeDiff || !m.sessionStepVisible() || !strings.Contains(m.notice, "read-only") {
+		t.Fatalf("typing is swallowed: mode=%v notice=%q", m.mode, m.notice)
+	}
+	row := m.diffPosition.row
+	m = key(m, keyPress(tea.KeyUp))
+	if m.diffPosition.row != row-1 || !m.sessionStepVisible() {
+		t.Fatalf("moving still works: row %d → %d", row, m.diffPosition.row)
+	}
+}
+
+func TestDiffSessionTallNoteScrollsWithShiftArrows(t *testing.T) {
+	m := diffSessionWorkspace(t)
+	m = queueDiffStep(t, m, "walk1", "apps/web/main.go#L1", strings.Repeat("a line of the note\n", 60))
+	m = keySettled(m, keyPress(tea.KeyEnter))
+	row := m.diffPosition.row
+	m = key(m, shiftKey(tea.KeyDown))
+	if m.lineNote.scroll != 1 || m.diffPosition.row != row {
+		t.Fatalf("Shift+↓ scrolls the tall note, not the diff: scroll=%d row %d → %d", m.lineNote.scroll, row, m.diffPosition.row)
+	}
+}
+
+func TestDiffSessionFallsBackToTheFileOnABadRevision(t *testing.T) {
+	m := diffSessionWorkspace(t)
+	record := sessionRecord("open", "walk1", "apps/web/main.go#L3", "bad base")
+	record.Args, record.Base = []string{"no-such-rev"}, "no-such-rev"
+	m, reply := sendDiffSession(m, record)
+	gotReply(t, reply)
+	m = keySettled(m, keyPress(tea.KeyEnter))
+	if m.mode != modeEdit || !m.sessionStepVisible() || !strings.HasPrefix(m.errText, "git diff:") {
+		t.Fatalf("the step's note shows on the file, the reason in the status bar: mode=%v err=%q", m.mode, m.errText)
+	}
+}
+
+func TestSessionKindsAndIDsDoNotMix(t *testing.T) {
+	m := diffSessionWorkspace(t)
+	m = queueDiffStep(t, m, "walk1", "apps/web/main.go#L3", "one")
+	m, reply := sendSession(m, sessionRecord("open", "walk1", "apps/web/main.go#L1", "x"))
+	if outcome := gotReply(t, reply); !extmsg.IsErrorReply(outcome) || !strings.Contains(outcome, "is a diff session — send its steps with --msg-diff-session") {
+		t.Fatalf("a note step for a diff session is refused: %q", outcome)
+	}
+	m, reply = sendDiffSession(m, sessionRecord("open", "walk9", "apps/web/main.go#L1", "x"))
+	if outcome := gotReply(t, reply); !extmsg.IsErrorReply(outcome) || !strings.Contains(outcome, "another diff session (walk1)") {
+		t.Fatalf("another id is refused while one waits to start: %q", outcome)
+	}
+	m = keySettled(m, keyPress(tea.KeyEnter))
+	m, reply = sendSession(m, sessionRecord("open", "walk9", "apps/web/main.go#L1", "x"))
+	if outcome := gotReply(t, reply); !extmsg.IsErrorReply(outcome) || !strings.Contains(outcome, "--msg-diff-session walk1 end") {
+		t.Fatalf("another id is refused while one runs: %q", outcome)
+	}
+	if len(m.session.steps) != 1 || m.session.id != "walk1" {
+		t.Fatalf("refused steps never queue: %+v", m.session)
+	}
+
+	note := startedSession(t)
+	_, reply = sendDiffSession(note, sessionRecord("open", "walk1", "long.go#L1", "x"))
+	if outcome := gotReply(t, reply); !extmsg.IsErrorReply(outcome) || !strings.Contains(outcome, "is a session — send its steps with --msg-session") {
+		t.Fatalf("a diff step for a note session is refused: %q", outcome)
 	}
 }

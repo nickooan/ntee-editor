@@ -6,7 +6,7 @@
 // a file opens in edit mode with its folder as the project, and a file that
 // doesn't exist yet opens empty and is created on the first save)
 //
-//	ntee --msg [--msg-note <text|->] [--msg-session <id>] <open|review|end|wait|help> [paths…]   send a request to a running editor
+//	ntee --msg [--msg-note <text|->] [--msg-session <id> | --msg-diff-session <id>] <open|review|end|wait|help> [paths…]   send a request to a running editor
 package main
 
 import (
@@ -40,15 +40,16 @@ func main() {
 	msgRoot := flag.String("msg-root", "", "with --msg: the editor's opened folder (default: the nearest running one above the current directory)")
 	msgBase := flag.String("msg-base", "", "with --msg open/review: the revision to compare the current files against (default HEAD)")
 	msgNote := flag.String("msg-note", "", "with --msg open: a note shown in a box next to the line, light markdown (needs <file>#L<n>); '-' reads it from stdin")
-	msgSession := flag.String("msg-session", "", "with --msg open: queue the request as a step of guided session <id> — the user confirms once, then walks the steps with Enter/Backspace, Esc ends it (also: --msg --msg-session <id> end|wait)")
-	msgWait := flag.Duration("msg-wait", 10*time.Minute, "with --msg --msg-session <id> wait: how long to wait for the session to end before printing \"ok waiting\" (exit 4)")
+	msgSession := flag.String("msg-session", "", "with --msg open: queue the request as a step of guided note session <id> — the user confirms once, then walks the steps with Enter/Backspace, Esc ends it (also: --msg --msg-session <id> end|wait); takes no --msg-base")
+	msgDiffSession := flag.String("msg-diff-session", "", "with --msg open: like --msg-session, but every step shows the diff against --msg-base (default HEAD) with the note on its line")
+	msgWait := flag.Duration("msg-wait", 10*time.Minute, "with --msg --msg-session|--msg-diff-session <id> wait: how long to wait for the session to end before printing \"ok waiting\" (exit 4); the editor answers within 1h — run wait as a background task for long tours")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println("ntee-editor " + app.Version)
 		return
 	}
 	if *sendMsg {
-		os.Exit(sendMessage(flag.Args(), msgOptions{root: *msgRoot, base: *msgBase, note: *msgNote, session: *msgSession, wait: *msgWait}))
+		os.Exit(sendMessage(flag.Args(), msgOptions{root: *msgRoot, base: *msgBase, note: *msgNote, session: *msgSession, diffSession: *msgDiffSession, wait: *msgWait}))
 	}
 	if *disableLSP || *enableLSP {
 		if *disableLSP && *enableLSP {

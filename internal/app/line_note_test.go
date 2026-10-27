@@ -152,7 +152,7 @@ func TestLineNoteFlipsAboveToKeepTheCursorVisible(t *testing.T) {
 	m, _ := noteWorkspace(t)
 	m, _ = openWithNote(t, m, "long.go#L119", "near the end")
 	start := fileViewportTop(m.edit.cy, m.fileScrollY, 20, len(m.edit.lines))
-	box, ok := m.lineNoteGeometry(start, 3, 60, 20)
+	box, ok := m.lineNoteGeometry(m.lineNote.line-start, m.edit.cy-start, 3, 60, 20)
 	if !ok || box.top+box.height() > m.lineNote.line-start {
 		t.Fatalf("no room below the last lines: the box sits above, top=%d height=%d anchor row=%d", box.top, box.height(), m.lineNote.line-start)
 	}
@@ -160,7 +160,7 @@ func TestLineNoteFlipsAboveToKeepTheCursorVisible(t *testing.T) {
 	m, _ = openWithNote(t, m, "long.go#L40", "one\ntwo\nthree")
 	m.edit.cy = m.lineNote.line + 2 // under where the box would go
 	start = fileViewportTop(m.edit.cy, m.fileScrollY, 20, len(m.edit.lines))
-	box, _ = m.lineNoteGeometry(start, 3, 60, 20)
+	box, _ = m.lineNoteGeometry(m.lineNote.line-start, m.edit.cy-start, 3, 60, 20)
 	cursorRow := m.edit.cy - start
 	if cursorRow >= box.top && cursorRow < box.top+box.height() {
 		t.Fatalf("the box hides the cursor: top=%d height=%d cursor row=%d", box.top, box.height(), cursorRow)

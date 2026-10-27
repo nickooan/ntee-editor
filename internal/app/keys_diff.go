@@ -17,6 +17,11 @@ func (m Model) handleDiffKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 
 	k := msg.String()
+	if m.sessionStepVisible() {
+		if next, cmd, handled := m.handleSessionStepKey(k); handled {
+			return next, cmd
+		}
+	}
 	switch {
 	case m.keys.Matches(keymap.JumpToReference, k):
 		return m.diffJumpToReference()
@@ -31,10 +36,16 @@ func (m Model) handleDiffKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch k {
 	case "esc":
 		return m.exitDiff(), nil
-	case "shift+up":
-		m.diffPosition = m.diffPosition.blockJump(-1, span, m.diffDocument.isHunkStart)
-	case "shift+down":
-		m.diffPosition = m.diffPosition.blockJump(1, span, m.diffDocument.isHunkStart)
+	case "shift+up", "shift+down":
+		delta := 1
+		if k == "shift+up" {
+			delta = -1
+		}
+		// A step's note too tall for its box takes Shift+↑/↓, as in edit mode.
+		if box, scrollable := m.lineNoteScrollableBox(); scrollable {
+			return m.scrollLineNote(box, delta), nil
+		}
+		m.diffPosition = m.diffPosition.blockJump(delta, span, m.diffDocument.isHunkStart)
 	}
 	return m, nil
 }

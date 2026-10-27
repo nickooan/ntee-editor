@@ -581,7 +581,7 @@ func (m Model) renderFile(width, height int) string {
 		rows = m.overlaySignature(rows, start, gutterWidth, contentWidth, height)
 	}
 	if editing && m.lineNoteVisible() && !m.completionOpen {
-		rows = m.overlayLineNote(rows, start, gutterWidth, contentWidth, height)
+		rows = m.overlayLineNote(rows, m.lineNote.line-start, m.edit.cy-start, gutterWidth, contentWidth, height)
 	}
 	return strings.Join(rows, "\n")
 }

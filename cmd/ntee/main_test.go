@@ -144,36 +144,68 @@ func TestReadNoteFromStdinKeepsTheText(t *testing.T) {
 }
 
 func TestBuildRequestCarriesTheSession(t *testing.T) {
-	if got, want := buildRequest("open", "v1", "walk1", []string{"/p/a.go#L3"}, "why"), "open --session=walk1 v1\n/p/a.go#L3\n---\nwhy\n"; got != want {
-		t.Fatalf("open step = %q, want %q", got, want)
+	note, diff := msgSession{id: "walk1"}, msgSession{id: "walk1", diff: true}
+	if got, want := buildRequest("open", "", note.option(), []string{"/p/a.go#L3"}, "why"), "open --session=walk1\n/p/a.go#L3\n---\nwhy\n"; got != want {
+		t.Fatalf("note step = %q, want %q", got, want)
 	}
-	if got, want := buildRequest("wait", "", "walk1", nil, ""), "wait --session=walk1\n"; got != want {
+	if got, want := buildRequest("open", "v1", diff.option(), []string{"/p/a.go#L3"}, "why"), "open --diff-session=walk1 v1\n/p/a.go#L3\n---\nwhy\n"; got != want {
+		t.Fatalf("diff step = %q, want %q", got, want)
+	}
+	if got, want := buildRequest("wait", "", note.option(), nil, ""), "wait --session=walk1\n"; got != want {
 		t.Fatalf("wait = %q, want %q", got, want)
 	}
-	for _, request := range []string{buildRequest("open", "", "walk1", []string{"/p/a.go#L3"}, "why"), buildRequest("end", "", "walk1", nil, "")} {
-		if message, err := extmsg.Parse(request); err != nil || message.Session != "walk1" {
-			t.Fatalf("the editor reads %q as %+v, %v", request, message, err)
+	for _, c := range []struct {
+		request  string
+		wantDiff bool
+	}{
+		{buildRequest("open", "", note.option(), []string{"/p/a.go#L3"}, "why"), false},
+		{buildRequest("end", "", note.option(), nil, ""), false},
+		{buildRequest("open", "v1", diff.option(), []string{"/p/a.go#L3"}, "why"), true},
+		{buildRequest("end", "", diff.option(), nil, ""), true},
+	} {
+		if message, err := extmsg.Parse(c.request); err != nil || message.Session != "walk1" || message.DiffSession != c.wantDiff {
+			t.Fatalf("the editor reads %q as %+v, %v", c.request, message, err)
 		}
 	}
 }
 
+func TestSessionFromOptions(t *testing.T) {
+	if session, err := sessionFromOptions(msgOptions{diffSession: "d1"}); err != nil || session != (msgSession{id: "d1", diff: true}) {
+		t.Fatalf("diff session = %+v, %v", session, err)
+	}
+	if session, err := sessionFromOptions(msgOptions{session: "n1"}); err != nil || session != (msgSession{id: "n1"}) {
+		t.Fatalf("note session = %+v, %v", session, err)
+	}
+	if _, err := sessionFromOptions(msgOptions{session: "n1", diffSession: "d1"}); err == nil || !strings.Contains(err.Error(), "not both") {
+		t.Fatalf("both flags = %v", err)
+	}
+}
+
 func TestCheckSessionCommand(t *testing.T) {
+	note, diff := msgSession{id: "walk1"}, msgSession{id: "walk1", diff: true}
 	cases := []struct {
-		command, session string
-		paths            []string
-		wantErr          string
+		command string
+		session msgSession
+		base    string
+		paths   []string
+		wantErr string
 	}{
-		{"open", "walk1", []string{"a.go#L3"}, ""},
-		{"wait", "walk1", nil, ""},
-		{"end", "walk1", nil, ""},
-		{"wait", "", nil, "needs --msg-session"},
-		{"end", "walk1", []string{"a.go"}, "takes no paths"},
-		{"review", "walk1", []string{"a.go"}, "goes with open"},
+		{"open", note, "", []string{"a.go#L3"}, ""},
+		{"open", note, "HEAD~1", []string{"a.go#L3"}, "notes only"},
+		{"open", diff, "HEAD~1", []string{"a.go#L3"}, ""},
+		{"open", diff, "", []string{"a.go#L3"}, ""},
+		{"wait", note, "", nil, ""},
+		{"end", diff, "", nil, ""},
+		{"wait", msgSession{}, "", nil, "needs --msg-session"},
+		{"end", note, "", []string{"a.go"}, "takes no paths"},
+		{"end", diff, "", []string{"a.go"}, "--msg-diff-session walk1 end"},
+		{"review", note, "", []string{"a.go"}, "goes with open"},
+		{"review", diff, "", []string{"a.go"}, "--msg-diff-session goes with open"},
 	}
 	for _, c := range cases {
-		err := checkSessionCommand(c.command, c.paths, c.session)
+		err := checkSessionCommand(c.command, c.paths, c.session, c.base)
 		if (c.wantErr == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), c.wantErr)) {
-			t.Errorf("checkSessionCommand(%q, %v, %q) = %v, want %q", c.command, c.paths, c.session, err, c.wantErr)
+			t.Errorf("checkSessionCommand(%q, %v, %+v, %q) = %v, want %q", c.command, c.paths, c.session, c.base, err, c.wantErr)
 		}
 	}
 }
@@ -208,16 +240,17 @@ func TestDeliverRequestExitCodes(t *testing.T) {
 
 	cases := []struct {
 		request  string
-		session  string
+		session  msgSession
 		wantCode int
 		wantText string
 	}{
-		{"next\n", "walk1", 0, "ok step 2 queued"},
-		{"finished\n", "walk1", 0, "ok finished"},
-		{"ended\n", "walk1", exitSessionEnded, "ended session walk1"},
-		{"waiting\n", "walk1", exitSessionWaiting, "ok waiting"},
-		{"bad\n", "", 1, "error nope"},
-		{"slow\n", "walk1", exitSessionWaiting, "--msg-session walk1 wait"},
+		{"next\n", msgSession{id: "walk1"}, 0, "ok step 2 queued"},
+		{"finished\n", msgSession{id: "walk1"}, 0, "ok finished"},
+		{"ended\n", msgSession{id: "walk1"}, exitSessionEnded, "ended session walk1"},
+		{"waiting\n", msgSession{id: "walk1"}, exitSessionWaiting, "ok waiting"},
+		{"bad\n", msgSession{}, 1, "error nope"},
+		{"slow\n", msgSession{id: "walk1"}, exitSessionWaiting, "--msg-session walk1 wait"},
+		{"slow\n", msgSession{id: "diff1", diff: true}, exitSessionWaiting, "--msg-diff-session diff1 wait"},
 	}
 	for _, c := range cases {
 		output, code := deliverRequest(socketPath, c.request, c.session, 200*time.Millisecond)

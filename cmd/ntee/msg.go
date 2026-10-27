@@ -81,7 +81,8 @@ Guided sessions — walk the user through code, one note at a time:
       step shows. Past the last queued step the box waits for the agent's
       next one, which then shows as soon as it arrives.
       After the last step, send end: it marks the session complete, so
-      Enter on the last step finishes it.
+      Enter on the last step finishes it. A note session shows the files,
+      never a diff: its steps take no --msg-base (use a diff session).
       What each command prints:
         open  ok step N queued   exit 0  keep sending steps
               ended …            exit 3  the user ended or declined the
@@ -93,6 +94,17 @@ Guided sessions — walk the user through code, one note at a time:
               ended …            exit 3  the user closed or declined it
               ok waiting …       exit 4  not over yet: run wait again
 
+  Waiting for the user (both session kinds):
+      The user reads at their own pace — a tour can take many minutes. To
+      learn how it went, run wait, but don't block on it: start it as a
+      background task (your tool's background mode, or "… wait > file &")
+      and hold it while you carry on or end your turn; its exit tells you
+      when the user is done. Give it a long --msg-wait (the editor answers
+      a wait within 1h at most); on exit 4 start wait again. Then act on
+      the result: exit 0 — the user saw every step; exit 3 — they closed
+      it early, so ask where they stopped before moving on. wait can start
+      any time after the first step, and several may wait at once.
+
   A walkthrough an agent might run:
     ntee --msg --msg-session tour1 --msg-note - open cmd/ntee/main.go#L40 <<'EOF'
     ## Flags
@@ -100,10 +112,28 @@ Guided sessions — walk the user through code, one note at a time:
     EOF
     ntee --msg --msg-session tour1 --msg-note "the request goes out here" open cmd/ntee/msg.go#L180
     ntee --msg --msg-session tour1 end
-    ntee --msg --msg-session tour1 wait   # optional: until the user is done
+    ntee --msg --msg-session tour1 --msg-wait 1h wait   # optional, as a background task: until the user is done
 
   On the wire the session is a first-line option: "open --session=<id>",
   "end --session=<id>", "wait --session=<id>".
+
+Diff sessions — walk the user through changes, one note at a time:
+
+  ntee --msg --msg-diff-session <id> --msg-note "<text>" open <file>#L<line>
+  ntee --msg --msg-diff-session <id> --msg-base <rev> --msg-note "<text>" open <file>#L<line>
+  ntee --msg --msg-diff-session <id> end
+  ntee --msg --msg-diff-session <id> wait
+      Like a guided session, but every step opens the file's diff view —
+      against HEAD (the uncommitted changes) or the step's --msg-base — with
+      the note in a box on its line, even when the file has no changes. The
+      keys are the same: Enter next, Backspace back, Esc ends the session
+      (the diff stays open; Esc again leaves it). A file outside any git
+      repo, or a bad revision, shows the note on the plain file instead.
+      Replies and exit codes are those of a guided session.
+      The editor runs one session at a time: while one is running or waiting
+      to start, a step of another id — or of the same id as the other kind
+      of session — is refused with an error.
+      On the wire: "open --diff-session=<id> [<rev>]".
 
 A base revision (a commit hash, tag, branch, HEAD~2, …) is always compared
 with the current files on disk, uncommitted changes included. It travels on
@@ -124,6 +154,7 @@ folder); the user confirms first when busy:
 The --msg-* flags go before the command:
   ntee --msg --msg-note "…" open <file>#L<line>
   ntee --msg --msg-session tour1 --msg-note "…" open <file>#L<line>
+  ntee --msg --msg-diff-session tour2 --msg-base main --msg-note "…" open <file>#L<line>
 
 External messages are off by default: the user turns them on in ntee under
 Ctrl+T › external. The editor keeps the latest messages (10 by default) and
@@ -155,7 +186,11 @@ AGENTS.md:
   To walk the user through several places, send each as a step of one
   session, one after another: ` + "`ntee --msg --msg-session <id> --msg-note \"<why>\" open <file>#L<line>`" + `
   (each returns at once; exit 3 means the user ended it — stop sending), then
-  ` + "`ntee --msg --msg-session <id> end`" + `.
+  ` + "`ntee --msg --msg-session <id> end`" + `. To walk through changes instead,
+  use ` + "`--msg-diff-session <id>`" + ` (optionally with ` + "`--msg-base <rev>`" + `): each step
+  shows the diff with the note on its line. To hear when the user is done,
+  run ` + "`ntee --msg --msg-session <id> --msg-wait 1h wait`" + ` as a background task and
+  hold it (exit 0 finished, 3 closed early, 4 still going — wait again).
   Paths are relative to the current directory. The command prints ` + "`ok …`" + ` on
   success; ` + "`error … disabled`" + ` means the user has not enabled external messages
   (Ctrl+T → external) — mention it once and carry on. Run ` + "`ntee --msg help`" + `
@@ -164,11 +199,49 @@ AGENTS.md:
 
 // msgOptions are the --msg-* flags.
 type msgOptions struct {
-	root    string        // --msg-root: the editor's folder
-	base    string        // --msg-base: the revision to compare against
-	note    string        // --msg-note: the note text, "-" = stdin
-	session string        // --msg-session: the guided session's id
-	wait    time.Duration // --msg-wait: how long a session request waits for the user
+	root        string        // --msg-root: the editor's folder
+	base        string        // --msg-base: the revision to compare against
+	note        string        // --msg-note: the note text, "-" = stdin
+	session     string        // --msg-session: a guided note session's id
+	diffSession string        // --msg-diff-session: a guided diff session's id
+	wait        time.Duration // --msg-wait: how long a session request waits for the user
+}
+
+// msgSession is the guided session a request belongs to: its id, and whether
+// it is a diff session (every step in the diff view) or a note session.
+type msgSession struct {
+	id   string
+	diff bool
+}
+
+// sessionFromOptions picks the session flag; both at once is refused.
+func sessionFromOptions(options msgOptions) (msgSession, error) {
+	if options.session != "" && options.diffSession != "" {
+		return msgSession{}, errors.New("use either --msg-session or --msg-diff-session, not both")
+	}
+	if options.diffSession != "" {
+		return msgSession{id: options.diffSession, diff: true}, nil
+	}
+	return msgSession{id: options.session}, nil
+}
+
+// flag is the CLI flag naming this session.
+func (session msgSession) flag() string {
+	if session.diff {
+		return "--msg-diff-session"
+	}
+	return "--msg-session"
+}
+
+// option is the session's first-line wire option, "" for none.
+func (session msgSession) option() string {
+	switch {
+	case session.id == "":
+		return ""
+	case session.diff:
+		return extmsg.DiffSessionOption + session.id
+	}
+	return extmsg.SessionOption + session.id
 }
 
 // Exit codes beyond 0 (ok) and 1 (error) for guided sessions.
@@ -186,7 +259,11 @@ func sendMessage(args []string, options msgOptions) int {
 	}
 	command, paths := strings.ToLower(args[0]), args[1:]
 	note := options.note
-	if err := checkSessionCommand(command, paths, options.session); err != nil {
+	session, err := sessionFromOptions(options)
+	if err == nil {
+		err = checkSessionCommand(command, paths, session, options.base)
+	}
+	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
@@ -227,7 +304,7 @@ func sendMessage(args []string, options msgOptions) int {
 	if command == extmsg.CommandWait {
 		timeout = options.wait
 	}
-	output, code := deliverRequest(socketPath, buildRequest(command, options.base, options.session, paths, note), options.session, timeout)
+	output, code := deliverRequest(socketPath, buildRequest(command, options.base, session.option(), paths, note), session, timeout)
 	if code == 1 && !extmsg.IsErrorReply(output) {
 		fmt.Fprintln(os.Stderr, output)
 		return code
@@ -240,11 +317,11 @@ func sendMessage(args []string, options msgOptions) int {
 // and the exit code. A session's wait blocks until the session is over, up
 // to timeout; when that runs out first, the agent is told how to keep
 // waiting.
-func deliverRequest(socketPath, request, session string, timeout time.Duration) (string, int) {
+func deliverRequest(socketPath, request string, session msgSession, timeout time.Duration) (string, int) {
 	reply, err := extmsg.SendWithTimeout(socketPath, request, timeout)
 	switch {
-	case err != nil && session != "" && os.IsTimeout(err):
-		return "ok waiting — the user hasn't answered yet; run: ntee --msg --msg-session " + session + " wait", exitSessionWaiting
+	case err != nil && session.id != "" && os.IsTimeout(err):
+		return "ok waiting — the user hasn't answered yet; run: ntee --msg " + session.flag() + " " + session.id + " wait", exitSessionWaiting
 	case err != nil:
 		return "cannot reach the editor: " + err.Error(), 1
 	}
@@ -265,31 +342,36 @@ func exitCodeForReply(reply string) int {
 }
 
 // checkSessionCommand checks the session flag against the command: end and
-// wait act on a session and take no paths; review takes none.
-func checkSessionCommand(command string, paths []string, session string) error {
+// wait act on a session and take no paths; review takes none; a note
+// session's open takes no base revision.
+func checkSessionCommand(command string, paths []string, session msgSession, base string) error {
 	switch command {
 	case extmsg.CommandEnd, extmsg.CommandWait:
-		if session == "" {
-			return fmt.Errorf("%s needs --msg-session <id>", command)
+		if session.id == "" {
+			return fmt.Errorf("%s needs --msg-session <id> or --msg-diff-session <id>", command)
 		}
 		if len(paths) > 0 {
-			return fmt.Errorf("%s takes no paths: ntee --msg --msg-session %s %s", command, session, command)
+			return fmt.Errorf("%s takes no paths: ntee --msg %s %s %s", command, session.flag(), session.id, command)
 		}
 	case extmsg.CommandReview:
-		if session != "" {
-			return errors.New("--msg-session goes with open (each step is an open with a note)")
+		if session.id != "" {
+			return errors.New(session.flag() + " goes with open (each step is an open with a note)")
+		}
+	case extmsg.CommandOpen:
+		if session.id != "" && !session.diff && base != "" {
+			return errors.New("--msg-session steps are notes only — to walk diffs use --msg-diff-session <id> [--msg-base <rev>]")
 		}
 	}
 	return nil
 }
 
-// buildRequest is the wire text: the command and optional base revision on
-// the first line, then one path per line, then the optional note after the
-// separator line.
-func buildRequest(command, base, session string, paths []string, note string) string {
+// buildRequest is the wire text: the command, the optional session option
+// (msgSession.option) and base revision on the first line, then one path per
+// line, then the optional note after the separator line.
+func buildRequest(command, base, sessionOption string, paths []string, note string) string {
 	header := command
-	if session != "" {
-		header += " " + extmsg.SessionOption + session
+	if sessionOption != "" {
+		header += " " + sessionOption
 	}
 	if base != "" {
 		header += " " + base

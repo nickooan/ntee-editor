@@ -42,15 +42,16 @@ func gitReviewWorkspace(t *testing.T) (Model, string) {
 	return rebuildCorpusNow(m), root
 }
 
-// settleExternal runs cmd and delivers every review/external message it leads to,
-// dropping the rest (corpus walks, git polls) so the chain stays finite.
+// settleExternal runs cmd and delivers every review/external/diff message it
+// leads to, dropping the rest (corpus walks, git polls) so the chain stays
+// finite.
 func settleExternal(m Model, cmd tea.Cmd) Model {
 	queue := execCmds(cmd)
 	for len(queue) > 0 {
 		msg := queue[0]
 		queue = queue[1:]
 		switch msg.(type) {
-		case reviewPreparedMsg, reviewLoadedMsg, externalStatusSavedMsg, externalHistoryLoadedMsg, externalSettingsMsg:
+		case reviewPreparedMsg, reviewLoadedMsg, externalStatusSavedMsg, externalHistoryLoadedMsg, externalSettingsMsg, diffReadyMsg:
 			var next tea.Cmd
 			m, next = deliver(m, msg)
 			queue = append(queue, execCmds(next)...)

@@ -60,9 +60,18 @@ func TestParse(t *testing.T) {
 func TestParseSession(t *testing.T) {
 	cases := []struct {
 		name, text, wantSession, wantBase, wantErr string
+		wantDiff                                   bool
 	}{
 		{name: "open step", text: "open --session=walk-1.a\na.go#L3\n---\nwhy\n", wantSession: "walk-1.a"},
-		{name: "with a base", text: "open HEAD~1 --session=w\na.go#L3\n---\nwhy\n", wantSession: "w", wantBase: "HEAD~1"},
+		{name: "note session refuses a base", text: "open HEAD~1 --session=w\na.go#L3\n---\nwhy\n", wantErr: "a note session takes no base revision"},
+		{name: "diff step", text: "open --diff-session=w\na.go#L3\n---\nwhy\n", wantSession: "w", wantDiff: true},
+		{name: "diff step with a base", text: "open HEAD~1 --diff-session=w\na.go#L3\n---\nwhy\n", wantSession: "w", wantBase: "HEAD~1", wantDiff: true},
+		{name: "both options", text: "open --session=w --diff-session=w\na.go#L3\n---\nwhy\n", wantErr: "one session option only"},
+		{name: "bad diff id", text: "open --diff-session=a/b\na.go#L3\n---\nwhy\n", wantErr: "bad session id"},
+		{name: "diff step without a note", text: "open --diff-session=w\na.go#L3\n", wantErr: "needs a note"},
+		{name: "review refuses a diff session", text: "review --diff-session=w\na.go\n", wantErr: "review takes no session"},
+		{name: "end a diff session", text: "end --diff-session=w\n", wantSession: "w", wantDiff: true},
+		{name: "wait a diff session", text: "wait --diff-session=w\n", wantSession: "w", wantDiff: true},
 		{name: "bad id", text: "open --session=a/b\na.go#L3\n---\nwhy\n", wantErr: "bad session id"},
 		{name: "empty id", text: "open --session=\na.go#L3\n---\nwhy\n", wantErr: "bad session id"},
 		{name: "unknown option", text: "open --force\na.go\n", wantErr: "unknown option --force"},
@@ -82,7 +91,7 @@ func TestParseSession(t *testing.T) {
 			}
 			continue
 		}
-		if err != nil || got.Session != c.wantSession || got.Base() != c.wantBase {
+		if err != nil || got.Session != c.wantSession || got.Base() != c.wantBase || got.DiffSession != c.wantDiff {
 			t.Errorf("%s: Parse = %+v, %v", c.name, got, err)
 		}
 	}

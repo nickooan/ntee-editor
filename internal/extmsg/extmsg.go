@@ -18,7 +18,10 @@ type Message struct {
 	Args     []string // tokens after the command, options aside: an optional base revision
 	Paths    []string // payload lines, trimmed, blanks dropped; may carry a #L<n> anchor
 	LineNote string   // open: free-form text shown next to the anchored line, "" = none
-	Session  string   // the --session=<id> option: a guided session's id, "" = none
+	Session  string   // the --session=<id> or --diff-session=<id> option: a guided session's id, "" = none
+	// DiffSession is true when the session was named with --diff-session=:
+	// every step shows in the diff view instead of the file.
+	DiffSession bool
 }
 
 const (
@@ -28,8 +31,13 @@ const (
 	CommandWait   = "wait" // session: wait for the current step's answer
 )
 
-// SessionOption is the first-line option naming a guided session.
-const SessionOption = "--session="
+// SessionOption names a guided note session on the first line: each step
+// opens the file with its note. DiffSessionOption names a diff session: each
+// step opens the diff against the base revision (HEAD by default).
+const (
+	SessionOption     = "--session="
+	DiffSessionOption = "--diff-session="
+)
 
 var sessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
@@ -75,13 +83,17 @@ func Parse(text string) (Message, error) {
 			message.Args = []string{}
 			for _, field := range fields[1:] {
 				switch {
-				case strings.HasPrefix(field, SessionOption):
-					message.Session = strings.TrimPrefix(field, SessionOption)
+				case strings.HasPrefix(field, SessionOption), strings.HasPrefix(field, DiffSessionOption):
+					if message.Session != "" {
+						return Message{}, errors.New("one session option only: " + SessionOption + "<id> or " + DiffSessionOption + "<id>")
+					}
+					message.DiffSession = strings.HasPrefix(field, DiffSessionOption)
+					message.Session = strings.TrimPrefix(strings.TrimPrefix(field, SessionOption), DiffSessionOption)
 					if !sessionIDPattern.MatchString(message.Session) {
 						return Message{}, errors.New("bad session id " + message.Session + " — use 1–64 letters, digits, '.', '_' or '-'")
 					}
 				case strings.HasPrefix(field, "--"):
-					return Message{}, errors.New("unknown option " + field + " — the only option is " + SessionOption + "<id>")
+					return Message{}, errors.New("unknown option " + field + " — the options are " + SessionOption + "<id> and " + DiffSessionOption + "<id>")
 				default:
 					message.Args = append(message.Args, field)
 				}
@@ -108,6 +120,9 @@ func Parse(text string) (Message, error) {
 		if message.Session != "" && message.LineNote == "" {
 			return Message{}, errors.New("a session step needs a note: open <file>#L<n>, then a --- line and the note")
 		}
+		if message.Session != "" && !message.DiffSession && message.Base() != "" {
+			return Message{}, errors.New("a note session takes no base revision — walk diffs with " + DiffSessionOption + "<id>")
+		}
 	case CommandReview:
 		if err := checkBaseArgument(message.Command, message.Args); err != nil {
 			return Message{}, err
@@ -126,10 +141,10 @@ func Parse(text string) (Message, error) {
 		}
 	case CommandEnd, CommandWait:
 		if message.Session == "" {
-			return Message{}, errors.New(message.Command + " needs " + SessionOption + "<id>")
+			return Message{}, errors.New(message.Command + " needs " + SessionOption + "<id> or " + DiffSessionOption + "<id>")
 		}
 		if len(message.Args) > 0 || len(message.Paths) > 0 || noteSeen {
-			return Message{}, errors.New(message.Command + " takes only " + SessionOption + "<id>")
+			return Message{}, errors.New(message.Command + " takes only the session option")
 		}
 	default:
 		return Message{}, fmt.Errorf("unknown command %q — use open, review, end or wait", message.Command)

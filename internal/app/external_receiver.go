@@ -21,7 +21,10 @@ import (
 type externalMessageMsg struct {
 	record store.ExternalRecord
 	replay bool
-	reply  chan<- string
+	// diffSession: record.Session is a diff session (--diff-session=). Not
+	// stored — a replay is never a session.
+	diffSession bool
+	reply       chan<- string
 }
 
 // externalReplyWait bounds how long a sender waits for the UI's outcome
@@ -123,7 +126,7 @@ func (r *ExternalReceiver) Handle(text string) string {
 
 	reply := make(chan string, 1)
 	select {
-	case r.queue <- externalMessageMsg{record: record, reply: reply}:
+	case r.queue <- externalMessageMsg{record: record, diffSession: message.DiffSession, reply: reply}:
 	default:
 		return extmsg.ErrorReply("the editor is busy — try again shortly")
 	}
@@ -138,7 +141,7 @@ func (r *ExternalReceiver) Handle(text string) string {
 		return replyFromOutcome(outcome) + historyWarning
 	case <-time.After(wait):
 		if message.Session != "" {
-			return extmsg.OkReply(sessionWaitingReply(message.Session))
+			return extmsg.OkReply(sessionWaitingReply(message.Session, message.DiffSession))
 		}
 		return extmsg.OkReply("delivered" + historyWarning)
 	}
@@ -146,8 +149,12 @@ func (r *ExternalReceiver) Handle(text string) string {
 
 // sessionWaitingReply tells a session's agent the user hasn't answered yet
 // and how to keep waiting.
-func sessionWaitingReply(session string) string {
-	return "waiting — the user hasn't answered yet; run: ntee --msg --msg-session " + session + " wait"
+func sessionWaitingReply(session string, diffSession bool) string {
+	flag := "--msg-session"
+	if diffSession {
+		flag = "--msg-diff-session"
+	}
+	return "waiting — the user hasn't answered yet; run: ntee --msg " + flag + " " + session + " wait"
 }
 
 // replyFromOutcome turns the UI's outcome into the sender's reply line: an

@@ -23,9 +23,10 @@ var (
 	lineNoteQuoteStyle        = lipgloss.NewStyle().Foreground(colComment).Italic(true).Background(colBgChrome)
 )
 
-// overlayLineNote splices the note box onto the rendered file rows.
-func (m Model) overlayLineNote(rows []string, start, gutterWidth, contentWidth, height int) []string {
-	box, ok := m.lineNoteGeometry(start, gutterWidth, contentWidth, height)
+// overlayLineNote splices the note box onto the rendered rows of the file or
+// diff view; anchorRow and cursorRow are viewport rows.
+func (m Model) overlayLineNote(rows []string, anchorRow, cursorRow, gutterWidth, contentWidth, height int) []string {
+	box, ok := m.lineNoteGeometry(anchorRow, cursorRow, gutterWidth, contentWidth, height)
 	if !ok {
 		return rows
 	}

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"cmp"
 	"slices"
 	"strconv"
 	"strings"
@@ -20,6 +21,7 @@ import (
 // the session is over.
 type externalSession struct {
 	id       string // "" = no session
+	diff     bool   // a diff session: every step shows in the diff view
 	started  bool   // the user accepted it
 	steps    []pendingExternal
 	current  int
@@ -55,12 +57,15 @@ func (m Model) handleSessionMessage(msg externalMessageMsg) (tea.Model, tea.Cmd)
 			return m, nil
 		}
 	} else if m.session.id != id {
-		sendExternalReply(msg.reply, extmsg.ErrorReply("another session ("+m.session.id+") is running — end it first: ntee --msg --msg-session "+m.session.id+" end"))
+		sendExternalReply(msg.reply, extmsg.ErrorReply("another "+m.session.kindName()+" ("+m.session.id+") is running — end it first: ntee --msg "+m.session.flag()+" "+m.session.id+" end"))
+		return m, nil
+	} else if m.session.diff != msg.diffSession {
+		sendExternalReply(msg.reply, extmsg.ErrorReply("session "+id+" is a "+m.session.kindName()+" — send its steps with "+m.session.flag()))
 		return m, nil
 	}
 
 	pending, problem := m.resolveExternal(msg.record)
-	pending.session = id
+	pending.session, pending.diffSession = id, msg.diffSession
 	if problem != "" {
 		sendExternalReply(msg.reply, extmsg.ErrorReply(problem))
 		m.errText = "session " + id + ": " + problem
@@ -88,7 +93,7 @@ func (m Model) handleSessionMessage(msg externalMessageMsg) (tea.Model, tea.Cmd)
 		m.confirmRm, m.confirmRmDir = "", false
 		m.notice = "rm cancelled"
 	}
-	m.session = externalSession{id: id, steps: []pendingExternal{pending}}
+	m.session = externalSession{id: id, diff: msg.diffSession, steps: []pendingExternal{pending}}
 	m.external.pending = &pending
 	m.choice = m.sessionChoice(pending)
 	sendExternalReply(msg.reply, "step 1 queued — waiting for the user to start the session")
@@ -98,11 +103,20 @@ func (m Model) handleSessionMessage(msg externalMessageMsg) (tea.Model, tea.Cmd)
 // sessionChoice is the confirm overlay that starts a session: who asks, the
 // first step, and what agreeing allows.
 func (m Model) sessionChoice(pending pendingExternal) choiceOverlay {
-	choice := choiceOverlay{kind: choiceExternalRequest, title: "Agent session · " + pending.session}
+	title := "Agent session · "
+	if pending.diffSession {
+		title = "Agent diff session · "
+	}
+	choice := choiceOverlay{kind: choiceExternalRequest, title: title + pending.session}
 	firstLine, _, _ := strings.Cut(strings.TrimSpace(pending.lineNote), "\n")
 	choice.body = append(choice.body,
 		overlayLine{text: truncateRunes(strings.TrimLeft(strings.TrimSpace(firstLine), "# "), 56), style: overlayLineStrong},
 		overlayLine{text: "first step: " + pending.record.Paths[0]},
+	)
+	if pending.diffSession {
+		choice.body = append(choice.body, overlayLine{text: "each step shows the diff, first against " + cmp.Or(pending.base, store.ExternalDefaultBase), style: overlayLineHighlight})
+	}
+	choice.body = append(choice.body,
 		overlayLine{text: "steps jump files and repos without asking", style: overlayLineHighlight},
 		overlayLine{text: "on each step: Enter next · Backspace back · Esc end", style: overlayLineDim},
 	)
@@ -158,10 +172,36 @@ func (m Model) showSessionStep(index int) (Model, tea.Cmd) {
 	return m.waitForNextSessionStep(), tea.Batch(cmds...)
 }
 
-// sessionStepVisible reports whether a session step's box is on screen —
-// the file is then read-only and the keys walk the steps.
+// sessionStepVisible reports whether a session step's box is on screen, over
+// the file or the diff — the view is then read-only and the keys walk the
+// steps.
 func (m Model) sessionStepVisible() bool {
-	return m.lineNote.session != "" && m.lineNote.session == m.session.id && m.mode == modeEdit && m.lineNoteVisible()
+	if m.lineNote.session == "" || m.lineNote.session != m.session.id {
+		return false
+	}
+	return (m.mode == modeEdit && m.lineNoteVisible()) || m.lineNoteVisibleInDiff()
+}
+
+// diffSessionStepOn reports whether rel is the file of the diff session's
+// step on screen: its diff stays even with no changes.
+func (m Model) diffSessionStepOn(rel string) bool {
+	return m.session.diff && m.lineNote.session != "" && m.lineNote.session == m.session.id && m.lineNote.rel == rel
+}
+
+// kindName names the session's kind for the user.
+func (session externalSession) kindName() string {
+	if session.diff {
+		return "diff session"
+	}
+	return "session"
+}
+
+// flag is the --msg flag that sends the session's requests.
+func (session externalSession) flag() string {
+	if session.diff {
+		return "--msg-diff-session"
+	}
+	return "--msg-session"
 }
 
 // handleSessionStepKey walks a visible step: Enter next, Backspace back,
@@ -231,13 +271,14 @@ func (m Model) finishSession() Model {
 // sessionBadge is the status bar's mark of a running session: the step on
 // screen of those queued, or that the user waits for the agent.
 func (m Model) sessionBadge() string {
+	badge := "● " + m.session.kindName() + " " + m.session.id
 	switch {
 	case !m.session.started:
-		return "● session " + m.session.id + " · waiting to start"
+		return badge + " · waiting to start"
 	case m.session.current >= len(m.session.steps):
-		return "● session " + m.session.id + " · waiting for step " + strconv.Itoa(len(m.session.steps)+1)
+		return badge + " · waiting for step " + strconv.Itoa(len(m.session.steps)+1)
 	}
-	return "● session " + m.session.id + " · step " + strconv.Itoa(m.session.current+1) + "/" + strconv.Itoa(len(m.session.steps))
+	return badge + " · step " + strconv.Itoa(m.session.current+1) + "/" + strconv.Itoa(len(m.session.steps))
 }
 
 // sessionStepHint names the keys for the step on screen.

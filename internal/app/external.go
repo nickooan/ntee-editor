@@ -37,8 +37,10 @@ type pendingExternal struct {
 	base        string // the revision to compare with, "" = HEAD (diffBaseOf)
 	lineNote    string // open: the sender's note for the line, "" = none
 	// session is the guided session this open is a step of ("" = none; a
-	// replay is never one).
-	session string
+	// replay is never one). diffSession: a diff session's step, shown in the
+	// diff against base even when base is HEAD.
+	session     string
+	diffSession bool
 }
 
 // WithExternal attaches the external-message stores and the socket's status
@@ -203,9 +205,10 @@ func (m Model) carryOutExternal(pending pendingExternal) (Model, tea.Cmd) {
 		m.lineNote.session = pending.session
 	}
 	note := ""
-	if pending.base != "" {
-		// A named revision lands in the diff of the file against it. A refusal
-		// (no repo, bad revision) leaves the file open with the reason shown.
+	if pending.base != "" || pending.diffSession {
+		// A named revision (or a diff session's step) lands in the diff of the
+		// file against it. A refusal (no repo, bad revision) leaves the file
+		// open with the reason shown.
 		next, cmd := m.enterDiff(pending.base)
 		m = next.(Model)
 		cmds = append(cmds, cmd)

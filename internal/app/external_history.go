@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -207,7 +208,7 @@ func (m Model) externalHistorySidebarList() sidebarList {
 			tail = received.Format("15:04:05")
 		}
 		if record.Command == extmsg.CommandReview {
-			tail += fmt.Sprintf(" (%d)", len(record.Paths))
+			tail += fmt.Sprintf(" (%d)", recordFileCount(record))
 		}
 		rows[i] = sidebarBadgeRow("  ", record.Command, len("review")+1, externalStatusColor(record.Status), tail, fileStyle)
 	}
@@ -247,7 +248,7 @@ func (m Model) externalDetailLines(width int) []string {
 		}
 		panel.rows = []panelRow{
 			{label: "command", pieces: []string{panelCommandStyle.Render(record.Command) +
-				panelDimStyle.Render(fmt.Sprintf(" · %d %s", len(record.Paths), pluralize("file", len(record.Paths))))}},
+				panelDimStyle.Render(fmt.Sprintf(" · %d %s", recordFileCount(record), pluralize("file", recordFileCount(record))))}},
 			{label: "git hash", pieces: []string{base + panelDimStyle.Render("  compared with the current files")}},
 			{label: "received", pieces: []string{panelStrongStyle.Render(record.ReceivedAt.Local().Format("2006-01-02 15:04:05"))}},
 			{label: "status", pieces: []string{status}},
@@ -309,4 +310,20 @@ func pluralize(noun string, count int) string {
 		return noun
 	}
 	return noun + "s"
+}
+
+// recordFileCount is how many distinct files a record names: a review
+// session's record repeats a file once per note, with another #L anchor.
+func recordFileCount(record store.ExternalRecord) int {
+	// The history list counts every row each frame: a record without
+	// anchors (a plain review) needs no set.
+	if !slices.ContainsFunc(record.Paths, func(path string) bool { return strings.Contains(path, "#L") }) {
+		return len(record.Paths)
+	}
+	seen := make(map[string]bool, len(record.Paths))
+	for _, path := range record.Paths {
+		file, _ := splitLineAnchor(path)
+		seen[file] = true
+	}
+	return len(seen)
 }

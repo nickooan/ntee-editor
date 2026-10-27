@@ -45,10 +45,13 @@ type reviewFile struct {
 	// loadGen counts the file's loads: a resent file reloads, and only the
 	// newest load's result lands.
 	loadGen int
-	// agentNote is the sender's note on the file ("" text = none), boxed on
-	// noteLine (1-based; 0 = the file's first change).
-	agentNote lineNoteOverlay
-	noteLine  int
+	// notes are the sender's notes on the file, one per line, in line order;
+	// the box shows the active one.
+	notes      []reviewNote
+	activeNote int
+	// contentHash identifies the loaded content (0 = none): notes shown with
+	// another one are earlier notes.
+	contentHash uint64
 }
 
 // reviewRequest is one file asked for review: its workspace path, the line
@@ -185,12 +188,18 @@ func (m Model) enterReview(requests []reviewRequest, base string) (Model, tea.Cm
 	}
 	m = m.leaveToEditOrQuery()
 	files := make([]reviewFile, 0, min(len(requests), maxReviewFiles))
-	seen := make(map[string]bool, len(requests))
+	indexByPath := make(map[string]int, len(requests))
 	for _, request := range requests {
-		if seen[request.workspaceRel] || len(files) == maxReviewFiles {
+		// A path repeated with another anchor is another note on the file
+		// (a replayed review session saves one entry per note).
+		if index, seen := indexByPath[request.workspaceRel]; seen {
+			files[index] = m.addReviewNote(files[index], request)
 			continue
 		}
-		seen[request.workspaceRel] = true
+		if len(files) == maxReviewFiles {
+			continue
+		}
+		indexByPath[request.workspaceRel] = len(files)
 		files = append(files, m.newReviewFile(request))
 	}
 	m.review = reviewState{
@@ -204,19 +213,12 @@ func (m Model) enterReview(requests []reviewRequest, base string) (Model, tea.Cm
 	return m, reviewPrepareCmd(m.review.gen, m.workspaceRoot, files)
 }
 
-// newReviewFile is a requested file, not resolved or loaded yet, with its
-// note laid out for the file's tab size.
-func (m Model) newReviewFile(request reviewRequest) reviewFile {
-	file := reviewFile{workspaceRel: request.workspaceRel}
-	return m.withAgentNote(file, request)
-}
-
-// withAgentNote sets (or replaces, on a resend) a file's note.
-func (m Model) withAgentNote(file reviewFile, request reviewRequest) reviewFile {
-	file.agentNote, file.noteLine = lineNoteOverlay{}, 0
-	if request.note != "" {
-		file.agentNote = newLineNote(request.workspaceRel, max(0, request.line-1), request.note, 0, m.cfg.Editor.TabWidth)
-		file.noteLine = request.line
+// newReviewFile is a requested file, not resolved or loaded yet, with the
+// requests' notes laid out for the file's tab size.
+func (m Model) newReviewFile(requests ...reviewRequest) reviewFile {
+	file := reviewFile{workspaceRel: requests[0].workspaceRel}
+	for _, request := range requests {
+		file = m.addReviewNote(file, request)
 	}
 	return file
 }
@@ -463,6 +465,7 @@ func loadReviewFile(workspaceRoot string, revision diffRevision, file reviewFile
 	var current []string
 	if exists {
 		current = splitBufferLines(string(data))
+		file.contentHash = reviewContentHash(data)
 	}
 
 	var document diffDocument
@@ -560,6 +563,10 @@ func (m Model) handleReviewLoaded(msg reviewLoadedMsg) (tea.Model, tea.Cmd) {
 		if !ok || files[index].loaded() || files[index].loadGen != file.loadGen {
 			continue
 		}
+		// The notes may have moved on while it loaded (a step to another
+		// note); the load only brings the diff.
+		file.notes = stampReviewNotes(files[index].notes, file.contentHash)
+		file.activeNote = files[index].activeNote
 		files[index] = file
 		if index == m.review.selection.index {
 			m.review.position = rowCursor{}.anchoredAt(file.landingRow(), m.reviewSpanFor(file))
@@ -612,11 +619,11 @@ func (m Model) selectReviewFile(index int) (Model, tea.Cmd) {
 	return m, m.reviewLoadSelectedCmd()
 }
 
-// landingRow is where selecting the file puts the cursor: on its note's line
-// when the note names one, else on its first change.
+// landingRow is where selecting the file puts the cursor: on its active
+// note's line, else on its first change.
 func (file reviewFile) landingRow() int {
-	if file.agentNote.text != "" && file.noteLine > 0 && len(file.document.rows) > 0 {
-		return diffRowForBufLine(file.document.rows, file.noteLine-1)
+	if note, ok := file.activeReviewNote(); ok {
+		return file.noteRow(note)
 	}
 	return file.document.firstChangeRow()
 }

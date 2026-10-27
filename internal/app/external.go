@@ -282,19 +282,26 @@ func (m Model) externalChoice(pending pendingExternal) choiceOverlay {
 	choice := choiceOverlay{kind: choiceExternalRequest, title: "External request · " + pending.record.Command}
 	if pending.record.Command == extmsg.CommandReview {
 		repos := map[string]bool{}
+		// A replayed review session names a file once per note.
+		var files []string
+		seen := map[string]bool{}
 		for _, review := range pending.reviews {
-			repos[m.deepestRepoFor(review.workspaceRel)] = true
+			if !seen[review.workspaceRel] {
+				seen[review.workspaceRel] = true
+				files = append(files, review.workspaceRel)
+				repos[m.deepestRepoFor(review.workspaceRel)] = true
+			}
 		}
-		summary := fmt.Sprintf("%d files", len(pending.reviews))
+		summary := fmt.Sprintf("%d files", len(files))
 		if len(repos) > 1 {
 			summary += fmt.Sprintf(" across %d repos", len(repos))
 		}
 		choice.body = append(choice.body, overlayLine{text: summary + " · against " + cmp.Or(pending.base, store.ExternalDefaultBase), style: overlayLineStrong})
 		const shown = 5
-		for _, review := range pending.reviews[:min(shown, len(pending.reviews))] {
-			choice.body = append(choice.body, overlayLine{text: "  " + review.workspaceRel})
+		for _, file := range files[:min(shown, len(files))] {
+			choice.body = append(choice.body, overlayLine{text: "  " + file})
 		}
-		if extra := len(pending.reviews) - shown; extra > 0 {
+		if extra := len(files) - shown; extra > 0 {
 			choice.body = append(choice.body, overlayLine{text: fmt.Sprintf("  +%d more", extra), style: overlayLineDim})
 		}
 		choice.choices = []string{"Review", "Ignore"}

@@ -19,7 +19,7 @@ func (m Model) renderDiff(width, height int) string {
 	if m.diffLoading {
 		return baseStyle.Render("computing diff…")
 	}
-	body := renderDiffDocument(m.liveDiffDocument(), m.diffPosition, diffSearchOverlay{}, width, height, m.tabWidthFor(m.openRel))
+	body := renderDiffDocument(m.liveDiffDocument(), m.diffPosition, diffSearchOverlay{}, nil, width, height, m.tabWidthFor(m.openRel))
 	if !m.lineNoteVisibleInDiff() {
 		return body
 	}
@@ -42,7 +42,9 @@ type diffSearchOverlay struct {
 // Gutter numbers are the new side's line numbers — they advance only past
 // ctx/add rows; del rows show a blank red gutter. Only the visible window of
 // rows is rendered, and ctx/add rows use the document's highlight cache.
-func renderDiffDocument(document diffDocument, position rowCursor, search diffSearchOverlay, width, height, tabWidth int) string {
+// noteRows marks rows holding a note not on screen (review mode): a ◆ takes
+// the +/- marker column.
+func renderDiffDocument(document diffDocument, position rowCursor, search diffSearchOverlay, noteRows map[int]bool, width, height, tabWidth int) string {
 	total := len(document.rows)
 	if total == 0 {
 		return ""
@@ -66,15 +68,26 @@ func renderDiffDocument(document diffDocument, position rowCursor, search diffSe
 		// The +/- marker sits in the spacer column after the number ("117+│ "),
 		// keeping the gutter exactly gutterWidth+3 columns like renderFile.
 		var number string
+		noted := noteRows[i]
 		switch row.kind {
 		case diffAdd:
-			number = diffGutterAddStyle.Render(pad(strconv.Itoa(row.bufLine+1), gutterWidth)) +
-				diffMarkAddStyle.Render("+") + diffGutterAddStyle.Render("│ ")
+			mark := diffMarkAddStyle.Render("+")
+			if noted {
+				mark = diffNoteMarkAddStyle.Render("◆")
+			}
+			number = diffGutterAddStyle.Render(pad(strconv.Itoa(row.bufLine+1), gutterWidth)) + mark + diffGutterAddStyle.Render("│ ")
 		case diffDel:
-			number = diffGutterDelStyle.Render(pad("", gutterWidth)) +
-				diffMarkDelStyle.Render("-") + diffGutterDelStyle.Render("│ ")
+			mark := diffMarkDelStyle.Render("-")
+			if noted {
+				mark = diffNoteMarkDelStyle.Render("◆")
+			}
+			number = diffGutterDelStyle.Render(pad("", gutterWidth)) + mark + diffGutterDelStyle.Render("│ ")
 		default:
-			number = gutterStyle.Render(pad(strconv.Itoa(row.bufLine+1), gutterWidth) + " │ ")
+			if noted {
+				number = gutterStyle.Render(pad(strconv.Itoa(row.bufLine+1), gutterWidth)) + diffNoteMarkStyle.Render("◆") + gutterStyle.Render("│ ")
+			} else {
+				number = gutterStyle.Render(pad(strconv.Itoa(row.bufLine+1), gutterWidth) + " │ ")
+			}
 		}
 
 		var content string

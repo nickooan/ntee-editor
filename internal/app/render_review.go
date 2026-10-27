@@ -74,6 +74,9 @@ func (m Model) reviewSidebarRow(row int) sidebarRow {
 		// Next to the name, so a narrow pane cuts the counts first.
 		fileRow.segments = append(fileRow.segments, sidebarSegment{text: " •", style: reviewUnseenStyle})
 	}
+	if len(file.notes) > 0 {
+		fileRow.segments = append(fileRow.segments, sidebarSegment{text: fmt.Sprintf(" ◆%d", len(file.notes)), style: reviewNoteCountStyle})
+	}
 	if file.status == reviewModified || file.status == reviewAdded || file.status == reviewDeleted {
 		// Counts colored like the diff itself: additions green, deletions red.
 		fileRow.segments = append(fileRow.segments,
@@ -103,6 +106,7 @@ var (
 	reviewHeaderAddStyle  = lipgloss.NewStyle().Foreground(colGreen).Background(colBg)
 	reviewHeaderDelStyle  = lipgloss.NewStyle().Foreground(colRed).Background(colBg)
 	reviewUnseenStyle     = lipgloss.NewStyle().Foreground(colOrange).Bold(true).Background(colBgChrome)
+	reviewNoteCountStyle  = lipgloss.NewStyle().Foreground(colAqua).Background(colBgChrome)
 )
 
 // renderReview draws the main pane: a one-line header naming the selected
@@ -135,7 +139,7 @@ func (m Model) renderReview(width, height int) string {
 		body = m.withReviewNote(file, baseStyle.Render("computing diff…"), width, rowsHeight)
 	case file.problem != "" && len(file.document.rows) == 0:
 		body = m.withReviewNote(file, reviewHeaderDimStyle.Render(file.problem), width, rowsHeight)
-	case file.status == reviewUnchanged && file.agentNote.text == "":
+	case file.status == reviewUnchanged && len(file.notes) == 0:
 		body = reviewHeaderDimStyle.Render("no changes against " + m.reviewBaseLabel())
 	default:
 		var search diffSearchOverlay
@@ -145,37 +149,48 @@ func (m Model) renderReview(width, height int) string {
 				focused: m.review.search.focused,
 			}
 		}
-		body = renderDiffDocument(file.document, m.review.position, search, width, rowsHeight, m.tabWidthFor(file.workspaceRel))
+		body = renderDiffDocument(file.document, m.review.position, search, file.noteMarkerRows(), width, rowsHeight, m.tabWidthFor(file.workspaceRel))
 		body = m.withReviewNote(file, body, width, rowsHeight)
 	}
 	return header + "\n" + body
 }
 
-// reviewNoteLabels are the borders of a review file's note box: it can't be
-// closed (Esc leaves the review), and Shift+↑/↓ walk files, so only the
-// wheel scrolls it.
-func reviewNoteLabels(file reviewFile) noteBoxLabels {
-	labels := noteBoxLabels{title: " note ", scrollHints: [2]string{"wheel", "wheel"}}
-	if file.noteLine > 0 {
-		labels.title = fmt.Sprintf(" note · L%d ", file.noteLine)
+// reviewNoteLabels are the borders of a review file's active note box: it
+// can't be closed (Esc leaves the review), and Shift+↑/↓ walk files, so only
+// the wheel scrolls it. The title counts the file's notes and dims a note
+// written against an earlier content of the file.
+func reviewNoteLabels(file reviewFile, note reviewNote) noteBoxLabels {
+	labels := noteBoxLabels{scrollHints: [2]string{"wheel", "wheel"}}
+	title := " note"
+	if len(file.notes) > 1 {
+		title += fmt.Sprintf(" %d/%d", min(file.activeNote, len(file.notes)-1)+1, len(file.notes))
 	}
+	if note.line > 0 {
+		title += fmt.Sprintf(" · L%d", note.line)
+	}
+	if file.noteIsEarlier(note) {
+		title += " · earlier"
+		labels.dimmed = true
+	}
+	labels.title = title + " "
 	return labels
 }
 
-// reviewNoteBox places a review file's note box in the main pane's diff rows
-// (below the file header): on its line's diff row, or the first change; over
-// a file with no rows, under the placeholder line.
+// reviewNoteBox places a review file's active note box in the main pane's
+// diff rows (below the file header): on its line's diff row, or the first
+// change; over a file with no rows, under the placeholder line.
 func (m Model) reviewNoteBox(file reviewFile, width, height int) (lineNoteBox, bool) {
-	if file.agentNote.text == "" {
+	note, ok := file.activeReviewNote()
+	if !ok {
 		return lineNoteBox{}, false
 	}
 	rows := file.document.rows
 	if !file.loaded() || len(rows) == 0 {
-		return file.agentNote.geometry(0, -1, 0, max(1, width-3), height)
+		return note.overlay.geometry(0, -1, 0, max(1, width-3), height)
 	}
 	start := fileViewportTop(m.review.position.row, m.review.position.scrollY, height, len(rows))
 	gutterWidth := diffGutterWidth(file.document, height)
-	return file.agentNote.geometry(file.landingRow()-start, m.review.position.row-start, gutterWidth, max(1, width-gutterWidth-3), height)
+	return note.overlay.geometry(file.noteRow(note)-start, m.review.position.row-start, gutterWidth, max(1, width-gutterWidth-3), height)
 }
 
 // withReviewNote splices the file's note box onto the rendered body.
@@ -188,7 +203,8 @@ func (m Model) withReviewNote(file reviewFile, body string, width, height int) s
 	for len(rows) < height {
 		rows = append(rows, "")
 	}
-	return strings.Join(spliceNoteBox(rows, box, renderLineNoteBox(box, reviewNoteLabels(file))), "\n")
+	note, _ := file.activeReviewNote()
+	return strings.Join(spliceNoteBox(rows, box, renderLineNoteBox(box, reviewNoteLabels(file, note))), "\n")
 }
 
 func (m Model) reviewBaseLabel() string {
@@ -235,12 +251,16 @@ func (m Model) renderReviewStatus() string {
 			line += statusTextStyle.Render(fmt.Sprintf("   Ln %d/%d", m.review.position.row+1, len(file.document.rows)))
 		}
 	}
+	noteHint := ""
+	if file, ok := m.selectedReviewFile(); ok && len(file.notes) > 1 {
+		noteHint = "[/] note · "
+	}
 	exitHint := "Esc exit"
 	if m.review.session != "" {
 		exitHint = "Esc quit session"
 	}
 	return withNotice(m, line) + statusTextStyle.Render("   ") +
-		hintStyle.Render("↑/↓ move · Shift+↑/↓ file · n/p change · "+m.actionHints(
+		hintStyle.Render("↑/↓ move · Shift+↑/↓ file · n/p change · "+noteHint+m.actionHints(
 			hintFor("find", keymap.Find), hintFor("files", keymap.GotoFile), hintFor("grep", keymap.Grep))+" · "+exitHint)
 }
 

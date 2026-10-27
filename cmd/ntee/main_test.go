@@ -327,3 +327,16 @@ func TestDeliverWaitSendsItsBudgetAndFallsBackForAnOlderEditor(t *testing.T) {
 		}
 	}
 }
+
+func TestHelpTellsAgentsToMergeNearbyNotes(t *testing.T) {
+	for _, want := range []string{
+		"A file can carry several notes, one per line",
+		"Don't scatter notes on lines close to each other",
+		"merge them into one note",
+		"merge notes that point at the same change or function into one",
+	} {
+		if !strings.Contains(msgHelp, want) {
+			t.Errorf("--msg help is missing %q", want)
+		}
+	}
+}

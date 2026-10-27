@@ -54,6 +54,10 @@ func (m Model) handleReviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.review.position = m.review.position.blockJump(1, span, file.document.isHunkStart)
 	case "p":
 		m.review.position = m.review.position.blockJump(-1, span, file.document.isHunkStart)
+	case "]":
+		return m.stepReviewNote(1), nil
+	case "[":
+		return m.stepReviewNote(-1), nil
 	}
 	return m, nil
 }

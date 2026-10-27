@@ -15,6 +15,7 @@ var (
 	lineNoteBorderStyle       = lipgloss.NewStyle().Foreground(colComment).Background(colBgChrome)
 	lineNoteTitleStyle        = lipgloss.NewStyle().Foreground(colAqua).Bold(true).Background(colBgChrome)
 	lineNoteSessionTitleStyle = lipgloss.NewStyle().Foreground(colOrange).Bold(true).Background(colBgChrome)
+	lineNoteDimTitleStyle     = lipgloss.NewStyle().Foreground(colComment).Background(colBgChrome)
 	lineNoteHeadingStyle      = lipgloss.NewStyle().Foreground(colAqua).Bold(true).Background(colBgChrome)
 	lineNoteBoldStyle         = lipgloss.NewStyle().Foreground(colFg).Bold(true).Background(colBgChrome)
 	lineNoteCodeStyle         = lipgloss.NewStyle().Foreground(colYellow).Background(colBgChrome)
@@ -29,6 +30,7 @@ var (
 type noteBoxLabels struct {
 	title       string
 	highlighted bool
+	dimmed      bool // an earlier note, written against older content
 	closeHints  [2]string
 	scrollHints [2]string
 }
@@ -76,8 +78,11 @@ func renderLineNoteBox(box lineNoteBox, labels noteBoxLabels) []string {
 	horizontal := box.width - 2
 	title := ansi.Truncate(labels.title, max(0, horizontal-1), "")
 	titleStyle := lineNoteTitleStyle
-	if labels.highlighted {
+	switch {
+	case labels.highlighted:
 		titleStyle = lineNoteSessionTitleStyle
+	case labels.dimmed:
+		titleStyle = lineNoteDimTitleStyle
 	}
 	top := lineNoteBorderStyle.Render("╭─") + titleStyle.Render(title) +
 		lineNoteBorderStyle.Render(strings.Repeat("─", max(0, horizontal-1-ansi.StringWidth(title)))+"╮")

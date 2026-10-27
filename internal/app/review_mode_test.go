@@ -375,3 +375,21 @@ func TestReviewBadBaseFailsEveryFileOfTheRepo(t *testing.T) {
 		}
 	}
 }
+
+func TestReviewMergesARepeatedFilesNotes(t *testing.T) {
+	m, _ := gitReviewWorkspace(t)
+	m, cmd := m.enterReview([]reviewRequest{
+		{workspaceRel: "apps/web/main.go", line: 3, note: "three"},
+		{workspaceRel: "apps/web/new.go"},
+		{workspaceRel: "apps/web/main.go", line: 1, note: "one"},
+		{workspaceRel: "apps/web/main.go"},
+	}, "")
+	m = settleExternal(m, cmd)
+	file := m.review.files[m.review.fileByPath["apps/web/main.go"]]
+	if len(m.review.files) != 2 || len(file.notes) != 2 || file.notes[0].overlay.text != "one" || file.notes[1].overlay.text != "three" {
+		t.Fatalf("a repeated path adds notes in line order: files=%d notes=%+v", len(m.review.files), file.notes)
+	}
+	if file.notes[0].contentHash != file.contentHash || file.noteIsEarlier(file.notes[0]) {
+		t.Fatal("notes shown with the loaded content take its hash")
+	}
+}

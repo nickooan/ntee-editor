@@ -28,14 +28,23 @@ const msgHelp = `ntee --msg — send a request to a running ntee editor
 
   ntee --msg --msg-note "<text>" open <file>#L<line>
   ntee --msg --msg-note - open <file>#L<line> <<'EOF'
-  <note, any number of lines>
+  <note, a few short lines>
   EOF
       Open the file as above and show the note in a box next to the line,
       to explain it. The #L<line> anchor is required with a note. "-" reads
-      the note from stdin. A tall note scrolls with Shift+Up/Down or the
-      mouse wheel; the user closes the box with Esc and keeps editing; it
-      also closes on the first edit. Notes are capped at 16 KiB. On the wire
-      the note follows the path after a line that is exactly "---".
+      the note from stdin. The user closes the box with Esc and keeps
+      editing; it also closes on the first edit. On the wire the note
+      follows the path after a line that is exactly "---".
+
+      Keep notes short. A person reads them in a small box beside the code,
+      so write a few short lines they take in at a glance: what changed and
+      why, one point per note. Prefer a bullet or two and ` + "`inline code`" + ` to
+      paragraphs; don't paste long explanations, logs or big code blocks.
+      More to say? Split it across steps or files, not into one long note.
+      Limits: the box shows at most 8 lines (fewer on a short terminal),
+      then scrolls — Shift+Up/Down or the mouse wheel (only the wheel in a
+      review); it is at most 100 columns wide, and longer lines wrap;
+      notes are capped at 16 KiB.
 
       Note formatting (light markdown):
         # Heading            any level (#–######), shown bold
@@ -72,6 +81,7 @@ Guided sessions — walk the user through code, one note at a time:
   ntee --msg --msg-session <id> wait
       Every step is an open with a note, sent with the same session id
       (1–64 letters, digits, '.', '_', '-'; pick a new one per walkthrough).
+      Keep each note to a few short lines (see "Keep notes short" above).
       Send the steps one after another without waiting: each returns at once
       and the editor queues them in order. The first step asks the user to
       start the session; from then on they walk the queue at their own pace —
@@ -123,6 +133,7 @@ Diff sessions — walk the user through changes, one note at a time:
   ntee --msg --msg-diff-session <id> --msg-base <rev> --msg-note "<text>" open <file>#L<line>
   ntee --msg --msg-diff-session <id> end
   ntee --msg --msg-diff-session <id> wait
+      Keep each note to a few short lines (see "Keep notes short" above).
       Like a guided session, but every step opens the file's diff view —
       against HEAD (the uncommitted changes) or the step's --msg-base — with
       the note in a box on its line, even when the file has no changes. The
@@ -146,7 +157,8 @@ Review sessions — a live review the user follows while you write code:
       git diff (against HEAD, or the first send's --msg-base) and your note
       in a box on its #L<line>, or on the file's first change when you name
       no line. Send a file again after changing it again: its diff refreshes
-      and the new note replaces the old one.
+      and the new note replaces the old one. Keep each note to a few short
+      lines (see "Keep notes short" above).
       The first send asks the user to start the session; files sent before
       they answer queue. The view follows each new file until the user moves
       to another one; after that new files are marked • for them to visit.
@@ -222,7 +234,8 @@ AGENTS.md:
   ` + "`ntee --msg review <changed files…>`" + ` (or pipe ` + "`git diff --name-only`" + `).
   To point at a specific place: ` + "`ntee --msg open <file>#L<line>`" + `; to explain
   it, add a note: ` + "`ntee --msg --msg-note \"<why>\" open <file>#L<line>`" + ` (markdown
-  is fine; ` + "`--msg-note -`" + ` reads a longer note from stdin).
+  is fine; ` + "`--msg-note -`" + ` reads a longer note from stdin). Keep notes short — a
+  few lines saying what changed and why, not an article.
   To walk the user through several places, send each as a step of one
   session, one after another: ` + "`ntee --msg --msg-session <id> --msg-note \"<why>\" open <file>#L<line>`" + `
   (each returns at once; exit 3 means the user ended it — stop sending), then

@@ -40,6 +40,9 @@ const (
 	// session" hint.
 	lineNoteSessionMinWidth = 40
 	lineNoteMaxWidth        = 100 // box width cap: prose past this gets hard to read
+	// lineNoteMaxBodyRows caps the note's visible rows (a third of the pane
+	// at most): a short box can step aside instead of covering the code.
+	lineNoteMaxBodyRows = 8
 )
 
 func newLineNote(rel string, line int, text string, editRevision, tabWidth int) lineNoteOverlay {
@@ -96,7 +99,9 @@ func (box lineNoteBox) height() int { return box.bodyRows + 2 }
 // and cursorRow are viewport rows — buffer lines in the file view, diff rows
 // in the diff): right of the gutter with a margin, as wide as the note needs
 // up to the pane, below the note's row — or above it when only that fits, or
-// when below would hide the cursor. ok=false when the pane is too narrow.
+// when below would hide the cursor. When neither side of the note's row
+// keeps the cursor clear, the box steps just below (or above) the cursor.
+// ok=false when the pane is too narrow.
 func (note lineNoteOverlay) geometry(anchorRow, cursorRow, gutterWidth, contentWidth, height int) (lineNoteBox, bool) {
 	available := contentWidth - 2*lineNoteMargin
 	if available < 12 || height < 4 {
@@ -110,7 +115,7 @@ func (note lineNoteOverlay) geometry(anchorRow, cursorRow, gutterWidth, contentW
 	box.width = input.Clamp(note.naturalWidth+4, min(minimum, available), min(available, lineNoteMaxWidth))
 	box.innerWidth = box.width - 4 // border + one cell of padding per side
 	box.lines = note.lines(box.innerWidth)
-	box.bodyRows = min(len(box.lines), max(3, height/2-2))
+	box.bodyRows = min(len(box.lines), max(3, min(lineNoteMaxBodyRows, height/3)))
 	box.scroll = input.Clamp(note.scroll, 0, len(box.lines)-box.bodyRows)
 
 	belowTop, aboveTop := anchorRow+1, anchorRow-box.height()
@@ -127,6 +132,14 @@ func (note lineNoteOverlay) geometry(anchorRow, cursorRow, gutterWidth, contentW
 		box.top = aboveTop
 	case box.top == aboveTop && covers(aboveTop) && fitsBelow && !covers(belowTop):
 		box.top = belowTop
+	}
+	if covers(box.top) {
+		switch {
+		case cursorRow+1+box.height() <= height:
+			box.top = cursorRow + 1
+		case cursorRow-box.height() >= 0:
+			box.top = cursorRow - box.height()
+		}
 	}
 	return box, true
 }

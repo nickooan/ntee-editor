@@ -175,8 +175,8 @@ func TestTallLineNoteScrollsWithTheWheel(t *testing.T) {
 	}
 	m, _ = openWithNote(t, m, "long.go#L40", strings.Join(note, "\n"))
 	plain := ansi.Strip(m.View().Content)
-	if !strings.Contains(plain, "↓ 30 more · esc") || strings.Contains(plain, "note row 40") {
-		t.Fatalf("a tall note is capped with a hint:\n%s", plain)
+	if !strings.Contains(plain, "↓ 32 more · esc") || strings.Contains(plain, "note row 9") {
+		t.Fatalf("a tall note is capped at 8 rows with a hint:\n%s", plain)
 	}
 
 	box, ok := m.lineNoteScreenBox()
@@ -201,6 +201,32 @@ func TestTallLineNoteScrollsWithTheWheel(t *testing.T) {
 	next, _ = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown, X: m.width - 1, Y: y})
 	if next.(Model).edit.cy == cursor {
 		t.Fatal("the wheel off the box still scrolls the file")
+	}
+}
+
+func TestLineNoteBoxStaysShortAndOffTheCursor(t *testing.T) {
+	var lines []string
+	for i := 1; i <= 40; i++ {
+		lines = append(lines, fmt.Sprintf("note row %d", i))
+	}
+	note := newLineNote("a.go", 0, strings.Join(lines, "\n"), 0, 4)
+	for _, c := range []struct{ height, wantBody int }{{60, lineNoteMaxBodyRows}, {24, 8}, {15, 5}, {9, 3}} {
+		box, ok := note.geometry(0, 0, 3, 60, c.height)
+		if !ok || box.bodyRows != c.wantBody {
+			t.Errorf("pane of %d rows: body %d rows, want %d", c.height, box.bodyRows, c.wantBody)
+		}
+	}
+	// The note's line is the top row, so the box can never go above it:
+	// moving the cursor down through where it sits, it must step aside.
+	const height = 40
+	for cursorRow := 0; cursorRow < height; cursorRow++ {
+		box, _ := note.geometry(0, cursorRow, 3, 60, height)
+		if cursorRow >= box.top && cursorRow < box.top+box.height() {
+			t.Fatalf("cursor row %d is under the box (top=%d height=%d)", cursorRow, box.top, box.height())
+		}
+		if box.top < 0 || box.top+box.height() > height {
+			t.Fatalf("cursor row %d: the box leaves the pane (top=%d height=%d)", cursorRow, box.top, box.height())
+		}
 	}
 }
 

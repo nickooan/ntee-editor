@@ -1,27 +1,35 @@
 // Package extmsg is the external-message channel of a running editor: a unix
 // socket per project over which other programs (coding agents, scripts) ask
-// the editor to open a file or review a set of changed files.
+// the editor to open a file, review a set of changed files, or stage edits.
 package extmsg
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
 
 // Message is one parsed request: the command line, then one path per line,
 // then for an open (or a review session's review) an optional note after a
-// LineNoteSeparator line.
+// LineNoteSeparator line. An edit session's write or replace carries a
+// payload there instead.
 type Message struct {
-	Command     string        // CommandOpen, CommandReview, CommandEnd or CommandWait
+	Command     string        // one of the Command constants
 	Args        []string      // tokens after the command, options aside: an optional base revision
 	Paths       []string      // payload lines, trimmed, blanks dropped; may carry a #L<n> anchor
 	LineNote    string        // free-form text shown next to the anchored line (or the file's first change), "" = none
 	Session     string        // the session option's id, "" = none
 	SessionKind SessionKind   // which session option named it; SessionNone without one
 	WaitBudget  time.Duration // wait only: how long the sender waits for the reply, 0 = not given
+	// Payload is a write's new content or a replace's EncodeReplace JSON:
+	// everything after the separator line, byte for byte. HasPayload tells
+	// an empty payload (an empty file) from none.
+	Payload    string
+	HasPayload bool
 }
 
 const (
@@ -29,6 +37,13 @@ const (
 	CommandReview = "review"
 	CommandEnd    = "end"  // session: the agent closes it
 	CommandWait   = "wait" // session: wait for the current step's answer
+
+	// Edit session commands: stage edits without touching the files.
+	CommandWrite   = "write"   // stage a file's whole new content
+	CommandReplace = "replace" // stage an exact-text replacement
+	CommandShow    = "show"    // a file's staged content (its disk content when not staged)
+	CommandStatus  = "status"  // the session's staged files
+	CommandDiscard = "discard" // drop the session's staged edits
 )
 
 // SessionKind is what a session shows. The first-line option that names the
@@ -40,12 +55,14 @@ const (
 	SessionNote               // --session=: each step opens its file with the note
 	SessionDiff               // --diff-session=: each step opens the file's diff with the note
 	SessionReview             // --review-session=: each review adds one file to a live review
+	SessionEdit               // --edit-session=: edits are staged, then applied or reviewed at end
 )
 
 const (
 	SessionOption       = "--session="
 	DiffSessionOption   = "--diff-session="
 	ReviewSessionOption = "--review-session="
+	EditSessionOption   = "--edit-session="
 	// WaitOption on a wait tells the editor how long the sender will wait,
 	// so the editor answers before then instead of holding the connection
 	// past the sender's exit.
@@ -61,14 +78,16 @@ func (kind SessionKind) Option() string {
 		return DiffSessionOption
 	case SessionReview:
 		return ReviewSessionOption
+	case SessionEdit:
+		return EditSessionOption
 	}
 	return ""
 }
 
-var sessionKinds = []SessionKind{SessionNote, SessionDiff, SessionReview}
+var sessionKinds = []SessionKind{SessionNote, SessionDiff, SessionReview, SessionEdit}
 
 // sessionOptionsText lists the session options for error messages.
-const sessionOptionsText = SessionOption + "<id>, " + DiffSessionOption + "<id> or " + ReviewSessionOption + "<id>"
+const sessionOptionsText = SessionOption + "<id>, " + DiffSessionOption + "<id>, " + ReviewSessionOption + "<id> or " + EditSessionOption + "<id>"
 
 var sessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
@@ -83,6 +102,8 @@ const (
 	MaxLineNoteBytes = 16 << 10
 	// MaxSessionWait caps how long a session request waits for the user.
 	MaxSessionWait = time.Hour
+	// MaxBodyBytes caps a reply's body (a staged file shown to the agent).
+	MaxBodyBytes = 4 << 20
 )
 
 // LineNoteSeparator is the line that ends the paths; everything after it is
@@ -91,17 +112,28 @@ const LineNoteSeparator = "---"
 
 // Parse reads a request: the first non-blank line is the command and its
 // arguments, every following non-blank line one path, until an optional
-// LineNoteSeparator line after which the rest is the note. Errors are
-// user-facing and go back to the sender verbatim.
+// LineNoteSeparator line after which the rest is the note — or, for a write
+// or replace, the payload. Errors are user-facing and go back to the sender
+// verbatim.
 func Parse(text string) (Message, error) {
-	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
 	var message Message
 	commandSeen, noteSeen := false, false
-	for index, line := range lines {
-		line = strings.TrimSpace(line)
+	for offset := 0; offset <= len(text); {
+		rawLine, next := text[offset:], len(text)+1
+		if end := strings.IndexByte(rawLine, '\n'); end >= 0 {
+			rawLine, next = rawLine[:end], offset+end+1
+		}
+		offset = next
+		line := strings.TrimSpace(rawLine)
 		if commandSeen && line == LineNoteSeparator {
+			rest := text[min(next, len(text)):]
+			if carriesPayload(message.Command) {
+				// The payload is file content: kept byte for byte.
+				message.Payload, message.HasPayload = rest, true
+				break
+			}
 			// Blank lines and indentation inside the note are its formatting.
-			message.LineNote = trimBlankLines(lines[index+1:])
+			message.LineNote = trimBlankLines(strings.Split(strings.ReplaceAll(rest, "\r\n", "\n"), "\n"))
 			noteSeen = message.LineNote != ""
 			break
 		}
@@ -161,6 +193,9 @@ func Parse(text string) (Message, error) {
 		if message.SessionKind == SessionReview {
 			return Message{}, errors.New("open takes no " + ReviewSessionOption + " — a review session sends review requests")
 		}
+		if message.SessionKind == SessionEdit {
+			return Message{}, errors.New("open takes no " + EditSessionOption + " — an edit session sends write, replace, show, status, discard, end and wait")
+		}
 		if message.Session != "" && message.LineNote == "" {
 			return Message{}, errors.New("a session step needs a note: open <file>#L<n>, then a --- line and the note")
 		}
@@ -199,10 +234,80 @@ func Parse(text string) (Message, error) {
 		if len(message.Args) > 0 || len(message.Paths) > 0 || noteSeen {
 			return Message{}, errors.New(message.Command + " takes only the session option")
 		}
+	case CommandWrite, CommandReplace, CommandShow:
+		if err := checkEditSessionCommand(message, noteSeen); err != nil {
+			return Message{}, err
+		}
+		if len(message.Paths) != 1 {
+			return Message{}, fmt.Errorf("%s needs exactly one path, got %d", message.Command, len(message.Paths))
+		}
+		switch {
+		case message.Command == CommandShow && message.HasPayload:
+			return Message{}, errors.New("show takes no content")
+		case message.Command != CommandShow && !message.HasPayload:
+			return Message{}, errors.New(message.Command + " needs its content after a " + LineNoteSeparator + " line")
+		case message.Command == CommandReplace:
+			if _, err := DecodeReplace(message.Payload); err != nil {
+				return Message{}, err
+			}
+		}
+	case CommandStatus, CommandDiscard:
+		if err := checkEditSessionCommand(message, noteSeen); err != nil {
+			return Message{}, err
+		}
+		if len(message.Paths) > 0 {
+			return Message{}, errors.New(message.Command + " takes only the session option")
+		}
 	default:
-		return Message{}, fmt.Errorf("unknown command %q — use open, review, end or wait", message.Command)
+		return Message{}, fmt.Errorf("unknown command %q — use open, review, end or wait (an edit session also takes write, replace, show, status and discard)", message.Command)
 	}
 	return message, nil
+}
+
+// carriesPayload reports whether a command's text after the separator line
+// is a payload rather than a note.
+func carriesPayload(command string) bool {
+	return command == CommandWrite || command == CommandReplace
+}
+
+// checkEditSessionCommand checks what every edit session command shares:
+// the edit session option, no base revision, and no note.
+func checkEditSessionCommand(message Message, noteSeen bool) error {
+	switch {
+	case message.SessionKind != SessionEdit:
+		return errors.New(message.Command + " needs " + EditSessionOption + "<id>")
+	case len(message.Args) > 0:
+		return errors.New(message.Command + " takes no base revision")
+	case noteSeen:
+		return errors.New(message.Command + " takes no note")
+	}
+	return nil
+}
+
+// ReplacePayload is a replace request's payload: the exact text to find and
+// its replacement. All replaces every match instead of exactly one.
+type ReplacePayload struct {
+	Old string `json:"old"`
+	New string `json:"new"`
+	All bool   `json:"all"`
+}
+
+// EncodeReplace is a replace request's payload text.
+func EncodeReplace(payload ReplacePayload) string {
+	data, _ := json.Marshal(payload) // a struct of strings and a bool always marshals
+	return string(data)
+}
+
+// DecodeReplace reads a replace request's payload.
+func DecodeReplace(text string) (ReplacePayload, error) {
+	var payload ReplacePayload
+	if err := json.Unmarshal([]byte(text), &payload); err != nil {
+		return payload, errors.New("bad replace payload: " + err.Error())
+	}
+	if payload.Old == "" {
+		return payload, errors.New("replace needs the old text")
+	}
+	return payload, nil
 }
 
 // sessionKindOf is the session kind a first-line token names, SessionNone
@@ -266,6 +371,24 @@ func ErrorReply(reason string) string {
 // EndedReply says a guided session is over; the sender must stop.
 func EndedReply(reason string) string {
 	return "ended " + oneLine(reason)
+}
+
+// BodyReply is an ok reply carrying content: "ok <bytes>", a newline, then
+// the content byte for byte. Only a reply read with SendForBody has a body.
+func BodyReply(body string) string {
+	return "ok " + strconv.Itoa(len(body)) + "\n" + body
+}
+
+// SplitBodyReply splits a raw reply into its first line and, for a
+// BodyReply, its body. A reply without a well-formed body comes back as its
+// trimmed text with hasBody false.
+func SplitBodyReply(raw string) (line, body string, hasBody bool) {
+	header, rest, found := strings.Cut(raw, "\n")
+	size, err := strconv.Atoi(strings.TrimPrefix(header, "ok "))
+	if !found || !strings.HasPrefix(header, "ok ") || err != nil || size < 0 || size > len(rest) {
+		return strings.TrimSpace(raw), "", false
+	}
+	return header, rest[:size], true
 }
 
 // IsEndedReply reports whether a reply line ends a session.

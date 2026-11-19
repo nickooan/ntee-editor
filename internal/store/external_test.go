@@ -27,7 +27,8 @@ func TestGlobalExternalSettingsDefaultsAndExplicitWrite(t *testing.T) {
 		}
 		return json.Unmarshal(data, &raw)
 	})
-	if err != nil || raw["enabled"] != true || raw["historyLimit"] != float64(DefaultExternalHistoryLimit) {
+	if err != nil || raw["enabled"] != true || raw["historyLimit"] != float64(DefaultExternalHistoryLimit) ||
+		raw["agentEditPolicy"] != AgentEditPolicyReview || raw["agentEditKeep"] != float64(DefaultAgentEditKeep) {
 		t.Fatalf("stored record = %v %v", raw, err)
 	}
 	if err := settingsStore.SaveExternalSettings(ExternalSettings{Enabled: false, HistoryLimit: 500}); err != nil {
@@ -35,6 +36,26 @@ func TestGlobalExternalSettingsDefaultsAndExplicitWrite(t *testing.T) {
 	}
 	if settings, _ = settingsStore.LoadExternalSettings(); settings.HistoryLimit != MaxExternalHistoryLimit {
 		t.Fatalf("limit clamps to the maximum: %d", settings.HistoryLimit)
+	}
+	if err := settingsStore.SaveExternalSettings(ExternalSettings{AgentEditPolicy: AgentEditPolicyApply, AgentEditKeep: 500}); err != nil {
+		t.Fatal(err)
+	}
+	if settings, _ = settingsStore.LoadExternalSettings(); settings.AgentEditPolicy != AgentEditPolicyApply || settings.AgentEditKeep != MaxAgentEditKeep {
+		t.Fatalf("agent edit settings round-trip, keep clamped: %+v", settings)
+	}
+}
+
+func TestLegacyExternalSettingsGetAgentEditDefaults(t *testing.T) {
+	dir := t.TempDir()
+	err := withDBAt(nteedb.Options{Dir: dir}, func(db *nteedb.DB) error {
+		return db.Put(externalSettingsKey, []byte(`{"enabled":true,"historyLimit":7}`))
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, err := NewGlobalExternalSettings(dir).LoadExternalSettings()
+	if err != nil || settings.AgentEditPolicy != AgentEditPolicyReview || settings.AgentEditKeep != DefaultAgentEditKeep || settings.HistoryLimit != 7 {
+		t.Fatalf("a record saved before agent edits loads their defaults: %+v %v", settings, err)
 	}
 }
 

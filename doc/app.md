@@ -24,7 +24,7 @@ Three design rules shape almost every function here:
 | `modeCommand` | the bottom `:` command bar |
 | `modeExec` | the `@exec >` editor-command bar (Ctrl+E from edit) |
 | `modeSearchExec` | the replace bar layered on search (Ctrl+E from search) |
-| `modeInspect` | the Ctrl+T inspection dashboard (store stats, LSP control, theme, op-commands table, keybinds, code style) |
+| `modeInspect` | the Ctrl+T inspection dashboard (store stats, LSP control, theme, op-commands table, keybinds, code style, external messages, agent edits) |
 | `modeDiff` | read-only git-diff review of the buffer (`git diff` in @exec) |
 | `modeConflict` | interactive merge-conflict resolution over the live buffer (`git scf`) |
 | `modeOpenAPI` / `modeGraphQL` | read-only rendered document previews (`openapi` / `graphql`) |
@@ -192,11 +192,11 @@ Every opened file becomes a tab; the list, active index, and per-tab cursors per
 #### keys_inspect.go
 
 - `enterInspect` (Ctrl+T) opens the dashboard and fires `fetchDBInfoCmd` — store statistics involve real I/O (`BlobUsage` does per-record preads), so they load async.
-- `runInspectCommand` dispatches the `@inspection >` bar: `db compact|relieve` (run via `maintCmd` in the background, guarded by `inspectBusy` against duplicates; completion re-fetches stats), `lsp enable|disable <lang|all>`, `syscolor <style>`, `keybind …` (keys_keybinds.go), `tab …` (keys_codestyle.go), and `ext …` (keys_inspect_external.go).
+- `runInspectCommand` dispatches the `@inspection >` bar: `db compact|relieve` (run via `maintCmd` in the background, guarded by `inspectBusy` against duplicates; completion re-fetches stats), `lsp enable|disable <lang|all>`, `syscolor <style>`, `keybind …` (keys_keybinds.go), `tab …` (keys_codestyle.go), `ext …` (keys_inspect_external.go), and `edits …` (keys_inspect_agent_edits.go).
 - `inspectLSPCommand` persists the config change *first* (nothing half-applied on a failed write) and then applies it live through the registry — `m.cfg` itself is never mutated because its Languages map is shared with server goroutines.
 - `inspectSyscolorCommand` validates against the curated style list, persists, applies via `syntax.SetStyle`, and invalidates every highlight cache so the new colors show immediately.
 
-- `handleInspectKey` hands every key to whichever right-hand panel has focus: the op-commands table, the style picker, the lsp picker, the keybind picker or the external picker. `→` at the end of the bar input moves focus into the panel on the op-commands, system, lsp, keybinds and external sections. `enterInspect` also loads the external settings and history count.
+- `handleInspectKey` hands every key to whichever right-hand panel has focus: the op-commands table, the style picker, the lsp picker, the keybind picker, the external picker or the agent edits picker. `→` at the end of the bar input moves focus into the panel on the op-commands, system, lsp, keybinds, external and agent edits sections. `enterInspect` also loads the external settings and history count, and the agent edit sessions.
 - The lsp verbs come in two kinds. `start`, `stop` and `restart` act on this session only and never touch the config: start is the registry's `Enable`, stop is `Stop` (the server starts again on demand), and restart is both. `enable` and `disable` also save the language's enable flag. `applyLSPAction` runs one verb for one language, and both the `lsp <verb> <lang|all>` bar command and the picker use it.
 - `setLSPEnabled` is the persisting path behind enable/disable. It writes the config first, then calls the registry's `Enable`/`Disable`, and reports whether it was applied, so the bar is only cleared on success.
 - The lsp picker (`lspPickerState`) is the lsp panel's language list:
@@ -395,6 +395,7 @@ Review mode shows a set of files — possibly spanning nested repos of the works
 - `renderReview` draws a one-line header (status badge, path, repo, counts) over `renderDiffDocument`. `reviewSidebarList` draws the cached tree lazily (`rowAt` = `reviewSidebarRow`, so a frame formats only the visible rows of a large review): directories with the main tree's `↓`/`→` markers (a folded one followed by how many reviewed files it hides), files with their status badge in the marker column, a space, then the name, `◆n` when the file has notes, and its change counts (`+n` green, `−n` red, like the diff). `reviewSelectedRow` highlights the selected file, or its nearest visible folder while that is folded; `activateReviewRow` folds a clicked directory or selects a clicked file.
 
 - A file's notes (review_notes.go) are `reviewFile.notes`, one `reviewNote` per line in line order (line 0 = the file's first change), each a `lineNoteOverlay` with its own layout cache. `addReviewNote` keys a note by its line: one on a line that already has a note replaces it, any other is inserted, and either becomes `activeNote`; a request without a note leaves them alone. Only the active note is boxed — two boxes on nearby lines would overlap — by the shared note box: `reviewNoteBox` places it on its line's diff row (`noteRow`), or the first change, or under the placeholder of a file with no rows, and `withReviewNote` splices it after `renderDiffDocument`. The other notes' rows get a `◆` in the diff's +/- column (`noteMarkerRows`, passed to `renderDiffDocument`, which diff mode leaves nil). `reviewNoteLabels` titles the box `note 2/3 · L40`, plus a dimmed `· earlier` when the note was first shown with another content of the file: `loadReviewFile` hashes the content (`reviewContentHash`), `handleReviewLoaded` stamps notes not shown yet with it (`stampReviewNotes`, keeping the notes and active one the file has now — they may have moved on during the load), and `noteIsEarlier` compares. The status bar adds `[/] note` for a file with several. It can't be closed and only the wheel scrolls it (`reviewNoteHit`, `scrollReviewNote`), since Esc leaves the review and Shift+↑/↓ walk files. A file's `problem` is why it has no diff (binary, too large, failure).
+- `finishReviewDocument` completes a loaded file from its diff — highlights, status, tab expansion, search corpus — shared by `loadReviewFile` and the agent edit review's `loadStagedReviewFile`; `reviewLoadCmd` picks the staged loader for a file with a `staged` source.
 
 *Plus small helpers: `leaveToEditOrQuery`, `newReviewFile`, `activeReviewNote`, `noteRequests`, `reviewFileCount`, `reviewNoteLabels`, `selectReviewPath`, `reviewGoToGrepHit`, `reviewFuzzyCandidates`, `reviewSpan`, `reviewRowsHeight`, `exitReview`, `reviewBadge`, `reviewRepoName`, `reviewMatchesFor`, `landReviewSearch`, `renderReviewStatus`.*
 
@@ -414,11 +415,44 @@ A review session (`--review-session=`) is a live review an agent grows while it 
 #### external_receiver.go
 
 - `ExternalReceiver` is the socket server's handler (see [extmsg.md](extmsg.md)); it runs on connection goroutines. `Handle` checks the global switch per message (so a toggle in another window applies), parses, resolves each path to workspace-relative with `resolvePath` (absolute or relative, symlink spellings retried by `relativeToWorkspace`, the file jail enforced with `filetree.IsContained`; an `open` target must be an existing file), records the request as `pending` in the project history (with its base revision, `HEAD` when none was sent, and the sender's note in `LineNote`), and queues it for the UI. A note whose open path has no `#L<n>` anchor is refused here — it would have no line to sit next to. A session request (see external_session.go) is queued with its `sessionKind` (not stored: the raw text shows it, and a replay is never a session); a review session's note needs no line anchor (it then sits at the file's first change), and its requests are not recorded on arrival — the editor saves the whole session once it is over (review_session.go); only its `wait` is held long — answered only when the user finishes or closes the session — for up to `sessionWait` (`extmsg.MaxSessionWait`), or, when the sender gave a `--wait=` budget, `waitReplyMargin` (2 s) short of it (`waitFor`), so no connection outlives its sender; it then replies `ok waiting …`, naming the session's own flag (`sessionWaitingReply`). Steps, review-session files and `end` are answered at once by the UI, so they wait only the usual `replyWait` (3 s). The `wait`/`end` control commands are not recorded in the history. It then waits up to 3 s for the UI's outcome so the sender learns "opened …" or "waiting for the user to confirm" — never blocking on the user's answer itself.
-- `SetSink` starts the single dispatcher goroutine that forwards queued requests to `program.Send` in arrival order; a full queue makes the sender hear "busy" instead of piling up goroutines.
+- `SetSink` starts the single dispatcher goroutine that forwards queued requests to `program.Send` in arrival order; a full queue makes the sender hear "busy" instead of piling up goroutines. It also keeps the sink for `notify` (agent_edit_receiver.go).
+- An edit session's requests (`SessionEdit`) never queue for the UI except `end` and `wait`: `write`, `replace`, `show`, `status` and `discard` are carried out right here (`handleAgentEdit`). Staging needs no UI, so the agent hears at once whether its edit applied. `end` is marked on the registry here first (`MarkAgentEnded`), then queued with the settings that decide what happens (`agentEditSettings`: policy and keep, read when the end arrived), and waits up to `agentEditEndWait` (40 s), since in agent-applies mode the reply comes once the files are written.
+
+#### agent_edit_receiver.go
+
+The socket side of agent edit sessions (see [staging.md](staging.md)).
+
+- `handleAgentEdit` resolves the path through the same jail as every request (`resolvePath`; a `#L<n>` anchor becomes a replace's line hint, and a write refuses one), stages through the registry, and answers with what changed (`agentEditReplyText`: the lines, the edit count, the files staged, and on the session's first edit how it works). `show` and `status` answer with a body (`extmsg.BodyReply`); `discard` drops the session as "the agent". After a change it tells the UI with `notify` (`agentEditsChangedMsg`), without waiting: the sender already has its reply.
+
+*Plus small helpers: `WithAgentEdits`, `agentEditStatusText`, `lineRangeText`, `countText`.*
+
+#### agent_edits.go
+
+The editor's side of agent edit sessions: `agentEditsState` holds the registry, the agents waiting on `wait` (replaced, never mutated, since Model copies share it), the sessions being applied, and the panel's lists (`pending` mirrors the registry as of the last change, so frames never take its locks; `finished` is loaded from the log off the UI goroutine).
+
+- `handleAgentEditMessage` takes an edit session's `end` and `wait`. A `wait` is answered at once for a session finished this run (`agentEditOutcomeReply`: all applied → `ok finished …`, exit 0; some not applied → `error …` naming them, exit 1; discarded → `ended …`, exit 3), else held until the session is over. An `end` under the **agent applies** policy applies at once and answers once the files are written. Under **review first** it answers that the user is reviewing and offers `agentEditsReadyChoice` (Review now / Later); with another overlay or a review session up, only a notice points to Ctrl+T.
+- `startAgentEditApply` is the one apply path for both policies.
+  - The open buffer's file is applied on the UI goroutine by `applyAgentEditToBuffer`: the staged content replaces the buffer as one undoable snapshot (the `applyConflictChoice` pattern), then `saveEdit`, so undo brings back what the user had. This happens only while the disk still matches the staged base.
+  - Unsaved work — the dirty buffer, or another tab's draft — is skipped when the agent applies. When the user applies, `agentEditApplyChoice` asks: replace it (the draft is dropped; the buffer keeps it in undo) or skip those files.
+  - Every other file is written by `staging.ApplyFiles` off the UI goroutine, which also records the outcome (`Finish`).
+- `handleAgentEditsFinished` lands an applied or discarded session. The end and every waiter hear the outcome (`agentEditSessionOver`), a pending review of it closes, the status bar shows the outcome (an error line when files were not written), git status refreshes, and the panel's finished list reloads.
+- `handleAgentEditsChanged` follows the socket side: the pending list refreshes, a staged edit shows in the status bar, and a session the agent discarded ends for its waiters.
+
+*Plus small helpers: `WithAgentEdits`, `refreshAgentEditsPending`, `loadAgentEditsFinishedCmd`, `handleAgentEditsFinishedList`, `cloneWaiters`, `unsavedAgentEditFiles`, `agentEditFileIsOpen`, `rootRelOf`, `startAgentEditDiscard`, `agentEditKeep`, `agentEditDiscardChoice`, `agentEditFileLines`, `resolveAgentEditsChoice`, `askApplyAgentEdits`, `askDiscardAgentEdits`.*
+
+#### agent_edit_review.go
+
+- `enterAgentEditReview` opens review mode over an agent edit session (`review.agentEdits`). Each file is a `reviewFile` with a `staged` source, diffed from its content before the agent's edits to the staged content (`loadStagedReviewFile`: no disk, no git).
+  - Its note is the edit log (`agentEditFileNote`). A pending file that changed on disk since it was staged also gets a warning; the disk check runs off the UI goroutine.
+  - `handleAgentEditReviewPrepared` lays the notes out and lands like any prepared review.
+  - A pending session's review takes `A` (apply all, after `agentEditApplyChoice`) and `X` (discard, after `agentEditDiscardChoice`) through `handleAgentEditReviewKey`. Esc leaves with the session still staged.
+  - A finished session opens as a read-only **trace** (`agentEditsTrace`): before → final content, each file's result in its note.
+
+*Plus small helpers: `agentEditReviewBadge`.*
 
 #### external.go
 
-- `handleExternalMessage` routes session requests to `handleSessionMessage` (external_session.go), refuses anything else while a review session runs, then resolves the request (`resolveExternal`: for `open`, the file stays reachable from the current root when it lies under it, otherwise the editor re-roots at the deepest nested repo holding it) and acts at once only from the plain query view. Anywhere else — editing, a bar, a special view, an overlay — it opens the choice overlay (`externalChoice`: the target, a highlighted `switches repo: a/ → b/` line, the draft note for a dirty buffer, a warning for a running op-command). A newer request supersedes an unanswered one; an unanswered `:rm` is cancelled, never confirmed.
+- `handleExternalMessage` routes an edit session's `end`/`wait` to `handleAgentEditMessage` (agent_edits.go) and other session requests to `handleSessionMessage` (external_session.go), refuses anything else while a review session runs, then resolves the request (`resolveExternal`: for `open`, the file stays reachable from the current root when it lies under it, otherwise the editor re-roots at the deepest nested repo holding it) and acts at once only from the plain query view. Anywhere else — editing, a bar, a special view, an overlay — it opens the choice overlay (`externalChoice`: the target, a highlighted `switches repo: a/ → b/` line, the draft note for a dirty buffer, a warning for a running op-command). A newer request supersedes an unanswered one; an unanswered `:rm` is cancelled, never confirmed.
 - `carryOutExternal` backs out to edit/query, switches repo with `switchRoot` when needed, then `openFileAtLine` — or enters review against the base. An `open` that names a revision, or a diff session's step (against `HEAD` when it names none), then enters the diff view of the file against it (`enterDiff`); if the diff is refused (no repo), the file stays open and the record notes why. The base comes from the record (`diffBaseOf` maps the stored `HEAD` to the views' `""`), so a replay compares against the same revision, always with the current files. `saveExternalStatusCmd` records the outcome (`opened`, `reviewed`, `ignored`, `superseded`, `error`); replays from the history view leave the stored record alone. An open with a note sets `m.lineNote` on the landed line (see line_note.go); the confirm overlay shows the note's first line, and the reply says "with a note". With a base revision the diff opens first and a plain note shows once the user leaves it for edit mode; a diff session's step shows its box in the diff (see external_session.go).
 
 *Plus small helpers: `WithExternal`, `diffBaseOf`, `deepestRepoFor`, `externalOutcome`, `lineNoteOutcome`, `resolveExternalChoice`, `supersedePendingExternal` (drops an unanswered request for a newer one; a session waiting to start hears it never will), `repoDisplayName`, `sendExternalReply`.*
@@ -472,6 +506,25 @@ The Ctrl+T `external` section: the socket's status, the global on/off switch, th
 - `saveExternalSettingsCmd` writes the global settings off the UI goroutine; a lowered limit also trims this project's history at once. `inspectExternalCommand` is the bar form: `ext on|off`, `ext limit <n>`, `ext history`. In single-file mode the window never listens, so the panel shows **accept messages** as disabled and both the toggle and `ext on|off` are refused — the global switch, which folder windows share, stays as it was.
 
 *Plus small helpers: `loadExternalSettingsCmd`, `handleExternalSettings`, `setExternalEnabled`, `setExternalHistoryLimit`, `renderInspectExternal`.*
+
+#### keys_inspect_agent_edits.go / render_inspect_agent_edits.go
+
+The Ctrl+T `agent edits` section.
+
+- **Rows.** The panel has three kinds of row:
+  - what happens when an agent ends a session (**review first**, the default, or **agent applies**);
+  - how many finished sessions each project keeps (1–100, default 20);
+  - the sessions themselves, pending first, then finished, newest first.
+- **Keys** (`handleAgentEditsPickerKey`):
+  - Enter toggles the policy, or edits the keep limit in place (`handleAgentEditsKeepKey`).
+  - Enter on a session opens it: a pending one as its review, read live from the registry; a finished one as its trace.
+  - `a` / `x` apply / discard a pending session.
+- **Saving.** `setAgentEditPolicy` and `setAgentEditKeep` save through `saveExternalSettingsCmd`; a lowered keep also trims the finished sessions at once.
+- **Bar.** `inspectAgentEditsCommand` is the bar form: `edits review|apply`, `edits keep <n>`, `edits discard <session>`.
+- **Rendering.** `renderInspectAgentEdits` windows the session rows around the selection (`agentEditSessionRow`, `agentEditTime`).
+- **Single-file mode** has no registry, and the panel says so.
+
+*Plus small helpers: `agentEditsPickerRowCount`, `agentEditsSessionAt`.*
 
 ### Overlays
 

@@ -63,6 +63,9 @@ type externalStatusSavedMsg struct{ err error }
 // view, an overlay — the user is asked first. A newer request replaces an
 // unanswered one.
 func (m Model) handleExternalMessage(msg externalMessageMsg) (tea.Model, tea.Cmd) {
+	if msg.sessionKind == extmsg.SessionEdit {
+		return m.handleAgentEditMessage(msg)
+	}
 	if msg.record.Session != "" && !msg.replay {
 		return m.handleSessionMessage(msg)
 	}

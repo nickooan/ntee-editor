@@ -65,10 +65,24 @@ Op-commands (the Ctrl+R shell command templates) are the one *global* record: th
 
 The persistence behind external messages (see [extmsg.md](extmsg.md)).
 
-- `ExternalSettings` (`Enabled`, `HistoryLimit`) is a *global* record under `extmsg:settings` in the global db, so a toggle in one window applies to all. Both fields are always written (`withDefaults`: an unset limit becomes 10, and the limit is clamped to 1–100), and a missing record loads as `DefaultExternalSettings` — off, 10. `GlobalExternalSettings` and `MemoryExternalSettings` implement `ExternalSettingsStore`.
+- `ExternalSettings` (`Enabled`, `HistoryLimit`, `AgentEditPolicy`, `AgentEditKeep`) is a *global* record under `extmsg:settings` in the global db, so a toggle in one window applies to all. Every field is always written (`withDefaults`: an unset limit becomes 10 and is clamped to 1–100; the policy is `review` unless it is `apply`; an unset keep becomes 20 and is clamped to 1–100), and a missing record loads as `DefaultExternalSettings` — off, 10, review, 20. A record saved before the agent edit fields existed loads them as their defaults. `GlobalExternalSettings` and `MemoryExternalSettings` implement `ExternalSettingsStore`.
 - `ExternalHistory` keeps one project's latest requests in its own ntee-db under `ExternalDir` (`~/.ntee-editor/external/<project hash>/history`, next to the socket). Records (`ExternalRecord`: command, args, base revision, workspace-relative paths, raw text, receive time, status, the outcome `Note`, the sender's `LineNote` for an open, the `Session` it belongs to, and `PathNotes`, one note per path) are keyed `msg:<zero-padded nanos>` so the lowest key is the oldest. Every record carries the same value of one secondary index, so ntee-db's `MaxPerValue` cap *is* the history limit: an append past it evicts the oldest record natively. The cap is set at open, which is why this store opens per call — a changed limit applies on the very next write — and `TrimExternal` trims at once when the user lowers it. `UpdateExternalStatus` rewrites a record's status in place (overwriting a key never evicts). `Base` is stored explicitly — `ExternalDefaultBase` (`HEAD`) when the request named no revision — and `withDefaults` fills it in on load for records saved before the field existed (a review's single argument, else `HEAD`). `LineNote` and `Session` are likewise always written — `""` for none, which is also what a legacy record without them loads as. `PathNotes` is always written with one entry per path (`""` for a file without a note); `withDefaults` pads a legacy record's to that length. Only a review session's record fills it — the editor writes that record itself, once, when the session is over. A file with several notes appears once per note, its path repeated with each `#L<n>` anchor; the history and replay count and merge them as one file.
 
 *Plus: `ExternalSocketPath`, `ExternalDefaultBase`, `NewExternalRecordKey`, `ClampExternalHistoryLimit`, the `ExternalStatus` values, `MemoryExternalHistory`, `sortExternalNewestFirst`, and `projectDir` (store.go — the one per-project hash every per-project directory shares).*
+
+### agent_edits.go
+
+The persistence behind agent edit sessions (see [staging.md](staging.md)).
+
+- `AgentEditSession` is one session kept whole in a single record: its status (`pending`, `applied`, `partly-applied`, `not-applied`, `discarded`), the policy that finished it, start / agent-end / end times, an outcome sentence, and its files (`AgentEditFile`). Each file has its content before the agent's edits (`BaseContent`, plus whether it existed), the staged `Content`, what applying did with it (`Result` and `ResultNote`), and the edits in order (`AgentEdit`). An edit records its op, a replace's old and new text, and the lines it changed, so a finished session can be traced back edit by edit.
+- `AgentEditLog` is the ntee-db-backed `AgentEditLogStore`, one per project under `ExternalDir` (`~/.ntee-editor/external/<project hash>/edits`, next to the history), opened per call like the history.
+  - A pending session lives under `agentedit:pending:<start nanos>:<id>` and is rewritten on every edit (`SavePendingAgentEdit`).
+  - Finishing moves it to `agentedit:done:<end nanos>:<id>` (`FinishAgentEdit`), then trims the finished keys to the newest `keep`.
+  - Keys sort by time, so trimming is a key-order cut over the finished prefix only, and a pending session is never evicted.
+  - `TrimAgentEdits` trims at once when the user lowers the keep setting.
+  - Rewrites leave dead space that the Ctrl+T `db relieve` reclaims.
+
+*Plus: `AgentEditSession.Finished`, `MemoryAgentEditLog` (tests and the fallback), `ClampAgentEditKeep` (external.go), the key helpers and `reverseAgentEdits`.*
 
 ### scoped.go
 

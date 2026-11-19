@@ -208,6 +208,9 @@ func (m Model) withReviewNote(file reviewFile, body string, width, height int) s
 }
 
 func (m Model) reviewBaseLabel() string {
+	if m.review.agentEdits != "" {
+		return "the file before the agent's edits"
+	}
 	if m.review.base == "" {
 		return "HEAD"
 	}
@@ -230,8 +233,11 @@ func (m Model) renderReviewStatus() string {
 		return m.renderDocumentSearchStatus("review", m.review.search, len(m.reviewMatchesFor(m.review.search.query)))
 	}
 	line := promptStyle.Render("@review")
-	if m.review.session != "" {
+	switch {
+	case m.review.session != "":
 		line += statusTextStyle.Render("   ") + sessionBadgeStyle.Render(m.reviewSessionBadge())
+	case m.review.agentEdits != "":
+		line += statusTextStyle.Render("   ") + sessionBadgeStyle.Render(m.agentEditReviewBadge())
 	}
 	if !m.review.preparing && len(m.review.files) > 0 {
 		loaded := 0
@@ -240,10 +246,13 @@ func (m Model) renderReviewStatus() string {
 				loaded++
 			}
 		}
-		if m.review.session != "" {
+		if m.review.session != "" || m.review.agentEdits != "" {
 			line += statusTextStyle.Render("  ")
 		}
-		line += statusTextStyle.Render(fmt.Sprintf(" file %d/%d   base %s", m.review.selection.index+1, len(m.review.files), m.reviewBaseLabel()))
+		line += statusTextStyle.Render(fmt.Sprintf(" file %d/%d", m.review.selection.index+1, len(m.review.files)))
+		if m.review.agentEdits == "" {
+			line += statusTextStyle.Render("   base " + m.reviewBaseLabel())
+		}
 		if loaded < len(m.review.files) {
 			line += statusTextStyle.Render("   ") + editingStyle.Render(fmt.Sprintf("loading %d/%d…", loaded, len(m.review.files)))
 		}
@@ -256,8 +265,11 @@ func (m Model) renderReviewStatus() string {
 		noteHint = "[/] note · "
 	}
 	exitHint := "Esc exit"
-	if m.review.session != "" {
+	switch {
+	case m.review.session != "":
 		exitHint = "Esc quit session"
+	case m.review.agentEdits != "" && !m.review.agentEditsTrace:
+		exitHint = "A apply all · X discard · Esc later"
 	}
 	return withNotice(m, line) + statusTextStyle.Render("   ") +
 		hintStyle.Render("↑/↓ move · Shift+↑/↓ file · n/p change · "+noteHint+m.actionHints(

@@ -45,6 +45,28 @@ func SendWithTimeout(socketPath, text string, timeout time.Duration) (string, er
 	return "", readErr
 }
 
+// SendForBody is SendWithTimeout for a request whose reply may carry a body
+// (BodyReply): it reads up to MaxBodyBytes and keeps the body byte for
+// byte. line is the reply's first line.
+func SendForBody(socketPath, text string, timeout time.Duration) (line, body string, hasBody bool, err error) {
+	conn, err := net.DialTimeout("unix", socketPath, dialTimeout)
+	if err != nil {
+		return "", "", false, err
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(timeout))
+	writeErr := writeRequest(conn, text)
+	reply, readErr := io.ReadAll(io.LimitReader(conn, MaxBodyBytes+64))
+	if strings.TrimSpace(string(reply)) != "" {
+		line, body, hasBody = SplitBodyReply(string(reply))
+		return line, body, hasBody, nil
+	}
+	if writeErr != nil {
+		return "", "", false, writeErr
+	}
+	return "", "", false, readErr
+}
+
 // writeRequest sends the request and half-closes — the end-of-request marker
 // the server reads up to.
 func writeRequest(conn net.Conn, text string) error {

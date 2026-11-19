@@ -85,6 +85,7 @@ func TestMsgHelpExplainsEditSessions(t *testing.T) {
 		"--msg-replace-all",
 		"Ctrl+T › agent edits",
 		"Builds and tests\n      see staged edits only once they are applied",
+		"claude mcp add ntee -- ntee --mcp",
 	} {
 		if !strings.Contains(msgHelp, want) {
 			t.Fatalf("msg help is missing %q", want)

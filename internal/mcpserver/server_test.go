@@ -1,0 +1,492 @@
+package mcpserver
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"io"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/nickooan/ntee-editor/internal/extmsg"
+)
+
+type response struct {
+	ID     json.RawMessage `json:"id"`
+	Result json.RawMessage `json:"result"`
+	Error  *rpcError       `json:"error"`
+}
+
+type callResult struct {
+	Content []textContent `json:"content"`
+	IsError bool          `json:"isError"`
+}
+
+// harness runs Serve against a fake editor listening on a real socket. The
+// fake records each request and answers with reply.
+type harness struct {
+	t          *testing.T
+	input      *io.PipeWriter
+	responses  chan response
+	pending    map[string]response
+	received   chan string
+	served     chan error
+	workingDir string
+	sessionTag string
+
+	mu       sync.Mutex
+	reply    func(request string) string
+	noEditor bool
+}
+
+func newHarness(t *testing.T) *harness {
+	t.Helper()
+	socketDir, err := os.MkdirTemp("/tmp", "nteemcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(socketDir) })
+	h := &harness{
+		t:          t,
+		responses:  make(chan response, 64),
+		pending:    map[string]response{},
+		received:   make(chan string, 64),
+		served:     make(chan error, 1),
+		workingDir: t.TempDir(),
+		reply:      func(string) string { return "ok" },
+	}
+	socketPath := filepath.Join(socketDir, "ntee.sock")
+	listener, err := extmsg.Listen(socketPath, func(text string) string {
+		h.received <- text
+		h.mu.Lock()
+		reply := h.reply
+		h.mu.Unlock()
+		return reply(text)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { listener.Close() })
+
+	now := time.Date(2026, 11, 19, 10, 15, 0, 0, time.Local)
+	h.sessionTag = "mcp-20261119-101500-" + strconv.Itoa(os.Getpid()) + "-"
+	inputReader, inputWriter := io.Pipe()
+	outputReader, outputWriter := io.Pipe()
+	h.input = inputWriter
+	config := Config{
+		FindSocket: func(paths []string) (string, error) {
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			if h.noEditor {
+				return "", extmsg.ErrNoEditor
+			}
+			return socketPath, nil
+		},
+		WorkingDir: h.workingDir,
+		Version:    "test",
+		Now:        func() time.Time { return now },
+	}
+	go func() {
+		h.served <- Serve(context.Background(), inputReader, outputWriter, config)
+		outputWriter.Close()
+	}()
+	go func() {
+		scanner := bufio.NewScanner(outputReader)
+		scanner.Buffer(make([]byte, 64<<10), maxLineBytes)
+		for scanner.Scan() {
+			var decoded response
+			if err := json.Unmarshal(scanner.Bytes(), &decoded); err != nil {
+				t.Errorf("response is not JSON: %q", scanner.Text())
+				continue
+			}
+			h.responses <- decoded
+		}
+		close(h.responses)
+	}()
+	t.Cleanup(func() { inputWriter.Close() })
+	return h
+}
+
+func (h *harness) setReply(reply func(request string) string) {
+	h.mu.Lock()
+	h.reply = reply
+	h.mu.Unlock()
+}
+
+func (h *harness) send(message string) {
+	h.t.Helper()
+	if _, err := io.WriteString(h.input, message+"\n"); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+func (h *harness) request(id int, method string, params any) {
+	h.t.Helper()
+	message := map[string]any{"jsonrpc": "2.0", "id": id, "method": method}
+	if params != nil {
+		message["params"] = params
+	}
+	data, _ := json.Marshal(message)
+	h.send(string(data))
+}
+
+// await returns the response to id, keeping others for later awaits.
+func (h *harness) await(id string) response {
+	h.t.Helper()
+	if found, ok := h.pending[id]; ok {
+		delete(h.pending, id)
+		return found
+	}
+	timeout := time.After(5 * time.Second)
+	for {
+		select {
+		case got, open := <-h.responses:
+			if !open {
+				h.t.Fatalf("output closed before response %s", id)
+			}
+			if string(got.ID) == id {
+				return got
+			}
+			h.pending[string(got.ID)] = got
+		case <-timeout:
+			h.t.Fatalf("no response %s", id)
+		}
+	}
+}
+
+func (h *harness) call(id int, tool string, arguments map[string]any) callResult {
+	h.t.Helper()
+	h.request(id, "tools/call", map[string]any{"name": tool, "arguments": arguments})
+	got := h.await(strconv.Itoa(id))
+	if got.Error != nil {
+		h.t.Fatalf("%s: rpc error %+v", tool, got.Error)
+	}
+	var result callResult
+	if err := json.Unmarshal(got.Result, &result); err != nil || len(result.Content) != 1 {
+		h.t.Fatalf("%s: bad result %s", tool, got.Result)
+	}
+	return result
+}
+
+func (h *harness) nextRequest() string {
+	h.t.Helper()
+	select {
+	case text := <-h.received:
+		return text
+	case <-time.After(5 * time.Second):
+		h.t.Fatal("the editor got no request")
+		return ""
+	}
+}
+
+func (h *harness) noRequest() {
+	h.t.Helper()
+	select {
+	case text := <-h.received:
+		h.t.Fatalf("the editor got an unexpected request %q", text)
+	default:
+	}
+}
+
+func TestInitializeListAndPing(t *testing.T) {
+	h := newHarness(t)
+	h.request(1, "initialize", map[string]any{"protocolVersion": "2025-03-26", "capabilities": map[string]any{}, "clientInfo": map[string]any{"name": "t", "version": "0"}})
+	var initialized struct {
+		ProtocolVersion string         `json:"protocolVersion"`
+		Capabilities    map[string]any `json:"capabilities"`
+		ServerInfo      struct{ Name string }
+		Instructions    string `json:"instructions"`
+	}
+	if err := json.Unmarshal(h.await("1").Result, &initialized); err != nil {
+		t.Fatal(err)
+	}
+	if initialized.ProtocolVersion != "2025-03-26" || initialized.ServerInfo.Name != "ntee" || initialized.Capabilities["tools"] == nil {
+		t.Fatalf("initialize = %+v", initialized)
+	}
+	if !strings.Contains(initialized.Instructions, "instead of your own Edit/Write tools") || !strings.Contains(initialized.Instructions, "edit_wait") {
+		t.Fatalf("instructions do not teach the flow: %q", initialized.Instructions)
+	}
+
+	h.request(2, "initialize", map[string]any{"protocolVersion": "1999-01-01"})
+	if err := json.Unmarshal(h.await("2").Result, &initialized); err != nil || initialized.ProtocolVersion != defaultProtocolVersion {
+		t.Fatalf("an unknown version should get ours, got %q", initialized.ProtocolVersion)
+	}
+
+	h.send(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)
+	h.request(3, "tools/list", nil)
+	var listed struct {
+		Tools []struct {
+			Name        string         `json:"name"`
+			InputSchema map[string]any `json:"inputSchema"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(h.await("3").Result, &listed); err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, tool := range listed.Tools {
+		names = append(names, tool.Name)
+		if tool.InputSchema["type"] != "object" {
+			t.Fatalf("%s has no object schema", tool.Name)
+		}
+	}
+	if got := strings.Join(names, ","); got != "edit_replace,edit_write,edit_show,edit_status,edit_discard,edit_end,edit_wait" {
+		t.Fatalf("tools = %s", got)
+	}
+
+	h.request(4, "ping", nil)
+	if got := h.await("4"); got.Error != nil || string(got.Result) != "{}" {
+		t.Fatalf("ping = %+v", got)
+	}
+}
+
+func TestReplaceAndWriteGoOverTheWire(t *testing.T) {
+	h := newHarness(t)
+	session := h.sessionTag + "1"
+	h.setReply(func(string) string { return "ok replaced a.go L12–L14 · edit 1 · 1 file staged" })
+	result := h.call(1, toolReplace, map[string]any{"path": "a.go", "old_text": "x\n---\ny", "new_text": "z", "line": 12})
+	want, _ := extmsg.EditRequest(extmsg.CommandReplace, session, filepath.Join(h.workingDir, "a.go")+"#L12", extmsg.EncodeReplace(extmsg.ReplacePayload{Old: "x\n---\ny", New: "z"}))
+	if got := h.nextRequest(); got != want {
+		t.Fatalf("replace request = %q, want %q", got, want)
+	}
+	if result.IsError || result.Content[0].Text != "ok replaced a.go L12–L14 · edit 1 · 1 file staged\nedit session: "+session {
+		t.Fatalf("replace result = %+v", result)
+	}
+
+	absolute := filepath.Join(t.TempDir(), "new.go")
+	h.setReply(func(string) string { return "ok staged new.go (new file, 1 line)" })
+	h.call(2, toolWrite, map[string]any{"path": absolute, "content": "package x\n"})
+	want, _ = extmsg.EditRequest(extmsg.CommandWrite, session, absolute, "package x\n")
+	if got := h.nextRequest(); got != want {
+		t.Fatalf("write request = %q, want %q", got, want)
+	}
+
+	h.call(3, toolReplace, map[string]any{"path": "a.go", "old_text": "a", "new_text": "", "replace_all": true})
+	want, _ = extmsg.EditRequest(extmsg.CommandReplace, session, filepath.Join(h.workingDir, "a.go"), extmsg.EncodeReplace(extmsg.ReplacePayload{Old: "a", All: true}))
+	if got := h.nextRequest(); got != want {
+		t.Fatalf("replace-all request = %q, want %q", got, want)
+	}
+}
+
+func TestShowReturnsTheBodyAsIs(t *testing.T) {
+	h := newHarness(t)
+	h.call(1, toolWrite, map[string]any{"path": "a.go", "content": "x"})
+	h.nextRequest()
+	h.setReply(func(string) string { return extmsg.BodyReply("line 1\n\n  ok tail\n") })
+	result := h.call(2, toolShow, map[string]any{"path": "a.go"})
+	if result.IsError || result.Content[0].Text != "line 1\n\n  ok tail\n" {
+		t.Fatalf("show = %+v", result)
+	}
+	if got := h.nextRequest(); got != "show --edit-session="+h.sessionTag+"1\n"+filepath.Join(h.workingDir, "a.go")+"\n" {
+		t.Fatalf("show request = %q", got)
+	}
+	h.setReply(func(string) string { return extmsg.BodyReply("a.go\tmodified · +1 −0 · 1 edit\n") })
+	if result := h.call(3, toolStatus, nil); result.Content[0].Text != "a.go\tmodified · +1 −0 · 1 edit\n\nedit session: "+h.sessionTag+"1" {
+		t.Fatalf("status = %q", result.Content[0].Text)
+	}
+}
+
+func TestSessionsAreAutomatic(t *testing.T) {
+	h := newHarness(t)
+	first, second := h.sessionTag+"1", h.sessionTag+"2"
+	if result := h.call(1, toolStatus, nil); !result.IsError || !strings.Contains(result.Content[0].Text, "no edit session yet") {
+		t.Fatalf("status before any edit = %+v", result)
+	}
+	h.noRequest()
+
+	h.call(2, toolWrite, map[string]any{"path": "a.go", "content": "x"})
+	h.call(3, toolReplace, map[string]any{"path": "a.go", "old_text": "x", "new_text": "y"})
+	for range 2 {
+		if got := h.nextRequest(); !strings.Contains(got, "--edit-session="+first+"\n") {
+			t.Fatalf("edit went to %q, want session %s", got, first)
+		}
+	}
+
+	h.setReply(func(string) string {
+		return "ok edit session " + first + " ended — the user is reviewing 1 staged file; to hear the outcome run: ntee --msg --msg-edit-session " + first + " wait"
+	})
+	result := h.call(4, toolEnd, nil)
+	if got := h.nextRequest(); got != "end --edit-session="+first+"\n" {
+		t.Fatalf("end request = %q", got)
+	}
+	if text := result.Content[0].Text; !strings.Contains(text, "to hear the outcome call edit_wait") || strings.Contains(text, "ntee --msg") {
+		t.Fatalf("end reply should point at edit_wait: %q", text)
+	}
+
+	h.setReply(func(string) string { return "ok finished — edit session " + first + " applied 1 file" })
+	h.call(5, toolWait, nil)
+	if got := h.nextRequest(); got != extmsg.EditWaitRequest(first, 5*time.Minute) {
+		t.Fatalf("wait request = %q, want the ended session with a 5m budget", got)
+	}
+
+	h.setReply(func(string) string { return "ok" })
+	h.call(6, toolWrite, map[string]any{"path": "a.go", "content": "x"})
+	if got := h.nextRequest(); !strings.Contains(got, "--edit-session="+second+"\n") {
+		t.Fatalf("the edit after end went to %q, want a new session %s", got, second)
+	}
+	h.call(7, toolWrite, map[string]any{"path": "b.go", "content": "x", "session": "side-task"})
+	if got := h.nextRequest(); !strings.Contains(got, "--edit-session=side-task\n") {
+		t.Fatalf("an explicit session is used as given, got %q", got)
+	}
+	h.call(8, toolDiscard, nil)
+	if got := h.nextRequest(); got != "discard --edit-session="+second+"\n" {
+		t.Fatalf("discard request = %q, want the automatic session", got)
+	}
+	if result := h.call(9, toolStatus, nil); !result.IsError {
+		t.Fatalf("after discard there is no current session, got %+v", result)
+	}
+}
+
+func TestEditorRepliesAndRefusals(t *testing.T) {
+	h := newHarness(t)
+	h.setReply(func(string) string {
+		return "error the old text matches 2 times in a.go (lines 3, 9) — add surrounding lines to make it unique, add #L<n> to the path, or replace them all with --msg-replace-all"
+	})
+	result := h.call(1, toolReplace, map[string]any{"path": "a.go", "old_text": "x", "new_text": "y"})
+	if text := result.Content[0].Text; !result.IsError || !strings.Contains(text, "pass line") || !strings.Contains(text, "with replace_all") || strings.Contains(text, "--msg") {
+		t.Fatalf("an error reply should be isError in tool terms: %+v", result)
+	}
+	h.nextRequest()
+
+	refusals := []struct {
+		tool      string
+		arguments map[string]any
+		want      string
+	}{
+		{toolReplace, map[string]any{"path": "a.go", "new_text": "y"}, "needs old_text"},
+		{toolReplace, map[string]any{"path": "a.go", "old_text": "x"}, "needs new_text"},
+		{toolReplace, map[string]any{"path": "a.go", "old_text": "x", "new_text": "y", "line": 3, "replace_all": true}, "leave it off with replace_all"},
+		{toolWrite, map[string]any{"content": "x"}, "needs path"},
+		{toolWrite, map[string]any{"path": "a.go"}, "needs content"},
+		{toolShow, map[string]any{}, "needs path"},
+		{toolWait, map[string]any{"timeout_seconds": 7200}, "at most 3600"},
+		{toolWrite, map[string]any{"path": 5}, "bad arguments"},
+	}
+	for index, refusal := range refusals {
+		result := h.call(10+index, refusal.tool, refusal.arguments)
+		if !result.IsError || !strings.Contains(result.Content[0].Text, refusal.want) {
+			t.Fatalf("%s %v = %+v, want an error with %q", refusal.tool, refusal.arguments, result, refusal.want)
+		}
+	}
+	h.noRequest()
+
+	h.mu.Lock()
+	h.noEditor = true
+	h.mu.Unlock()
+	result = h.call(30, toolWrite, map[string]any{"path": "a.go", "content": "x"})
+	if !result.IsError || !strings.Contains(result.Content[0].Text, "make the edit with your usual file tools") {
+		t.Fatalf("no editor = %+v", result)
+	}
+}
+
+func TestProtocolErrors(t *testing.T) {
+	h := newHarness(t)
+	h.send("not json")
+	if got := h.await("null"); got.Error == nil || got.Error.Code != codeParseError {
+		t.Fatalf("bad JSON = %+v", got)
+	}
+	h.request(1, "resources/list", nil)
+	if got := h.await("1"); got.Error == nil || got.Error.Code != codeMethodNotFound {
+		t.Fatalf("unknown method = %+v", got)
+	}
+	h.request(2, "tools/call", map[string]any{"arguments": map[string]any{}})
+	if got := h.await("2"); got.Error == nil || got.Error.Code != codeInvalidParams {
+		t.Fatalf("call without a name = %+v", got)
+	}
+	h.request(3, "tools/call", map[string]any{"name": "rm_rf"})
+	if got := h.await("3"); got.Error == nil || got.Error.Code != codeInvalidParams {
+		t.Fatalf("unknown tool = %+v", got)
+	}
+	h.send(`{"id":4,"method":"ping"}`)
+	if got := h.await("4"); got.Error == nil || got.Error.Code != codeInvalidRequest {
+		t.Fatalf("no jsonrpc version = %+v", got)
+	}
+}
+
+func TestWaitTellsTheAgentToCallAgain(t *testing.T) {
+	h := newHarness(t)
+	h.setReply(func(string) string {
+		return "ok waiting — the user hasn't answered yet; run: ntee --msg --msg-edit-session e1 wait"
+	})
+	result := h.call(1, toolWait, map[string]any{"session": "e1", "timeout_seconds": 30})
+	if result.IsError || result.Content[0].Text != "still waiting — the user hasn't finished reviewing edit session e1; call edit_wait again" {
+		t.Fatalf("wait = %+v", result)
+	}
+	if got := h.nextRequest(); got != extmsg.EditWaitRequest("e1", 30*time.Second) {
+		t.Fatalf("wait request = %q", got)
+	}
+}
+
+func TestACancelledWaitStopsWithoutAResponseWhileOthersAnswer(t *testing.T) {
+	h := newHarness(t)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	h.setReply(func(request string) string {
+		if strings.HasPrefix(request, extmsg.CommandWait) {
+			<-release
+		}
+		return extmsg.BodyReply("a.go\n")
+	})
+	h.request(1, "tools/call", map[string]any{"name": toolWait, "arguments": map[string]any{"session": "e1"}})
+	if got := h.nextRequest(); !strings.HasPrefix(got, "wait ") {
+		t.Fatalf("first request = %q", got)
+	}
+	if result := h.call(2, toolStatus, map[string]any{"session": "e1"}); result.IsError {
+		t.Fatalf("status during a wait = %+v", result)
+	}
+	h.send(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1,"reason":"user stopped"}}`)
+	h.request(3, "ping", nil)
+	h.await("3")
+
+	h.input.Close()
+	select {
+	case err := <-h.served:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve did not return: the cancelled wait is still running")
+	}
+	for got := range h.responses {
+		if string(got.ID) == "1" {
+			t.Fatalf("a cancelled call got a response: %s", got.Result)
+		}
+	}
+	if _, ok := h.pending["1"]; ok {
+		t.Fatal("a cancelled call got a response")
+	}
+}
+
+func TestCallsRunningWhenInputEndsStillAnswer(t *testing.T) {
+	h := newHarness(t)
+	h.setReply(func(string) string {
+		time.Sleep(100 * time.Millisecond)
+		return "ok staged a.go"
+	})
+	h.request(1, "tools/call", map[string]any{"name": toolWrite, "arguments": map[string]any{"path": "a.go", "content": "x"}})
+	h.input.Close()
+	if got := h.await("1"); got.Error != nil || !strings.Contains(string(got.Result), "ok staged a.go") {
+		t.Fatalf("the call should still answer: %+v", got)
+	}
+	if err := <-h.served; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestToolTermsReplaceCLIHints(t *testing.T) {
+	cases := map[string]string{
+		"ok edit session e1 ended — the user is reviewing 2 staged files; to hear the outcome run: ntee --msg --msg-edit-session e1 wait": "ok edit session e1 ended — the user is reviewing 2 staged files; to hear the outcome call edit_wait",
+		"error the old text is not in a.go — copy it exactly, whitespace included (ntee --msg show prints the staged content)":            "error the old text is not in a.go — copy it exactly, whitespace included (edit_show prints the staged content)",
+		"ok replaced a.go L1–L2 · edit 1 · 1 file staged":                                                                                 "ok replaced a.go L1–L2 · edit 1 · 1 file staged",
+	}
+	for reply, want := range cases {
+		if got := forTools(reply); got != want {
+			t.Fatalf("forTools(%q) = %q, want %q", reply, got, want)
+		}
+	}
+}

@@ -68,5 +68,14 @@ For `write` and `replace` (`carriesPayload`), the text after the first separator
 - `Discover` — walks up from a directory to the nearest ancestor that is the opened folder of a running editor (its socket answers), given the folder→socket mapping. `ntee --msg` uses it so a sender only needs to run somewhere inside the project. See [Which editor gets a message](#which-editor-gets-a-message).
 
 - `SendForBody` — `SendWithTimeout` for a request whose reply may carry a body (`show`, `status`): it reads up to `MaxBodyBytes` and splits the reply with `SplitBodyReply`, keeping the body byte for byte.
+- `exchange` — the one dial–write–read all senders share. It takes a context whose cancellation closes the connection, so an MCP client cancelling a pending `edit_wait` frees it at once.
 
-*Plus: `writeRequest` (write + half-close), `isLive` — the liveness probe.*
+*Plus: `writeRequest` (write + half-close), `isLive` — the liveness probe, `trimReply`.*
+
+### edit_client.go
+
+The sending side of edit sessions, shared by `ntee --msg --msg-edit-session` (cmd/ntee/msg_edit.go) and the MCP tools (`internal/mcpserver`), so both put the same bytes on the wire.
+
+- `EditRequest` — an edit command's wire text: command and `--edit-session=` option, the file when there is one, and for `write`/`replace` the payload after the `---` line. A request over `MaxMessageBytes` is refused before it is sent.
+- `EditWaitRequest` — an edit session's `wait` carrying the sender's `--wait=` budget.
+- `SendEdit` — sends one edit request under a context: `show` and `status` read a body reply, the rest one line.

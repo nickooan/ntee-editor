@@ -7,6 +7,7 @@
 // doesn't exist yet opens empty and is created on the first save)
 //
 //	ntee --msg [--msg-note <text|->] [--msg-session <id> | --msg-diff-session <id> | --msg-review-session <id>] <open|review|end|wait|help> [paths…]   send a request to a running editor
+//	ntee --mcp [--msg-root <dir>]   serve the agent edit tools over MCP on stdio (claude mcp add ntee -- ntee --mcp)
 package main
 
 import (
@@ -47,11 +48,15 @@ func main() {
 	msgEditSession := flag.String("msg-edit-session", "", "with --msg write|replace|show|status|discard|end|wait: stage file edits in edit session <id> instead of writing the files; at end they are applied, or reviewed by the user first (Ctrl+T › agent edits) — see --msg help")
 	msgReplaceAll := flag.Bool("msg-replace-all", false, "with --msg --msg-edit-session <id> replace: replace every match of the old text, not exactly one")
 	msgSeparator := flag.String("msg-separator", defaultReplaceSeparator, "with --msg --msg-edit-session <id> replace: the stdin line between the old and the new text")
+	serveMCP := flag.Bool("mcp", false, "serve the agent edit tools (edit_replace, edit_write, edit_end, …) over MCP on stdio, for a coding agent: claude mcp add ntee -- ntee --mcp; each call reaches the running editor like --msg (--msg-root picks one)")
 	msgWait := flag.Duration("msg-wait", 10*time.Minute, "with --msg --msg-session|--msg-diff-session|--msg-review-session <id> wait: how long to wait for the session to end before printing \"ok waiting\" (exit 4); the editor answers within 1h — run wait as a background task for long tours")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println("ntee-editor " + app.Version)
 		return
+	}
+	if *serveMCP {
+		os.Exit(serveAgentTools(*msgRoot))
 	}
 	if *sendMsg {
 		os.Exit(sendMessage(flag.Args(), msgOptions{root: *msgRoot, base: *msgBase, note: *msgNote, session: *msgSession, diffSession: *msgDiffSession, reviewSession: *msgReviewSession, editSession: *msgEditSession, replaceAll: *msgReplaceAll, separator: *msgSeparator, wait: *msgWait}))

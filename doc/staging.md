@@ -2,7 +2,7 @@
 
 **Introduction**
 
-Agent edits that wait in the editor instead of landing in the files. A coding agent sends an edit session's edits over the socket (`ntee --msg --msg-edit-session <id> write|replace …`); this package keeps them on a staged copy of each file, so the files on disk stay untouched while the agent works. When the agent ends the session, the editor either applies them all at once or opens them for the user to review first; that choice is the user's setting (Ctrl+T › agent edits) and lives in `internal/app`. Applying never overwrites a file that changed on disk after it was staged.
+Agent edits that wait in the editor instead of landing in the files. A coding agent sends an edit session's edits over the socket (`ntee --msg --msg-edit-session <id> write|replace …`); this package keeps them on a staged copy of each file, so the files on disk stay untouched while the agent works. When the agent ends the session, the editor either applies them all at once or opens them for the user to review first; that choice is the user's setting (Ctrl+T › agent edits) and lives in `internal/app`. Agents that speak MCP reach the same commands as tools through `ntee --mcp` ([mcpserver.md](mcpserver.md)). Applying never overwrites a file that changed on disk after it was staged.
 
 Every session is one ntee-db record (`store.AgentEditSession`): each file's content before and after, and each edit as the agent sent it. The record is saved after every edit and stays after the session finishes, so which file contents an agent changed — and what became of them — can be traced later.
 

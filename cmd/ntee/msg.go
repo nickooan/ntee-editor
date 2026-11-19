@@ -258,6 +258,10 @@ Edit sessions — stage your file edits in the editor instead of writing them:
       On the wire: "write --edit-session=<id>" (or replace), one path, then
       the content after a "---" line — a replace's as {"old","new","all"}
       JSON, which this command builds for you.
+      As MCP tools: "ntee --mcp" serves these commands on stdio as
+      edit_replace, edit_write, edit_show, edit_status, edit_discard,
+      edit_end and edit_wait, with automatic session ids — set it up once
+      with: claude mcp add ntee -- ntee --mcp
 
 A base revision (a commit hash, tag, branch, HEAD~2, …) is always compared
 with the current files on disk, uncommitted changes included. It travels on

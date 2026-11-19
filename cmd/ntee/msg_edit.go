@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +16,10 @@ import (
 // editEndTimeout is how long an edit session's end waits: when the editor
 // applies the staged files at once, the reply comes after they are written.
 const editEndTimeout = 45 * time.Second
+
+// editRequestTimeout is how long a staging request (write, replace, show,
+// status, discard) waits for its reply.
+const editRequestTimeout = 10 * time.Second
 
 // checkEditCommand checks an edit session's command and paths: write,
 // replace and show name one file, the rest none; no base revision.
@@ -53,9 +58,9 @@ func sendEditCommand(command string, paths []string, session msgSession, options
 		}
 		paths[index] = absolute
 	}
-	request := command + " " + session.option() + "\n"
+	path, payload := "", ""
 	if len(paths) > 0 {
-		request += paths[0] + "\n"
+		path = paths[0]
 	}
 	switch command {
 	case extmsg.CommandWrite:
@@ -64,7 +69,7 @@ func sendEditCommand(command string, paths []string, session msgSession, options
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
-		request += extmsg.LineNoteSeparator + "\n" + content
+		payload = content
 	case extmsg.CommandReplace:
 		input, err := readEditInput(os.Stdin, "usage: ntee --msg --msg-edit-session <id> replace <file> <<'EOF' (old text, a \""+options.separator+"\" line, new text) EOF")
 		if err != nil {
@@ -76,10 +81,11 @@ func sendEditCommand(command string, paths []string, session msgSession, options
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
-		request += extmsg.LineNoteSeparator + "\n" + extmsg.EncodeReplace(extmsg.ReplacePayload{Old: oldText, New: newText, All: options.replaceAll})
+		payload = extmsg.EncodeReplace(extmsg.ReplacePayload{Old: oldText, New: newText, All: options.replaceAll})
 	}
-	if len(request) > extmsg.MaxMessageBytes {
-		fmt.Fprintf(os.Stderr, "%s is too large to send (max %d MiB per request) — stage the file in smaller replaces\n", command, extmsg.MaxMessageBytes>>20)
+	request, err := extmsg.EditRequest(command, session.id, path, payload)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
 	socketPath, err := findEditorSocket(options.root, paths)
@@ -87,26 +93,17 @@ func sendEditCommand(command string, paths []string, session msgSession, options
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	if command == extmsg.CommandShow || command == extmsg.CommandStatus {
-		line, body, hasBody, err := extmsg.SendForBody(socketPath, request, 10*time.Second)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "cannot reach the editor: "+err.Error())
-			return 1
-		}
-		if hasBody {
-			fmt.Print(body)
-			return 0
-		}
-		fmt.Println(line)
-		return exitCodeForReply(line)
+	line, body, hasBody, err := extmsg.SendEdit(context.Background(), socketPath, command, request, editRequestTimeout)
+	switch {
+	case err != nil:
+		fmt.Fprintln(os.Stderr, "cannot reach the editor: "+err.Error())
+		return 1
+	case hasBody:
+		fmt.Print(body)
+		return 0
 	}
-	output, code := deliverRequest(socketPath, request, session, 10*time.Second)
-	if code == 1 && !extmsg.IsErrorReply(output) {
-		fmt.Fprintln(os.Stderr, output)
-		return code
-	}
-	fmt.Println(output)
-	return code
+	fmt.Println(line)
+	return exitCodeForReply(line)
 }
 
 // readEditInput reads an edit's stdin whole; an interactive terminal gets

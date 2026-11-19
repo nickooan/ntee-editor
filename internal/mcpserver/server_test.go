@@ -422,6 +422,17 @@ func TestWaitTellsTheAgentToCallAgain(t *testing.T) {
 	}
 }
 
+func TestWaitSaysWhenTheUserSetTheEditsAside(t *testing.T) {
+	h := newHarness(t)
+	h.setReply(func(string) string {
+		return "ok waiting — the user set edit session e1 aside for later: still staged, nothing written; wait again to hear their decision"
+	})
+	result := h.call(1, toolWait, map[string]any{"session": "e1"})
+	if text := result.Content[0].Text; result.IsError || !strings.Contains(text, "set edit session e1 aside for later") || !strings.Contains(text, "call edit_wait") {
+		t.Fatalf("deferred wait = %+v", result)
+	}
+}
+
 func TestACancelledWaitStopsWithoutAResponseWhileOthersAnswer(t *testing.T) {
 	h := newHarness(t)
 	release := make(chan struct{})

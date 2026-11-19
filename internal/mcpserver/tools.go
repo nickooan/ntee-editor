@@ -189,6 +189,8 @@ func (tools *editTools) call(ctx context.Context, name string, raw json.RawMessa
 		return textResult(body, false)
 	case hasBody:
 		return textResult(body+"\nedit session: "+session, false)
+	case name == toolWait && strings.HasPrefix(line, "ok waiting") && strings.Contains(line, "aside for later"):
+		return textResult("the user set edit session "+session+" aside for later — still staged, nothing written; carry on with other work, and call "+toolWait+" when you need their decision", false)
 	case name == toolWait && (strings.HasPrefix(line, "ok waiting") || strings.HasPrefix(line, "waiting")):
 		return textResult(stillWaitingText(session), false)
 	}

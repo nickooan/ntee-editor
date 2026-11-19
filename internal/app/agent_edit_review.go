@@ -140,10 +140,12 @@ func (m Model) handleAgentEditReviewKey(key string) (Model, bool) {
 		return m, false
 	}
 	switch key {
-	case "A":
+	case "a", "A", "shift+a":
 		return m.askApplyAgentEdits(m.review.agentEdits), true
-	case "X":
+	case "x", "X", "shift+x":
 		return m.askDiscardAgentEdits(m.review.agentEdits), true
+	case "esc":
+		return m.askLeaveAgentEditReview(m.review.agentEdits), true
 	}
 	return m, false
 }

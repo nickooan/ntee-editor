@@ -238,6 +238,11 @@ func (m Model) renderReviewStatus() string {
 		line += statusTextStyle.Render("   ") + sessionBadgeStyle.Render(m.reviewSessionBadge())
 	case m.review.agentEdits != "":
 		line += statusTextStyle.Render("   ") + sessionBadgeStyle.Render(m.agentEditReviewBadge())
+		if !m.review.agentEditsTrace {
+			// The decision leads: it is what the user is here for, and the end
+			// of a long status line is the first thing a narrow window cuts.
+			line += statusTextStyle.Render("   ") + agentEditDecisionStyle.Render(agentEditDecisionHint)
+		}
 	}
 	if !m.review.preparing && len(m.review.files) > 0 {
 		loaded := 0
@@ -264,17 +269,20 @@ func (m Model) renderReviewStatus() string {
 	if file, ok := m.selectedReviewFile(); ok && len(file.notes) > 1 {
 		noteHint = "[/] note · "
 	}
-	exitHint := "Esc exit"
-	switch {
-	case m.review.session != "":
-		exitHint = "Esc quit session"
-	case m.review.agentEdits != "" && !m.review.agentEditsTrace:
-		exitHint = "A apply all · X discard · Esc later"
+	navigationHints := "↑/↓ move · Shift+↑/↓ file · n/p change · " + noteHint + m.actionHints(
+		hintFor("find", keymap.Find), hintFor("files", keymap.GotoFile), hintFor("grep", keymap.Grep))
+	if m.review.agentEdits != "" && !m.review.agentEditsTrace {
+		return withNotice(m, line) + statusTextStyle.Render("   ") + hintStyle.Render(navigationHints)
 	}
-	return withNotice(m, line) + statusTextStyle.Render("   ") +
-		hintStyle.Render("↑/↓ move · Shift+↑/↓ file · n/p change · "+noteHint+m.actionHints(
-			hintFor("find", keymap.Find), hintFor("files", keymap.GotoFile), hintFor("grep", keymap.Grep))+" · "+exitHint)
+	exitHint := "Esc exit"
+	if m.review.session != "" {
+		exitHint = "Esc quit session"
+	}
+	return withNotice(m, line) + statusTextStyle.Render("   ") + hintStyle.Render(navigationHints+" · "+exitHint)
 }
+
+// agentEditDecisionHint is a staged review's choice, shown first.
+const agentEditDecisionHint = " a apply all to disk · x discard all · Esc decide "
 
 // reviewSessionBadge is the live review's mark in the status bar: how many
 // files arrived, whether the view follows new ones (or how many are

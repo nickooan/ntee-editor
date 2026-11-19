@@ -1427,4 +1427,6 @@ var (
 	errStyle     = lipgloss.NewStyle().Foreground(colRed).Bold(true).Background(colBgChrome)
 	// A running guided session (external_session.go).
 	sessionBadgeStyle = lipgloss.NewStyle().Foreground(colOrange).Bold(true).Background(colBgChrome)
+	// A staged review's apply / discard choice: the keys the user is there for.
+	agentEditDecisionStyle = lipgloss.NewStyle().Foreground(colBg).Bold(true).Background(colAqua)
 )

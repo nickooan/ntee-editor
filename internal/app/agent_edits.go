@@ -424,7 +424,22 @@ func (m Model) resolveAgentEditsChoice(kind choiceOverlayKind, chosen int, choic
 		if chosen == 0 {
 			return m.enterAgentEditReview(record, false)
 		}
+		m = m.deferAgentEdits(id)
 		m.notice = "agent edits " + id + " wait under Ctrl+T › agent edits"
+	case choiceLeaveAgentEditReview:
+		switch chosen {
+		case 0:
+			if len(m.unsavedAgentEditFiles(record)) > 0 {
+				m.agentEdits.choiceSession = id
+				m.choice = m.agentEditApplyChoice(record)
+				return m, nil
+			}
+			return m.startAgentEditApply(id, store.AgentEditPolicyReview, false, m.agentEditKeep(), nil)
+		case 1:
+			return m.startAgentEditDiscard(id)
+		}
+		m = m.exitReview().deferAgentEdits(id)
+		m.notice = "agent edits " + id + " kept for later — reopen them under Ctrl+T › agent edits"
 	case choiceApplyAgentEdits:
 		switch {
 		case chosen == choiceCount-1:
@@ -456,6 +471,48 @@ func (m Model) askApplyAgentEdits(id string) Model {
 }
 
 // askDiscardAgentEdits opens the discard confirm for a pending session.
+// askLeaveAgentEditReview is Esc on a staged review: the user decides
+// before leaving — apply, discard, or keep the edits staged for later.
+func (m Model) askLeaveAgentEditReview(id string) Model {
+	record, ok := m.agentEdits.registry.Snapshot(id)
+	if !ok {
+		return m.exitReview()
+	}
+	m.agentEdits.choiceSession = id
+	m.choice = agentEditLeaveChoice(record)
+	return m
+}
+
+func agentEditLeaveChoice(record store.AgentEditSession) choiceOverlay {
+	choice := choiceOverlay{kind: choiceLeaveAgentEditReview, title: "Edit session " + record.Session + " — what now?", choices: []string{"Apply all", "Discard all", "Keep for later"}}
+	choice.body = append(choice.body, overlayLine{text: countText(len(record.Files), "file") + " staged — nothing is written yet", style: overlayLineStrong})
+	choice.body = append(choice.body, agentEditFileLines(record)...)
+	choice.body = append(choice.body, overlayLine{text: "later: reopen under Ctrl+T › agent edits", style: overlayLineDim})
+	return choice
+}
+
+// deferAgentEdits answers the session's waiting agents that the user set
+// it aside: still staged, so a new wait blocks until the real decision.
+func (m Model) deferAgentEdits(id string) Model {
+	if len(m.agentEdits.waiters[id]) == 0 {
+		return m
+	}
+	for _, waiter := range m.agentEdits.waiters[id] {
+		select {
+		case waiter <- agentEditDeferredReply(id):
+		default:
+		}
+	}
+	waiters := cloneWaiters(m.agentEdits.waiters)
+	delete(waiters, id)
+	m.agentEdits.waiters = waiters
+	return m
+}
+
+func agentEditDeferredReply(id string) string {
+	return "waiting — the user set edit session " + id + " aside for later: still staged, nothing written; wait again to hear their decision"
+}
+
 func (m Model) askDiscardAgentEdits(id string) Model {
 	record, ok := m.agentEdits.registry.Snapshot(id)
 	if !ok {

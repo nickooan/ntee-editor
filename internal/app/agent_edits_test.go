@@ -197,8 +197,9 @@ func TestAgentEditReviewThenApply(t *testing.T) {
 		t.Fatalf("diff before → staged with the edit log: +%d −%d notes=%+v", file.document.adds, file.document.dels, file.notes)
 	}
 	plain := ansi.Strip(m.View().Content)
-	if !strings.Contains(plain, "edit session e1 · staged, not written") || !strings.Contains(plain, "A apply all · X discard") {
-		t.Fatalf("status bar:\n%s", plain)
+	decision, navigation := strings.Index(plain, "a apply all to disk · x discard all · Esc decide"), strings.Index(plain, "↑/↓ move")
+	if !strings.Contains(plain, "edit session e1 · staged, not written") || decision < 0 || navigation < decision {
+		t.Fatalf("the decision leads the status bar:\n%s", plain)
 	}
 
 	m = key(m, typeRune('A'))
@@ -315,5 +316,138 @@ func TestAgentEditUserApplyCanReplaceUnsavedWork(t *testing.T) {
 	m = m.undo()
 	if !strings.HasPrefix(m.edit.content(), "// mine package main") {
 		t.Fatalf("undo brings the unsaved edits back: %q", m.edit.content())
+	}
+}
+
+// stagedReview stages one edit, ends the session, opens its review, and
+// returns the wait reply channel of an agent waiting on it.
+func stagedReview(t *testing.T) (Model, string, chan string) {
+	t.Helper()
+	return stagedReviewWith(t, func(m Model) Model { return m })
+}
+
+// stagedReviewWith is stagedReview with prepare run on the model first.
+func stagedReviewWith(t *testing.T, prepare func(Model) Model) (Model, string, chan string) {
+	t.Helper()
+	m, root, receiver, _, settings := agentEditsModel(t, store.AgentEditPolicyReview)
+	m = prepare(m)
+	receiver.Handle(replaceRequest("e1", "main.go", extmsg.ReplacePayload{Old: "func main() {\n}", New: "func main() {\n\tprintln(1)\n}"}))
+	current, _ := settings.LoadExternalSettings()
+	m, _ = sendAgentEditControl(t, m, receiver, extmsg.CommandEnd, "e1", current)
+	m, waitReply := sendAgentEditControl(t, m, receiver, extmsg.CommandWait, "e1", current)
+	next, cmd := m.Update(keyPress(tea.KeyEnter)) // Review now
+	m = settleAgentEdits(next.(Model), cmd)
+	if m.mode != modeReview || m.review.agentEdits != "e1" {
+		t.Fatal("the staged review is open")
+	}
+	return m, root, waitReply
+}
+
+func TestAgentEditReviewKeysTakeEitherCase(t *testing.T) {
+	m, _, _ := stagedReview(t)
+	for _, press := range []struct {
+		key  rune
+		want choiceOverlayKind
+	}{{'a', choiceApplyAgentEdits}, {'A', choiceApplyAgentEdits}, {'x', choiceDiscardAgentEdits}, {'X', choiceDiscardAgentEdits}} {
+		asked := key(m, typeRune(press.key))
+		if asked.choice.kind != press.want {
+			t.Fatalf("%q opened choice %v, want %v", press.key, asked.choice.kind, press.want)
+		}
+	}
+	if asked, _ := m.handleAgentEditReviewKey("shift+a"); asked.choice.kind != choiceApplyAgentEdits {
+		t.Fatal("shift+a reported without text applies too")
+	}
+}
+
+func TestAgentEditReviewEscKeepsForLaterAndTellsTheAgent(t *testing.T) {
+	m, root, waitReply := stagedReview(t)
+	m = key(m, keyPress(tea.KeyEscape))
+	if m.choice.kind != choiceLeaveAgentEditReview || strings.Join(m.choice.choices, "|") != "Apply all|Discard all|Keep for later" {
+		t.Fatalf("Esc asks what to do: %+v", m.choice)
+	}
+	if m.mode != modeReview {
+		t.Fatal("the review stays open while the user decides")
+	}
+	noReply(t, waitReply)
+	m = key(m, keyPress(tea.KeyEscape)) // Esc again: keep for later
+	if m.mode == modeReview || m.choice.open() {
+		t.Fatal("keep for later leaves the review")
+	}
+	if outcome := gotReply(t, waitReply); outcome != agentEditDeferredReply("e1") || !strings.Contains(outcome, "aside for later") {
+		t.Fatalf("the waiting agent hears the edits were set aside: %q", outcome)
+	}
+	if _, pending := m.agentEdits.registry.Snapshot("e1"); !pending || len(m.agentEdits.waiters["e1"]) != 0 {
+		t.Fatal("the session stays staged, with no waiter left behind")
+	}
+	if diskContent(t, root, "main.go") != "package main\n\nfunc main() {\n}\n" {
+		t.Fatal("keep for later writes nothing")
+	}
+}
+
+func TestAgentEditReviewEscApplyAll(t *testing.T) {
+	m, root, waitReply := stagedReview(t)
+	m = key(m, keyPress(tea.KeyEscape))
+	next, cmd := m.Update(keyPress(tea.KeyEnter)) // Apply all
+	m = settleAgentEdits(next.(Model), cmd)
+	if outcome := gotReply(t, waitReply); outcome != "finished — edit session e1 applied 1 file" {
+		t.Fatalf("apply all from the Esc prompt applies at once: %q", outcome)
+	}
+	if diskContent(t, root, "main.go") != "package main\n\nfunc main() {\n\tprintln(1)\n}\n" || m.mode == modeReview {
+		t.Fatal("applied to disk and the review closed")
+	}
+}
+
+func TestAgentEditReviewEscDiscardAll(t *testing.T) {
+	m, root, waitReply := stagedReview(t)
+	m = key(m, keyPress(tea.KeyEscape))
+	m = key(m, keyPress(tea.KeyRight))
+	next, cmd := m.Update(keyPress(tea.KeyEnter)) // Discard all
+	m = settleAgentEdits(next.(Model), cmd)
+	if outcome := gotReply(t, waitReply); !extmsg.IsEndedReply(outcome) || !strings.Contains(outcome, "discarded by the user") {
+		t.Fatalf("discard all tells the agent: %q", outcome)
+	}
+	if diskContent(t, root, "main.go") != "package main\n\nfunc main() {\n}\n" || m.mode == modeReview {
+		t.Fatal("nothing written and the review closed")
+	}
+}
+
+func TestAgentEditReviewEscApplyAllAsksAboutUnsavedWork(t *testing.T) {
+	m, root, waitReply := stagedReviewWith(t, func(m Model) Model { return runes(m.openFileAt("main.go"), "// mine ") })
+	m = key(m, keyPress(tea.KeyEscape))
+	m = key(m, keyPress(tea.KeyEnter)) // Apply all
+	if m.choice.kind != choiceApplyAgentEdits || len(m.choice.choices) != 3 {
+		t.Fatalf("unsaved work is asked about first: %+v", m.choice)
+	}
+	noReply(t, waitReply)
+	if diskContent(t, root, "main.go") != "package main\n\nfunc main() {\n}\n" {
+		t.Fatal("nothing is written before the user answers")
+	}
+}
+
+func TestAgentEditReadyLaterTellsTheWaitingAgent(t *testing.T) {
+	m, _, receiver, _, settings := agentEditsModel(t, store.AgentEditPolicyReview)
+	receiver.Handle("write --edit-session=e1\nmain.go\n---\nreplaced\n")
+	current, _ := settings.LoadExternalSettings()
+	m, _ = sendAgentEditControl(t, m, receiver, extmsg.CommandEnd, "e1", current)
+	m, waitReply := sendAgentEditControl(t, m, receiver, extmsg.CommandWait, "e1", current)
+	m = key(m, typeRune('n')) // Later
+	if outcome := gotReply(t, waitReply); !strings.Contains(outcome, "aside for later") {
+		t.Fatalf("Later on the ready prompt answers the agent: %q", outcome)
+	}
+}
+
+func TestAgentEditTraceEscJustLeaves(t *testing.T) {
+	m, _, receiver, registry, _ := agentEditsModel(t, store.AgentEditPolicyReview)
+	receiver.Handle("write --edit-session=done1\nmain.go\n---\nreplaced\n")
+	record, err := registry.Discard("done1", "the agent", 20)
+	must(t, err)
+	m, cmd := m.enterAgentEditReview(record, true)
+	m = settleAgentEdits(m, cmd)
+	if plain := ansi.Strip(m.View().Content); strings.Contains(plain, "a apply all to disk") {
+		t.Fatal("a trace offers no decision")
+	}
+	m = key(m, keyPress(tea.KeyEscape))
+	if m.mode == modeReview || m.choice.open() {
+		t.Fatal("Esc leaves a trace at once")
 	}
 }

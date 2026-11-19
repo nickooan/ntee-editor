@@ -14,13 +14,14 @@ import (
 type choiceOverlayKind uint8
 
 const (
-	choiceNone              choiceOverlayKind = iota
-	choiceRemovePath                          // :rm confirmation — payload in confirmRm/confirmRmDir
-	choiceExternalRequest                     // an external open/review request — payload in external.pending
-	choiceQuitReviewSession                   // leaving a live review session — the agent is told to stop
-	choiceAgentEditsReady                     // an agent ended an edit session — review it now? payload in agentEdits.choiceSession
-	choiceApplyAgentEdits                     // write a staged edit session to disk — same payload
-	choiceDiscardAgentEdits                   // drop a staged edit session — same payload
+	choiceNone                 choiceOverlayKind = iota
+	choiceRemovePath                             // :rm confirmation — payload in confirmRm/confirmRmDir
+	choiceExternalRequest                        // an external open/review request — payload in external.pending
+	choiceQuitReviewSession                      // leaving a live review session — the agent is told to stop
+	choiceAgentEditsReady                        // an agent ended an edit session — review it now? payload in agentEdits.choiceSession
+	choiceApplyAgentEdits                        // write a staged edit session to disk — same payload
+	choiceDiscardAgentEdits                      // drop a staged edit session — same payload
+	choiceLeaveAgentEditReview                   // Esc on a staged review: apply, discard or keep for later — same payload
 )
 
 // overlayLineStyle is how one body line of a choice overlay is drawn.
@@ -160,7 +161,7 @@ func (m Model) handleChoiceKey(key string) (tea.Model, tea.Cmd) {
 		if chosen == 0 {
 			return m.quitReviewSession()
 		}
-	case choiceAgentEditsReady, choiceApplyAgentEdits, choiceDiscardAgentEdits:
+	case choiceAgentEditsReady, choiceApplyAgentEdits, choiceDiscardAgentEdits, choiceLeaveAgentEditReview:
 		return m.resolveAgentEditsChoice(kind, chosen, choiceCount)
 	}
 	return m, nil

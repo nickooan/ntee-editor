@@ -16,6 +16,7 @@ Rules:
 - Sessions are automatic: all edits until edit_end form one session, and the next edit starts a new one. Pass session only to run separate change sets side by side.
 - "not applied … changed on disk since it was staged": that file changed under you — re-read it and stage it again (a new session).
 - "ended" or "discarded": the user stopped this change set — do not re-send it unless asked.
+- "set aside for later": the edits stay staged and unwritten until the user decides; carry on, and call edit_wait again when you need the outcome.
 - If a tool says no ntee editor is running, nothing was staged: make the edit with your usual file tools.`
 
 type toolDefinition struct {

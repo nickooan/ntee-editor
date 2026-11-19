@@ -255,6 +255,9 @@ Edit sessions — stage your file edits in the editor instead of writing them:
                       <file> (<why>), …                          exit 1
                 ended edit session … was discarded by the user — nothing
                       was written                                exit 3
+                ok waiting — the user set edit session … aside for
+                      later: still staged, nothing written       exit 4
+                      (carry on; wait again for their decision)
       On the wire: "write --edit-session=<id>" (or replace), one path, then
       the content after a "---" line — a replace's as {"old","new","all"}
       JSON, which this command builds for you.

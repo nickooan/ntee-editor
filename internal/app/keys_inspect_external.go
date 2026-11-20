@@ -12,7 +12,7 @@ import (
 )
 
 // externalPickerState is the Ctrl+T external panel once → focuses it. index
-// runs over the panel's three settable rows; editingLimit means the history
+// runs over the panel's settable rows; editingLimit means the history
 // limit row is a number input holding limitInput.
 type externalPickerState struct {
 	focused      bool
@@ -23,6 +23,7 @@ type externalPickerState struct {
 
 const (
 	externalRowAccept = iota
+	externalRowSessionStart
 	externalRowLimit
 	externalRowHistory
 	externalRowCount
@@ -94,6 +95,8 @@ func (m Model) handleExternalPickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd)
 		switch picker.index {
 		case externalRowAccept:
 			return m.setExternalEnabled(!m.external.settings.Enabled)
+		case externalRowSessionStart:
+			return m.setExternalSessionAutoStart(!m.external.settings.SessionAutoStart)
 		case externalRowLimit:
 			picker.editingLimit = true
 			picker.limitInput = strconv.Itoa(m.external.settings.HistoryLimit)
@@ -149,6 +152,22 @@ func (m Model) setExternalEnabled(enabled bool) (Model, tea.Cmd) {
 	return m, m.saveExternalSettingsCmd(settings, notice)
 }
 
+// setExternalSessionAutoStart is whether an agent's session starts without
+// asking the user first.
+func (m Model) setExternalSessionAutoStart(autoStart bool) (Model, tea.Cmd) {
+	if !m.external.settingsLoaded {
+		m.errText = "external settings are still loading"
+		return m, nil
+	}
+	settings := m.external.settings
+	settings.SessionAutoStart = autoStart
+	notice := "agent sessions ask before they start"
+	if autoStart {
+		notice = "agent sessions start directly, with a notice"
+	}
+	return m, m.saveExternalSettingsCmd(settings, notice)
+}
+
 func (m Model) setExternalHistoryLimit(limit int) (Model, tea.Cmd) {
 	if !m.external.settingsLoaded {
 		m.errText = "external settings are still loading"
@@ -160,10 +179,10 @@ func (m Model) setExternalHistoryLimit(limit int) (Model, tea.Cmd) {
 }
 
 // inspectExternalCommand handles the bar forms "ext on", "ext off",
-// "ext limit <n>", and "ext history".
+// "ext sessions ask|direct", "ext limit <n>", and "ext history".
 func (m Model) inspectExternalCommand(args string) (tea.Model, tea.Cmd) {
 	fields := strings.Fields(args)
-	usage := fmt.Sprintf("usage: ext on|off · ext limit <%d-%d> · ext history", store.MinExternalHistoryLimit, store.MaxExternalHistoryLimit)
+	usage := fmt.Sprintf("usage: ext on|off · ext sessions ask|direct · ext limit <%d-%d> · ext history", store.MinExternalHistoryLimit, store.MaxExternalHistoryLimit)
 	m.inspectMenu = inspectMenuExternal
 	switch {
 	case len(fields) == 1 && fields[0] == "on":
@@ -172,6 +191,9 @@ func (m Model) inspectExternalCommand(args string) (tea.Model, tea.Cmd) {
 	case len(fields) == 1 && fields[0] == "off":
 		m.inspectInput, m.inspectCursor = "", 0
 		return m.setExternalEnabled(false)
+	case len(fields) == 2 && fields[0] == "sessions" && (fields[1] == "ask" || fields[1] == "direct"):
+		m.inspectInput, m.inspectCursor = "", 0
+		return m.setExternalSessionAutoStart(fields[1] == "direct")
 	case len(fields) == 2 && fields[0] == "limit":
 		limit, err := strconv.Atoi(fields[1])
 		if err != nil || limit < store.MinExternalHistoryLimit || limit > store.MaxExternalHistoryLimit {

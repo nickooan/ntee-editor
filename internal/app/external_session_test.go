@@ -73,15 +73,16 @@ func startedSession(t *testing.T) Model {
 	m, _ := noteWorkspace(t)
 	m, _, _ = externalModel(t, m, true)
 	m = queueStep(t, m, "walk1", "long.go#L40", "# Step one\nwhy line 40")
-	if !m.choice.open() || !strings.Contains(m.choice.title, "Agent session · walk1") {
-		t.Fatalf("a new session asks first, even from the query view: %+v", m.choice)
+	if !m.choice.open() || m.choice.title != "TOUR · agent note session walk1" || m.choice.body[0].style != overlayLineHighlight ||
+		!strings.Contains(m.choice.body[0].text, "nothing changes on disk") || strings.Join(m.choice.choices, "|") != "Start tour|Decline" {
+		t.Fatalf("a new session asks first, even from the query view, saying what it is: %+v", m.choice)
 	}
 	m = queueStep(t, m, "walk1", "main.go#L3", "step two")
 	m = queueStep(t, m, "walk1", "long.go#L90", "step three")
 	if m.mode != modeQuery || len(m.session.steps) != 3 {
 		t.Fatalf("steps queue behind the confirm: mode=%v steps=%d", m.mode, len(m.session.steps))
 	}
-	next, cmd := m.Update(keyPress(tea.KeyEnter)) // Start session
+	next, cmd := m.Update(keyPress(tea.KeyEnter)) // Start tour
 	m = settleExternal(next.(Model), cmd)
 	if !m.session.started || m.session.current != 0 || !m.sessionStepVisible() || m.openRel != "long.go" || m.edit.cy != 39 {
 		t.Fatalf("started: session=%+v visible=%v open=%q cy=%d", m.session, m.sessionStepVisible(), m.openRel, m.edit.cy)
@@ -395,11 +396,11 @@ func startedDiffSession(t *testing.T) Model {
 	t.Helper()
 	m := diffSessionWorkspace(t)
 	m = queueDiffStep(t, m, "walk1", "apps/web/main.go#L3", "# Step one\nwhy run")
-	if !m.choice.open() || !strings.Contains(m.choice.title, "Agent diff session · walk1") {
+	if !m.choice.open() || m.choice.title != "TOUR · agent diff session walk1" || !strings.Contains(m.choice.body[0].text, "diffs against HEAD — nothing changes on disk") {
 		t.Fatalf("a diff session asks first: %+v", m.choice)
 	}
 	m = queueDiffStep(t, m, "walk1", "apps/web/same.go#L3", "step two")
-	m = keySettled(m, keyPress(tea.KeyEnter)) // Start session
+	m = keySettled(m, keyPress(tea.KeyEnter)) // Start tour
 	if !m.session.started || m.session.kind != extmsg.SessionDiff || m.mode != modeDiff || m.openRel != "apps/web/main.go" || !m.sessionStepVisible() {
 		t.Fatalf("started: mode=%v open=%q visible=%v err=%q session=%+v", m.mode, m.openRel, m.sessionStepVisible(), m.errText, m.session)
 	}

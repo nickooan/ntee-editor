@@ -248,9 +248,6 @@ func (m Model) renderEditStatus() string {
 	}
 	pos := fmt.Sprintf("Ln %d, Col %d", m.edit.cy+1, m.edit.cx+1)
 	line := promptStyle.Render("@edit") + statusTextStyle.Render(" "+name+"   ") + state
-	if m.session.id != "" {
-		line += statusTextStyle.Render("   ") + sessionBadgeStyle.Render(m.sessionBadge())
-	}
 	// Transient feedback sits right after the saved/editing indicator — near the
 	// front so the terminal never truncates it, and where the user expects the
 	// "copied" note.
@@ -1168,36 +1165,76 @@ func truncateRunes(s string, width int) string {
 }
 
 // renderHeader builds the top chrome row: the version and the opened
-// directory, then — when Ctrl+W has rooted the editor at a nested repo — a
-// bold orange "working repo: x" label right after the path, where the eye
-// already is (not pushed to the far edge on a wide terminal). Styling the
-// label apart from the title means Width() can no longer fill the row, so it
-// is padded by hand; a row too wide for the terminal cuts the title first so
-// the repo name survives.
+// directory, then — right after the path, where the eye already is (not
+// pushed to the far edge on a wide terminal) — a bold orange "working repo:
+// x" label when Ctrl+W has rooted the editor at a nested repo, and the
+// agent session the user is in (headerSessionBadge). Styling the labels
+// apart from the title means Width() can no longer fill the row, so it is
+// padded by hand; a row too wide for the terminal cuts the title first so
+// the labels survive.
 func (m Model) renderHeader() string {
 	const sep = "  ·  "
 	title := "ntee-editor " + versionTag() + sep + m.workspaceRoot
-	if m.activeRepo == "" {
+	var labels []string
+	var styles []lipgloss.Style
+	if m.activeRepo != "" {
+		labels, styles = append(labels, "working repo: "+m.activeRepo), append(styles, headerRepoStyle)
+	}
+	if badge := m.headerSessionBadge(); badge != "" {
+		labels, styles = append(labels, badge), append(styles, headerSessionStyle)
+	}
+	if len(labels) == 0 {
 		return headerStyle.Width(m.width).Render(truncateRunes(title, m.width))
 	}
-	repo := "working repo: " + m.activeRepo
-
-	repoWidth := len([]rune(repo))
-	titleBudget := m.width - len(sep) - repoWidth
-	if titleBudget < 0 {
-		// Not even the label fits: drop the title and cut the label itself.
-		repo = truncateRunes(repo, max(0, m.width))
-		repoWidth = len([]rune(repo))
-		return headerRepoStyle.Render(repo) +
-			headerStyle.Render(strings.Repeat(" ", max(0, m.width-repoWidth)))
+	labelsWidth := 0
+	for _, label := range labels {
+		labelsWidth += len([]rune(sep)) + len([]rune(label))
 	}
-	line := headerStyle.Render(truncateRunes(title, titleBudget)) +
-		headerStyle.Render(sep) +
-		headerRepoStyle.Render(repo)
+	titleBudget := m.width - labelsWidth
+	line := ""
+	if titleBudget < 0 {
+		// Not even the labels fit: drop the title and cut the labels from the end.
+		budget := max(0, m.width)
+		for index, label := range labels {
+			if index > 0 {
+				if budget < len([]rune(sep)) {
+					break
+				}
+				line += headerStyle.Render(sep)
+				budget -= len([]rune(sep))
+			}
+			cut := truncateRunes(label, budget)
+			line += styles[index].Render(cut)
+			budget -= len([]rune(cut))
+		}
+	} else {
+		line = headerStyle.Render(truncateRunes(title, titleBudget))
+		for index, label := range labels {
+			line += headerStyle.Render(sep) + styles[index].Render(label)
+		}
+	}
 	if pad := m.width - lipgloss.Width(line); pad > 0 {
 		line += headerStyle.Render(strings.Repeat(" ", pad))
 	}
 	return line
+}
+
+// headerSessionBadge is the agent session the user is in, for the header: a
+// live review session or an agent edit review in review mode, else a note,
+// diff or review session that runs or waits to start. "" when none.
+func (m Model) headerSessionBadge() string {
+	if m.mode == modeReview {
+		switch {
+		case m.review.session != "":
+			return m.reviewSessionBadge()
+		case m.review.agentEdits != "":
+			return m.agentEditReviewBadge()
+		}
+	}
+	if m.session.id != "" {
+		return m.sessionBadge()
+	}
+	return ""
 }
 
 func pad(s string, width int) string {
@@ -1330,8 +1367,10 @@ var (
 	baseStyle       = lipgloss.NewStyle().Foreground(colFg).Background(colBg)
 	headerStyle     = lipgloss.NewStyle().Bold(true).Foreground(colAqua).Background(colBgChrome)
 	headerRepoStyle = lipgloss.NewStyle().Bold(true).Foreground(colOrange).Background(colBgChrome)
-	paneStyle       = lipgloss.NewStyle().Background(colBg).BorderBackground(colBg).
-			BorderForeground(colBorder).Border(lipgloss.RoundedBorder())
+	// The agent session in the header, like its old status-bar badge.
+	headerSessionStyle = sessionBadgeStyle
+	paneStyle          = lipgloss.NewStyle().Background(colBg).BorderBackground(colBg).
+				BorderForeground(colBorder).Border(lipgloss.RoundedBorder())
 	cursorStyle = lipgloss.NewStyle().Foreground(colBg).Background(colFg)
 	gutterStyle = lipgloss.NewStyle().Foreground(colGutter).Background(colBg) // line numbers
 

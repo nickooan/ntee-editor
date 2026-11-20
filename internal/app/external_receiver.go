@@ -30,6 +30,9 @@ type externalMessageMsg struct {
 	// agentEdits is an edit session's end: the settings that decide what
 	// happens to its staged edits, read when the end arrived.
 	agentEdits agentEditSettings
+	// sessionAutoStart is the user's choice, read when the message arrived:
+	// a new session starts without asking.
+	sessionAutoStart bool
 }
 
 // externalReplyWait bounds how long a sender waits for the UI's outcome
@@ -169,7 +172,7 @@ func (r *ExternalReceiver) Handle(text string) string {
 	}
 
 	reply := make(chan string, 1)
-	queued := externalMessageMsg{record: record, sessionKind: message.SessionKind, reply: reply}
+	queued := externalMessageMsg{record: record, sessionKind: message.SessionKind, reply: reply, sessionAutoStart: settings.SessionAutoStart}
 	if isEditEnd {
 		queued.agentEdits = agentEditSettings{policy: settings.AgentEditPolicy, keep: settings.AgentEditKeep}
 	}

@@ -1,7 +1,10 @@
 package extmsg
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -301,6 +304,31 @@ func TestSendReadsAnEarlyReply(t *testing.T) {
 	reply, err := Send(socketPath, strings.Repeat("x", 8<<20))
 	if err != nil || reply != "error message too large" {
 		t.Fatalf("reply = %q, %v", reply, err)
+	}
+}
+
+func TestAHangUpWithoutAnAnswerIsAnError(t *testing.T) {
+	socketPath := filepath.Join(shortSocketDir(t), "quit.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = io.ReadAll(conn) // the request, then hang up: an editor quitting mid-wait
+			conn.Close()
+		}
+	}()
+	if reply, err := SendWithTimeout(socketPath, "wait --session=s1\n", time.Second); !errors.Is(err, ErrNoReply) {
+		t.Fatalf("SendWithTimeout = %q, %v; want ErrNoReply", reply, err)
+	}
+	if _, _, _, err := SendEdit(context.Background(), socketPath, CommandShow, "show --edit-session=e1\na.go\n", time.Second); !errors.Is(err, ErrNoReply) {
+		t.Fatalf("SendEdit = %v; want ErrNoReply", err)
 	}
 }
 

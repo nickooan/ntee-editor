@@ -25,6 +25,10 @@ type ExternalSettings struct {
 	// AgentEditKeep is how many finished agent edit sessions each project
 	// keeps for tracing back.
 	AgentEditKeep int `json:"agentEditKeep"`
+	// SessionAutoStart starts an agent's session (review, note or diff
+	// session, or staged edits to review) at once with a notice, instead of
+	// asking the user first.
+	SessionAutoStart bool `json:"sessionAutoStart"`
 }
 
 const (
@@ -41,12 +45,13 @@ const (
 )
 
 // DefaultExternalSettings: off until the user turns it on; agent edits wait
-// for the user's review.
+// for the user's review; an agent's session asks before it starts.
 var DefaultExternalSettings = ExternalSettings{
-	Enabled:         false,
-	HistoryLimit:    DefaultExternalHistoryLimit,
-	AgentEditPolicy: AgentEditPolicyReview,
-	AgentEditKeep:   DefaultAgentEditKeep,
+	Enabled:          false,
+	HistoryLimit:     DefaultExternalHistoryLimit,
+	AgentEditPolicy:  AgentEditPolicyReview,
+	AgentEditKeep:    DefaultAgentEditKeep,
+	SessionAutoStart: false,
 }
 
 func (settings ExternalSettings) withDefaults() ExternalSettings {

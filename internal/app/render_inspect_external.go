@@ -20,7 +20,7 @@ func (m Model) renderInspectExternal(width, height int) string {
 		legend: []panelLegendEntry{
 			{"ntee --msg open <file>#L<n>", panelCommandStyle, "open a file at a line"},
 			{"ntee --msg review <files…>", panelCommandStyle, "review changed files (or pipe paths on stdin)"},
-			{"ext on|off · ext limit <n>", panelCommandStyle, "the same switches from the @inspection > bar"},
+			{"ext on|off · ext sessions ask|direct · ext limit <n>", panelCommandStyle, "the same switches from the @inspection > bar"},
 		},
 	}
 	if !picker.focused {
@@ -32,7 +32,7 @@ func (m Model) renderInspectExternal(width, height int) string {
 		socket = panelBadStyle.Render("● not listening") + panelDimStyle.Render("  "+m.external.socketProblem)
 	}
 
-	accept, limit := panelDimStyle.Render("loading…"), panelDimStyle.Render("loading…")
+	accept, sessionStart, limit := panelDimStyle.Render("loading…"), panelDimStyle.Render("loading…"), panelDimStyle.Render("loading…")
 	if m.external.settingsLoaded {
 		accept = panelBadStyle.Render("off") + panelDimStyle.Render("  senders are told messages are disabled")
 		if m.external.settings.Enabled {
@@ -46,6 +46,10 @@ func (m Model) renderInspectExternal(width, height int) string {
 			}
 			accept = panelDimStyle.Render("disabled") + panelDimStyle.Render("  single-file mode — the global switch is "+global+" for folder windows")
 		}
+		sessionStart = panelStrongStyle.Render("● ask first") + panelDimStyle.Render("  ○ start directly — a review, tour or staged edits waits for your OK")
+		if m.external.settings.SessionAutoStart {
+			sessionStart = panelDimStyle.Render("○ ask first  ") + panelStrongStyle.Render("● start directly") + panelDimStyle.Render("  — sessions open at once with a short notice")
+		}
 		limit = panelStrongStyle.Render(fmt.Sprintf("%d", m.external.settings.HistoryLimit)) +
 			panelDimStyle.Render(fmt.Sprintf("  latest messages kept per project (%d–%d)", store.MinExternalHistoryLimit, store.MaxExternalHistoryLimit))
 	}
@@ -57,6 +61,7 @@ func (m Model) renderInspectExternal(width, height int) string {
 	rows := []panelRow{
 		{label: "socket", pieces: []string{socket}},
 		{label: "accept messages", pieces: []string{accept}},
+		{label: "agent sessions", pieces: []string{sessionStart}},
 		{label: "history limit", pieces: []string{limit}},
 		{label: "this project", pieces: []string{history}},
 	}

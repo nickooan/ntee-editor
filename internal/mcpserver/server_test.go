@@ -433,6 +433,15 @@ func TestWaitSaysWhenTheUserSetTheEditsAside(t *testing.T) {
 	}
 }
 
+func TestAnEditorThatHangsUpIsReportedNotSilent(t *testing.T) {
+	h := newHarness(t)
+	h.setReply(func(string) string { return "" }) // the editor quit while holding the wait
+	result := h.call(1, toolWait, map[string]any{"session": "e1"})
+	if text := result.Content[0].Text; !result.IsError || !strings.Contains(text, "closed the connection without answering") || !strings.Contains(text, "edit_status") {
+		t.Fatalf("a hang-up = %+v", result)
+	}
+}
+
 func TestACancelledWaitStopsWithoutAResponseWhileOthersAnswer(t *testing.T) {
 	h := newHarness(t)
 	release := make(chan struct{})

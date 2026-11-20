@@ -68,7 +68,7 @@ For `write` and `replace` (`carriesPayload`), the text after the first separator
 - `Discover` — walks up from a directory to the nearest ancestor that is the opened folder of a running editor (its socket answers), given the folder→socket mapping. `ntee --msg` uses it so a sender only needs to run somewhere inside the project. See [Which editor gets a message](#which-editor-gets-a-message).
 
 - `SendForBody` — `SendWithTimeout` for a request whose reply may carry a body (`show`, `status`): it reads up to `MaxBodyBytes` and splits the reply with `SplitBodyReply`, keeping the body byte for byte.
-- `exchange` — the one dial–write–read all senders share. It takes a context whose cancellation closes the connection, so an MCP client cancelling a pending `edit_wait` frees it at once.
+- `exchange` — the one dial–write–read all senders share. It takes a context whose cancellation closes the connection, so an MCP client cancelling a pending `edit_wait` frees it at once. A connection the editor closes without a reply line is `ErrNoReply`, never an empty "success": the editor always answers, so silence means it quit or restarted while holding the request (typically a `wait`). The CLI reports it with exit 1, plus a hint for a session to wait again.
 
 *Plus: `writeRequest` (write + half-close), `isLive` — the liveness probe, `trimReply`.*
 

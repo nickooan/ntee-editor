@@ -232,17 +232,15 @@ func (m Model) renderReviewStatus() string {
 	if m.review.search.active {
 		return m.renderDocumentSearchStatus("review", m.review.search, len(m.reviewMatchesFor(m.review.search.query)))
 	}
-	line := promptStyle.Render("@review")
-	switch {
-	case m.review.session != "":
-		line += statusTextStyle.Render("   ") + sessionBadgeStyle.Render(m.reviewSessionBadge())
-	case m.review.agentEdits != "":
-		line += statusTextStyle.Render("   ") + sessionBadgeStyle.Render(m.agentEditReviewBadge())
-		if !m.review.agentEditsTrace {
-			// The decision leads: it is what the user is here for, and the end
-			// of a long status line is the first thing a narrow window cuts.
-			line += statusTextStyle.Render("   ") + agentEditDecisionStyle.Render(agentEditDecisionHint)
-		}
+	// Notices and errors come right after the prompt: a review's status line
+	// is long, and its end is what a narrow window cuts.
+	line := withNotice(m, promptStyle.Render("@review"))
+	// The session itself is named in the header (headerSessionBadge). A
+	// staged review's decision leads here: it is what the user is here for,
+	// and the end of a long status line is the first thing a narrow window
+	// cuts.
+	if m.review.agentEdits != "" && !m.review.agentEditsTrace {
+		line += statusTextStyle.Render("   ") + agentEditDecisionStyle.Render(agentEditDecisionHint)
 	}
 	if !m.review.preparing && len(m.review.files) > 0 {
 		loaded := 0
@@ -272,13 +270,13 @@ func (m Model) renderReviewStatus() string {
 	navigationHints := "↑/↓ move · Shift+↑/↓ file · n/p change · " + noteHint + m.actionHints(
 		hintFor("find", keymap.Find), hintFor("files", keymap.GotoFile), hintFor("grep", keymap.Grep))
 	if m.review.agentEdits != "" && !m.review.agentEditsTrace {
-		return withNotice(m, line) + statusTextStyle.Render("   ") + hintStyle.Render(navigationHints)
+		return line + statusTextStyle.Render("   ") + hintStyle.Render(navigationHints)
 	}
 	exitHint := "Esc exit"
 	if m.review.session != "" {
 		exitHint = "Esc quit session"
 	}
-	return withNotice(m, line) + statusTextStyle.Render("   ") + hintStyle.Render(navigationHints+" · "+exitHint)
+	return line + statusTextStyle.Render("   ") + hintStyle.Render(navigationHints+" · "+exitHint)
 }
 
 // agentEditDecisionHint is a staged review's choice, shown first.

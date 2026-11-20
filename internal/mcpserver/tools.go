@@ -179,6 +179,9 @@ func (tools *editTools) call(ctx context.Context, name string, raw json.RawMessa
 		if name == toolWait && os.IsTimeout(err) {
 			return textResult(stillWaitingText(session), false)
 		}
+		if errors.Is(err, extmsg.ErrNoReply) {
+			return textResult(err.Error()+"; edit session "+session+" stays staged if it was pending — check with "+toolStatus+", then call "+name+" again if needed", true)
+		}
 		return textResult("cannot reach the editor: "+err.Error(), true)
 	}
 	if name == toolEnd || name == toolDiscard {

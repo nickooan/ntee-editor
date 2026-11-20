@@ -84,7 +84,7 @@ Guided sessions — walk the user through code, one note at a time:
       Keep each note to a few short lines (see "Keep notes short" above).
       Send the steps one after another without waiting: each returns at once
       and the editor queues them in order. The first step asks the user to
-      start the session; from then on they walk the queue at their own pace —
+      start the session (or starts it at once, if they chose that); from then on they walk the queue at their own pace —
       Enter shows the next step instantly, Backspace goes back, Esc ends the
       session — and each step jumps straight to its file, other files and
       nested repos included, without asking. The file is read-only while a
@@ -166,8 +166,8 @@ Review sessions — a live review the user follows while you write code:
       Don't scatter notes on lines close to each other: when notes point at
       the same change or the same function, merge them into one note on its
       first changed line. Add another note only for a separate change.
-      The first send asks the user to start the session; files sent before
-      they answer queue. The view follows each new file until the user moves
+      The first send asks the user to start the session (or starts it at
+      once, if they chose that); files sent before they answer queue. The view follows each new file until the user moves
       to another one; after that new files are marked • for them to visit.
       The user quits with Esc (they confirm first); you are then told to
       stop. Send end when you are done changing files — the review stays
@@ -494,6 +494,8 @@ func deliverRequest(socketPath, request string, session msgSession, timeout time
 	switch {
 	case err != nil && session.id != "" && os.IsTimeout(err):
 		return "ok waiting — the user hasn't answered yet; run: ntee --msg " + session.flag() + " " + session.id + " wait", exitSessionWaiting
+	case err != nil && session.id != "" && errors.Is(err, extmsg.ErrNoReply):
+		return "cannot reach the editor: " + err.Error() + "; to wait again run: ntee --msg " + session.flag() + " " + session.id + " wait", 1
 	case err != nil:
 		return "cannot reach the editor: " + err.Error(), 1
 	}

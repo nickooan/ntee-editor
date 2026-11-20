@@ -181,13 +181,14 @@ func TestAgentEditReviewThenApply(t *testing.T) {
 	if outcome := gotReply(t, reply); !strings.HasPrefix(outcome, "edit session e1 ended — the user is reviewing 1 staged file") {
 		t.Fatalf("end reply = %q", outcome)
 	}
-	if m.choice.kind != choiceAgentEditsReady {
-		t.Fatal("the user is offered the review")
+	if m.choice.kind != choiceAgentEditsReady || m.choice.title != "EDITS · agent edit session e1" ||
+		!strings.Contains(m.choice.body[0].text, "NOT written yet") || m.choice.choices[0] != "Review edits" {
+		t.Fatalf("the user is offered the review, told the edits are not written: %+v", m.choice)
 	}
 	m, waitReply := sendAgentEditControl(t, m, receiver, extmsg.CommandWait, "e1", current)
 	noReply(t, waitReply)
 
-	next, cmd := m.Update(keyPress(tea.KeyEnter)) // Review now
+	next, cmd := m.Update(keyPress(tea.KeyEnter)) // Review edits
 	m = settleAgentEdits(next.(Model), cmd)
 	if m.mode != modeReview || m.review.agentEdits != "e1" || len(m.review.files) != 1 {
 		t.Fatalf("the staged review is open: mode=%v review=%+v", m.mode, m.review.agentEdits)
@@ -335,7 +336,7 @@ func stagedReviewWith(t *testing.T, prepare func(Model) Model) (Model, string, c
 	current, _ := settings.LoadExternalSettings()
 	m, _ = sendAgentEditControl(t, m, receiver, extmsg.CommandEnd, "e1", current)
 	m, waitReply := sendAgentEditControl(t, m, receiver, extmsg.CommandWait, "e1", current)
-	next, cmd := m.Update(keyPress(tea.KeyEnter)) // Review now
+	next, cmd := m.Update(keyPress(tea.KeyEnter)) // Review edits
 	m = settleAgentEdits(next.(Model), cmd)
 	if m.mode != modeReview || m.review.agentEdits != "e1" {
 		t.Fatal("the staged review is open")

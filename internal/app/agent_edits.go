@@ -138,6 +138,11 @@ func (m Model) handleAgentEditMessage(msg externalMessageMsg) (tea.Model, tea.Cm
 		m.notice = "✎ agent edits ready: session " + id + " · " + countText(len(record.Files), "file") + " — review them under Ctrl+T › agent edits"
 		return m, nil
 	}
+	if msg.sessionAutoStart {
+		m, prepare := m.enterAgentEditReview(record, false)
+		m.notice = "✎ EDITS opened without asking"
+		return m, prepare
+	}
 	m.agentEdits.choiceSession = id
 	m.choice = agentEditsReadyChoice(record)
 	return m, nil
@@ -362,8 +367,10 @@ func (m Model) agentEditKeep() int {
 
 // agentEditsReadyChoice offers to review a session the agent just ended.
 func agentEditsReadyChoice(record store.AgentEditSession) choiceOverlay {
-	choice := choiceOverlay{kind: choiceAgentEditsReady, title: "Agent edits ready · " + record.Session, choices: []string{"Review now", "Later"}}
-	choice.body = append(choice.body, overlayLine{text: countText(len(record.Files), "file") + " staged — nothing is written yet", style: overlayLineStrong})
+	banner, meaning := sessionKindBanner(extmsg.SessionEdit, "")
+	choice := choiceOverlay{kind: choiceAgentEditsReady, title: banner + " " + record.Session, choices: []string{"Review edits", "Later"}}
+	choice.body = append(choice.body, overlayLine{text: meaning, style: overlayLineHighlight})
+	choice.body = append(choice.body, overlayLine{text: countText(len(record.Files), "file") + " staged", style: overlayLineStrong})
 	choice.body = append(choice.body, agentEditFileLines(record)...)
 	choice.body = append(choice.body, overlayLine{text: "later: Ctrl+T › agent edits", style: overlayLineDim})
 	return choice

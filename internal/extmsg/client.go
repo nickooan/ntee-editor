@@ -13,6 +13,10 @@ import (
 // ErrNoEditor means no running editor was found for the directory.
 var ErrNoEditor = errors.New("no running ntee found for this directory — open the project in ntee first")
 
+// ErrNoReply means the editor closed the connection without answering —
+// most likely it quit or restarted while the request was held (a wait).
+var ErrNoReply = errors.New("the editor closed the connection without answering — it may have quit or restarted")
+
 const (
 	dialTimeout  = 2 * time.Second
 	replyTimeout = 10 * time.Second
@@ -74,7 +78,10 @@ func exchange(ctx context.Context, socketPath, text string, timeout time.Duratio
 	if writeErr != nil {
 		return nil, writeErr
 	}
-	return reply, readErr
+	if readErr == nil {
+		readErr = ErrNoReply // the editor always answers a request with a line
+	}
+	return nil, readErr
 }
 
 func trimReply(reply []byte) string {

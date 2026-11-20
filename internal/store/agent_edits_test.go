@@ -69,3 +69,31 @@ func TestAgentEditLogWithNteeDB(t *testing.T) {
 func TestMemoryAgentEditLog(t *testing.T) {
 	exerciseAgentEditLog(t, NewMemoryAgentEditLog())
 }
+
+func TestAgentEditAgentsRoundTripAndOlderRecordsGetOne(t *testing.T) {
+	log := &AgentEditLog{dir: t.TempDir()}
+	started := time.Unix(1_800_000_000, 0)
+	older := agentEditSession("older", started) // saved the way records were before agents
+	older.AgentEndedAt = started.Add(time.Minute)
+	shared := agentEditSession("shared", started.Add(time.Hour))
+	shared.Agents = []AgentEditParticipant{{Agent: "agent-a", JoinedAt: started, EndedAt: started.Add(time.Minute)}, {Agent: "agent-b", JoinedAt: started, Stopped: false}}
+	shared.Files[0].Edits[0].Agent = "agent-b"
+	for _, record := range []AgentEditSession{older, shared} {
+		if err := log.SavePendingAgentEdit(record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pending, err := log.LoadPendingAgentEdits()
+	if err != nil || len(pending) != 2 {
+		t.Fatalf("pending = %+v %v", pending, err)
+	}
+	if agents := pending[0].Agents; len(agents) != 1 || agents[0].Agent != "" || !agents[0].EndedAt.Equal(older.AgentEndedAt) {
+		t.Fatalf("an older record loads with one unnamed agent: %+v", agents)
+	}
+	if agents := pending[1].Agents; len(agents) != 2 || agents[1].Agent != "agent-b" || !agents[1].Editing() || pending[1].Files[0].Edits[0].Agent != "agent-b" {
+		t.Fatalf("agents and each edit's agent round-trip: %+v", pending[1])
+	}
+	if editing := pending[1].EditingAgents(); len(editing) != 1 || editing[0] != "agent-b" {
+		t.Fatalf("editing = %v", editing)
+	}
+}

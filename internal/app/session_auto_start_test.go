@@ -52,7 +52,7 @@ func TestANoteSessionStartsWithoutAskingWhenChosen(t *testing.T) {
 func endAgentEdits(t *testing.T, m Model, receiver *ExternalReceiver, autoStart bool) Model {
 	t.Helper()
 	receiver.Handle(replaceRequest("e1", "main.go", extmsg.ReplacePayload{Old: "func main() {\n}", New: "func main() {\n\tprintln(1)\n}"}))
-	if _, err := receiver.agentEdits.MarkAgentEnded("e1"); err != nil {
+	if _, _, err := receiver.agentEdits.MarkAgentEnded("e1", ""); err != nil {
 		t.Fatal(err)
 	}
 	m, cmd := deliver(m, externalMessageMsg{

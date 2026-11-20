@@ -3,19 +3,25 @@ package extmsg
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 )
 
 // EditRequest is the wire text of one edit session request: the command
 // and the session option on the first line, the file (when the command
 // names one) on the next, and for write and replace the payload after the
-// separator line. read and staged go without a session when session is "".
-// A request over MaxMessageBytes is refused before sending.
-func EditRequest(command, session, absolutePath, payload string) (string, error) {
-	request := command + "\n"
+// separator line. read and staged go without a session when session is "";
+// agent names the sender (write, replace, end, status), "" for none. A
+// request over MaxMessageBytes is refused before sending.
+func EditRequest(command, session, agent, absolutePath, payload string) (string, error) {
+	request := command
 	if session != "" {
-		request = command + " " + EditSessionOption + session + "\n"
+		request += " " + EditSessionOption + session
 	}
+	if agent != "" && slices.Contains([]string{CommandWrite, CommandReplace, CommandEnd, CommandStatus}, command) {
+		request += " " + AgentOption + agent
+	}
+	request += "\n"
 	if absolutePath != "" {
 		request += absolutePath + "\n"
 	}

@@ -101,6 +101,7 @@ func TestMsgHelpExplainsEditSessions(t *testing.T) {
 		"ntee --msg staged <file>",
 		"read_file, edit_replace",
 		"\"ntee --hook\" is a Claude Code PreToolUse hook",
+		"Several agents may share one session: name yourself with --msg-agent",
 	} {
 		if !strings.Contains(msgHelp, want) {
 			t.Fatalf("msg help is missing %q", want)

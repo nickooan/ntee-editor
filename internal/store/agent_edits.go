@@ -41,10 +41,50 @@ type AgentEditSession struct {
 	Status       AgentEditStatus `json:"status"`
 	Policy       string          `json:"policy"` // the policy that finished it ("review" or "apply"); "" while pending
 	StartedAt    time.Time       `json:"startedAt"`
-	AgentEndedAt time.Time       `json:"agentEndedAt"` // the agent sent end; zero until then
+	AgentEndedAt time.Time       `json:"agentEndedAt"` // every agent sent end (or the user stopped waiting); zero until then
 	EndedAt      time.Time       `json:"endedAt"`      // applied or discarded; zero while pending
 	Outcome      string          `json:"outcome"`
 	Files        []AgentEditFile `json:"files"`
+	// Agents are the agents contributing to the session, in joining order.
+	// A record from before agents were tracked loads with one anonymous
+	// agent (WithAgents).
+	Agents []AgentEditParticipant `json:"agents"`
+}
+
+// AgentEditParticipant is one agent's part in a session: "" is an agent
+// that gave no name. Stopped marks an agent still editing when the user
+// stopped waiting for it.
+type AgentEditParticipant struct {
+	Agent    string    `json:"agent"`
+	JoinedAt time.Time `json:"joinedAt"`
+	EndedAt  time.Time `json:"endedAt"` // zero while the agent is editing
+	Stopped  bool      `json:"stopped"`
+}
+
+// Editing reports whether the agent has not sent end yet.
+func (participant AgentEditParticipant) Editing() bool {
+	return participant.EndedAt.IsZero()
+}
+
+// WithAgents is the session with its agents filled in for a record from
+// before agents were tracked: one anonymous agent, joined at the start and
+// ended when the session's agent did.
+func (session AgentEditSession) WithAgents() AgentEditSession {
+	if len(session.Agents) == 0 && len(session.Files) > 0 {
+		session.Agents = []AgentEditParticipant{{JoinedAt: session.StartedAt, EndedAt: session.AgentEndedAt}}
+	}
+	return session
+}
+
+// EditingAgents lists the agents that have not sent end yet.
+func (session AgentEditSession) EditingAgents() []string {
+	var editing []string
+	for _, participant := range session.Agents {
+		if participant.Editing() {
+			editing = append(editing, participant.Agent)
+		}
+	}
+	return editing
 }
 
 // AgentEditFile is one staged file: the disk content when it was first
@@ -76,6 +116,7 @@ type AgentEdit struct {
 	Added    int       `json:"added"`
 	Removed  int       `json:"removed"`
 	At       time.Time `json:"at"`
+	Agent    string    `json:"agent"` // the agent that sent it; "" = unnamed
 }
 
 // Finished reports whether the session is over (applied or discarded).
@@ -188,7 +229,7 @@ func (log *AgentEditLog) load(prefix string) ([]AgentEditSession, error) {
 		for index := range keys {
 			var session AgentEditSession
 			if found[index] && json.Unmarshal(values[index], &session) == nil {
-				sessions = append(sessions, session)
+				sessions = append(sessions, session.WithAgents())
 			}
 		}
 		return nil

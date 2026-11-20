@@ -32,7 +32,10 @@ type agentEditsState struct {
 	stagedFiles map[string]string
 	// openNotice is the staged-file notice shown on the last open, so the
 	// next open of an unstaged file clears it rather than leave it stale.
-	openNotice     string
+	openNotice string
+	// stillEditing holds the pending sessions some agent still edits,
+	// rebuilt with pending: the header's label and the review's hint.
+	stillEditing   map[string]bool
 	finished       []store.AgentEditSession
 	finishedLoaded bool
 	// choiceSession is the session an open apply/discard/ready overlay is
@@ -67,6 +70,12 @@ func (m Model) refreshAgentEditsPending() Model {
 	if m.agentEdits.registry != nil {
 		m.agentEdits.pending = m.agentEdits.registry.Pending()
 		m.agentEdits.stagedFiles = m.stagedFilesOf(m.agentEdits.pending)
+		m.agentEdits.stillEditing = map[string]bool{}
+		for _, session := range m.agentEdits.pending {
+			if session.AgentEndedAt.IsZero() {
+				m.agentEdits.stillEditing[session.Session] = true
+			}
+		}
 	}
 	return m
 }
@@ -298,6 +307,9 @@ func (m Model) startAgentEditApply(id, policy string, replaceUnsaved bool, keep 
 		return m, nil
 	case m.agentEdits.applying[id]:
 		sendExternalReply(reply, extmsg.ErrorReply("edit session "+id+" is already being applied"))
+		return m, nil
+	case record.AgentEndedAt.IsZero():
+		m.errText = agentsStillEditingText(record)
 		return m, nil
 	}
 	applying := make(map[string]bool, len(m.agentEdits.applying)+1)
@@ -552,15 +564,25 @@ func (m Model) resolveAgentEditsChoice(kind choiceOverlayKind, chosen int, choic
 			return m.startAgentEditDiscard(id)
 		}
 		m.notice = "discard cancelled"
+	case choiceForceEndAgentEdits:
+		if chosen == 0 {
+			return m.startAgentEditForceEnd(id)
+		}
+		m.notice = "still waiting for the agents"
 	}
 	return m, nil
 }
 
-// askApplyAgentEdits opens the apply confirm for a pending session.
+// askApplyAgentEdits opens the apply confirm for a pending session — once
+// every agent in it has ended.
 func (m Model) askApplyAgentEdits(id string) Model {
 	record, ok := m.agentEdits.registry.Snapshot(id)
 	if !ok {
 		m.errText = "no edit session " + id + " is pending"
+		return m
+	}
+	if record.AgentEndedAt.IsZero() {
+		m.errText = agentsStillEditingText(record)
 		return m
 	}
 	m.agentEdits.choiceSession = id
@@ -568,7 +590,68 @@ func (m Model) askApplyAgentEdits(id string) Model {
 	return m
 }
 
-// askDiscardAgentEdits opens the discard confirm for a pending session.
+// agentsStillEditingText is why a session cannot be applied yet.
+func agentsStillEditingText(record store.AgentEditSession) string {
+	return "agents are still editing edit session " + record.Session + " (" + staging.AgentNames(record.WithAgents().EditingAgents()) +
+		") — apply once they end, or stop waiting with f under Ctrl+T › agent edits"
+}
+
+// askForceEndAgentEdits confirms no longer waiting for a session's agents.
+func (m Model) askForceEndAgentEdits(id string) Model {
+	record, ok := m.agentEdits.registry.Snapshot(id)
+	switch {
+	case !ok:
+		m.errText = "no edit session " + id + " is pending"
+		return m
+	case !record.AgentEndedAt.IsZero():
+		m.notice = "every agent in edit session " + id + " has ended — a applies it"
+		return m
+	}
+	editing := record.WithAgents().EditingAgents()
+	m.agentEdits.choiceSession = id
+	m.choice = choiceOverlay{kind: choiceForceEndAgentEdits, title: "Stop waiting for edit session " + id + "?", choices: []string{"Stop waiting", "Cancel"}}
+	m.choice.body = append(m.choice.body,
+		overlayLine{text: "still editing: " + staging.AgentNames(editing), style: overlayLineStrong},
+		overlayLine{text: "their further edits are refused; you then review and apply what is staged", style: overlayLineHighlight},
+	)
+	return m
+}
+
+// startAgentEditForceEnd stops waiting for the session's agents, off the UI
+// goroutine (the record is saved).
+func (m Model) startAgentEditForceEnd(id string) (Model, tea.Cmd) {
+	registry := m.agentEdits.registry
+	return m, func() tea.Msg {
+		record, stopped, err := registry.ForceEnd(id)
+		return agentEditsForceEndedMsg{session: id, record: record, stopped: stopped, err: err}
+	}
+}
+
+// agentEditsForceEndedMsg lands a session the user stopped waiting for.
+type agentEditsForceEndedMsg struct {
+	session string
+	record  store.AgentEditSession
+	stopped []string
+	err     error
+}
+
+// handleAgentEditsForceEnded offers the session's review, like an end from
+// its last agent.
+func (m Model) handleAgentEditsForceEnded(msg agentEditsForceEndedMsg) (tea.Model, tea.Cmd) {
+	m = m.refreshAgentEditsPending()
+	if msg.err != nil {
+		m.errText = "edit session " + msg.session + ": " + msg.err.Error()
+		return m, nil
+	}
+	m.notice = "stopped waiting for " + staging.AgentNames(msg.stopped) + " in edit session " + msg.session
+	if m.choice.open() {
+		return m, nil
+	}
+	m.agentEdits.choiceSession = msg.session
+	m.choice = agentEditsReadyChoice(msg.record)
+	return m, nil
+}
+
 // askLeaveAgentEditReview is Esc on a staged review: the user decides
 // before leaving — apply, discard, or keep the edits staged for later.
 func (m Model) askLeaveAgentEditReview(id string) Model {
@@ -611,6 +694,7 @@ func agentEditDeferredReply(id string) string {
 	return "waiting — the user set edit session " + id + " aside for later: still staged, nothing written; wait again to hear their decision"
 }
 
+// askDiscardAgentEdits opens the discard confirm for a pending session.
 func (m Model) askDiscardAgentEdits(id string) Model {
 	record, ok := m.agentEdits.registry.Snapshot(id)
 	if !ok {

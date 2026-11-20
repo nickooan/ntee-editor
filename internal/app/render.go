@@ -1180,6 +1180,9 @@ func (m Model) renderHeader() string {
 	if m.activeRepo != "" {
 		labels, styles = append(labels, "working repo: "+m.activeRepo), append(styles, headerRepoStyle)
 	}
+	if label := m.headerAgentEditingLabel(); label != "" {
+		labels, styles = append(labels, label), append(styles, headerAgentEditingStyle)
+	}
 	if badge := m.headerSessionBadge(); badge != "" {
 		labels, styles = append(labels, badge), append(styles, headerSessionStyle)
 	}
@@ -1222,6 +1225,19 @@ func (m Model) renderHeader() string {
 // headerSessionBadge is the agent session the user is in, for the header: a
 // live review session or an agent edit review in review mode, else a note,
 // diff or review session that runs or waits to start. "" when none.
+// headerAgentEditingLabel says agents are still staging edits — the user
+// cannot apply those sessions yet. "" when none is.
+func (m Model) headerAgentEditingLabel() string {
+	switch count := len(m.agentEdits.stillEditing); count {
+	case 0:
+		return ""
+	case 1:
+		return "✎ agent editing…"
+	default:
+		return fmt.Sprintf("✎ agents editing (%d)…", count)
+	}
+}
+
 func (m Model) headerSessionBadge() string {
 	if m.mode == modeReview {
 		switch {
@@ -1468,6 +1484,8 @@ var (
 	errStyle     = lipgloss.NewStyle().Foreground(colRed).Bold(true).Background(colBgChrome)
 	// A running guided session (external_session.go).
 	sessionBadgeStyle = lipgloss.NewStyle().Foreground(colOrange).Bold(true).Background(colBgChrome)
+	// Agents still staging edits: set apart from the session badge's orange.
+	headerAgentEditingStyle = lipgloss.NewStyle().Foreground(colPurple).Bold(true).Background(colBgChrome)
 	// A staged review's apply / discard choice: the keys the user is there for.
 	agentEditDecisionStyle = lipgloss.NewStyle().Foreground(colBg).Bold(true).Background(colAqua)
 )

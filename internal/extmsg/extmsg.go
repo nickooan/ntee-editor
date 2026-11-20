@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -25,6 +26,7 @@ type Message struct {
 	Session     string        // the session option's id, "" = none
 	SessionKind SessionKind   // which session option named it; SessionNone without one
 	WaitBudget  time.Duration // wait only: how long the sender waits for the reply, 0 = not given
+	Agent       string        // edit session only: the sending agent's id, "" = unnamed
 	// Payload is a write's new content or a replace's EncodeReplace JSON:
 	// everything after the separator line, byte for byte. HasPayload tells
 	// an empty payload (an empty file) from none.
@@ -71,6 +73,10 @@ const (
 	// so the editor answers before then instead of holding the connection
 	// past the sender's exit.
 	WaitOption = "--wait="
+	// AgentOption names the agent sending an edit session's write, replace,
+	// end or status, so several agents can share one session; without it
+	// the agent is unnamed.
+	AgentOption = "--agent="
 )
 
 // Option is the first-line option naming a session of this kind.
@@ -160,6 +166,11 @@ func Parse(text string) (Message, error) {
 					if !sessionIDPattern.MatchString(message.Session) {
 						return Message{}, errors.New("bad session id " + message.Session + " — use 1–64 letters, digits, '.', '_' or '-'")
 					}
+				case strings.HasPrefix(field, AgentOption):
+					message.Agent = strings.TrimPrefix(field, AgentOption)
+					if !sessionIDPattern.MatchString(message.Agent) {
+						return Message{}, errors.New("bad agent id " + message.Agent + " — use 1–64 letters, digits, '.', '_' or '-'")
+					}
 				case strings.HasPrefix(field, WaitOption):
 					budget, err := time.ParseDuration(strings.TrimPrefix(field, WaitOption))
 					if err != nil || budget <= 0 {
@@ -179,6 +190,9 @@ func Parse(text string) (Message, error) {
 	}
 	if !commandSeen {
 		return Message{}, errors.New("empty message — the first line must be a command (open, review)")
+	}
+	if message.Agent != "" && (message.SessionKind != SessionEdit || !slices.Contains([]string{CommandWrite, CommandReplace, CommandEnd, CommandStatus}, message.Command)) {
+		return Message{}, errors.New(AgentOption + " goes with an edit session's write, replace, end or status")
 	}
 	if message.WaitBudget > 0 && message.Command != CommandWait {
 		return Message{}, errors.New(WaitOption + " goes with wait only")

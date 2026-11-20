@@ -7,6 +7,7 @@
 package staging
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -48,12 +49,14 @@ type EditResult struct {
 	LineTo       int
 	Added        int
 	Removed      int
-	Replaced     int    // replace: how many matches were replaced
-	NewFile      bool   // the file does not exist on disk
-	EditCount    int    // edits staged for this file so far
-	StagedFiles  int    // files staged in the session
-	SessionStart bool   // this edit started the session
-	BaseSession  string // the pending session whose staged copy the file was built on; "" = the disk
+	Replaced     int      // replace: how many matches were replaced
+	NewFile      bool     // the file does not exist on disk
+	EditCount    int      // edits staged for this file so far
+	StagedFiles  int      // files staged in the session
+	SessionStart bool     // this edit started the session
+	BaseSession  string   // the pending session whose staged copy the file was built on; "" = the disk
+	Joined       bool     // this edit added its agent to a session other agents started
+	OtherAgents  []string // the session's other agents still editing
 }
 
 // FileResult is what applying did with one file.
@@ -136,11 +139,11 @@ func (set *stagedSet) publish(record store.AgentEditSession) {
 }
 
 // Write stages content as the whole new content of rel.
-func (r *Registry) Write(session, rel, content string) (EditResult, error) {
+func (r *Registry) Write(session, agent, rel, content string) (EditResult, error) {
 	if len(content) > MaxFileBytes {
 		return EditResult{}, fmt.Errorf("content is larger than %d MB", MaxFileBytes>>20)
 	}
-	return r.edit(session, rel, func(current string) (string, store.AgentEdit, EditResult, error) {
+	return r.edit(session, agent, rel, func(current string) (string, store.AgentEdit, EditResult, error) {
 		edit := store.AgentEdit{Op: OpWrite}
 		edit.LineFrom, edit.LineTo, edit.Added, edit.Removed = LineChanges(current, content)
 		return content, edit, EditResult{}, nil
@@ -149,7 +152,7 @@ func (r *Registry) Write(session, rel, content string) (EditResult, error) {
 
 // Replace stages an exact-text replacement in rel's staged content (its disk
 // content when rel was not staged yet).
-func (r *Registry) Replace(session, rel string, replacement Replacement) (EditResult, error) {
+func (r *Registry) Replace(session, agent, rel string, replacement Replacement) (EditResult, error) {
 	switch {
 	case replacement.Old == "":
 		return EditResult{}, errors.New("the old text is empty — use write to set the whole file")
@@ -158,7 +161,7 @@ func (r *Registry) Replace(session, rel string, replacement Replacement) (EditRe
 	case replacement.All && replacement.HintLine > 0:
 		return EditResult{}, errors.New("a line hint picks one match — leave it off with replace-all")
 	}
-	return r.edit(session, rel, func(current string) (string, store.AgentEdit, EditResult, error) {
+	return r.edit(session, agent, rel, func(current string) (string, store.AgentEdit, EditResult, error) {
 		next, edit, replaced, err := replaceText(current, rel, replacement)
 		if err != nil {
 			return "", edit, EditResult{}, err
@@ -170,9 +173,11 @@ func (r *Registry) Replace(session, rel string, replacement Replacement) (EditRe
 	})
 }
 
-// edit runs one edit on rel's staged content, saves the session, and only
-// then publishes it — a failed save leaves the session as it was.
-func (r *Registry) edit(session, rel string, apply func(current string) (string, store.AgentEdit, EditResult, error)) (EditResult, error) {
+// edit runs one edit by agent on rel's staged content, saves the session,
+// and only then publishes it — a failed save leaves the session as it was.
+// An agent's first edit adds it to the session's agents; an agent that
+// already ended takes its part up again.
+func (r *Registry) edit(session, agent, rel string, apply func(current string) (string, store.AgentEdit, EditResult, error)) (EditResult, error) {
 	set, created, err := r.lockedSetFor(session)
 	if err != nil {
 		return EditResult{}, err
@@ -180,7 +185,20 @@ func (r *Registry) edit(session, rel string, apply func(current string) (string,
 	defer set.saveMu.Unlock()
 	record := set.snapshot()
 	if !record.AgentEndedAt.IsZero() {
-		return EditResult{}, fmt.Errorf("edit session %s already got end — start a new session for more edits", session)
+		if stoppedAgents(record) {
+			return EditResult{}, fmt.Errorf("the user stopped waiting for agents in edit session %s — start a new session for more edits", session)
+		}
+		return EditResult{}, fmt.Errorf("edit session %s already got end from every agent — start a new session for more edits", session)
+	}
+	agents := slices.Clone(record.Agents)
+	at := slices.IndexFunc(agents, func(participant store.AgentEditParticipant) bool { return participant.Agent == agent })
+	joined := false
+	switch {
+	case at < 0:
+		joined = len(agents) > 0
+		agents = append(agents, store.AgentEditParticipant{Agent: agent, JoinedAt: r.now()})
+	case !agents[at].Editing():
+		agents[at].EndedAt = time.Time{}
 	}
 	files := slices.Clone(record.Files)
 	index := slices.IndexFunc(files, func(file store.AgentEditFile) bool { return file.Rel == rel })
@@ -205,10 +223,12 @@ func (r *Registry) edit(session, rel string, apply func(current string) (string,
 		return EditResult{}, err
 	}
 	edit.At = r.now()
+	edit.Agent = agent
 	file.Content = next
 	file.Edits = append(slices.Clip(file.Edits), edit)
 	files[index] = file
 	record.Files = files
+	record.Agents = agents
 	if err := r.log.SavePendingAgentEdit(record); err != nil {
 		r.dropIfEmpty(session, set)
 		return EditResult{}, fmt.Errorf("cannot save the staged edit: %w", err)
@@ -222,6 +242,12 @@ func (r *Registry) edit(session, rel string, apply func(current string) (string,
 	result.StagedFiles = len(files)
 	result.SessionStart = created
 	result.BaseSession = file.BaseSession
+	result.Joined = joined
+	for _, other := range record.EditingAgents() {
+		if other != agent {
+			result.OtherAgents = append(result.OtherAgents, other)
+		}
+	}
 	return result, nil
 }
 
@@ -353,26 +379,98 @@ func (r *Registry) Finished(session string) (store.AgentEditSession, bool) {
 	return record, ok
 }
 
-// MarkAgentEnded records the agent's end: no more edits come.
-func (r *Registry) MarkAgentEnded(session string) (store.AgentEditSession, error) {
-	r.mu.Lock()
-	set, ok := r.pending[session]
-	r.mu.Unlock()
+// MarkAgentEnded records one agent's end: its part is done. Once no agent
+// in the session is still editing, the session is ready for the user
+// (allEnded, and AgentEndedAt is set).
+func (r *Registry) MarkAgentEnded(session, agent string) (record store.AgentEditSession, allEnded bool, err error) {
+	set, ok := r.pendingSet(session)
 	if !ok {
-		return store.AgentEditSession{}, r.noSession(session)
+		return store.AgentEditSession{}, false, r.noSession(session)
 	}
 	set.saveMu.Lock()
 	defer set.saveMu.Unlock()
-	record := set.snapshot()
+	record = set.snapshot().WithAgents()
 	if !record.AgentEndedAt.IsZero() {
-		return record, nil
+		return record, true, nil
 	}
-	record.AgentEndedAt = r.now()
+	agents := slices.Clone(record.Agents)
+	at := slices.IndexFunc(agents, func(participant store.AgentEditParticipant) bool { return participant.Agent == agent })
+	if at < 0 {
+		return record, false, fmt.Errorf("%s has no edits in edit session %s — nothing of yours to end (agents in it: %s)", AgentLabel(agent), session, agentList(record.Agents))
+	}
+	now := r.now()
+	if agents[at].Editing() {
+		agents[at].EndedAt = now
+	}
+	record.Agents = agents
+	allEnded = len(record.EditingAgents()) == 0
+	if allEnded {
+		record.AgentEndedAt = now
+	}
 	if err := r.log.SavePendingAgentEdit(record); err != nil {
-		return store.AgentEditSession{}, fmt.Errorf("cannot save the session: %w", err)
+		return store.AgentEditSession{}, false, fmt.Errorf("cannot save the session: %w", err)
 	}
 	set.publish(record)
-	return record, nil
+	return record, allEnded, nil
+}
+
+// ForceEnd is the user no longer waiting for a session's agents: those
+// still editing are marked stopped (their further edits are refused) and
+// the session is ready to review. stopped lists them.
+func (r *Registry) ForceEnd(session string) (record store.AgentEditSession, stopped []string, err error) {
+	set, ok := r.pendingSet(session)
+	if !ok {
+		return store.AgentEditSession{}, nil, r.noSession(session)
+	}
+	set.saveMu.Lock()
+	defer set.saveMu.Unlock()
+	record = set.snapshot().WithAgents()
+	if !record.AgentEndedAt.IsZero() {
+		return record, nil, nil
+	}
+	now := r.now()
+	agents := slices.Clone(record.Agents)
+	for index := range agents {
+		if agents[index].Editing() {
+			agents[index].EndedAt, agents[index].Stopped = now, true
+			stopped = append(stopped, agents[index].Agent)
+		}
+	}
+	record.Agents, record.AgentEndedAt = agents, now
+	if err := r.log.SavePendingAgentEdit(record); err != nil {
+		return store.AgentEditSession{}, nil, fmt.Errorf("cannot save the session: %w", err)
+	}
+	set.publish(record)
+	return record, stopped, nil
+}
+
+func stoppedAgents(record store.AgentEditSession) bool {
+	return slices.ContainsFunc(record.Agents, func(participant store.AgentEditParticipant) bool { return participant.Stopped })
+}
+
+// AgentLabel names an agent in a sentence: its id, or "an unnamed agent".
+func AgentLabel(agent string) string {
+	if agent == "" {
+		return "an unnamed agent"
+	}
+	return "agent " + agent
+}
+
+// AgentNames lists agent ids for a sentence, "unnamed" for "".
+func AgentNames(agents []string) string {
+	names := make([]string, len(agents))
+	for index, agent := range agents {
+		names[index] = cmp.Or(agent, "unnamed")
+	}
+	return strings.Join(names, ", ")
+}
+
+func agentList(participants []store.AgentEditParticipant) string {
+	agents := make([]string, len(participants))
+	for index, participant := range participants {
+		agents[index] = participant.Agent
+	}
+	return AgentNames(agents)
 }
 
 func (r *Registry) noSession(session string) error {

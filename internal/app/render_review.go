@@ -240,7 +240,11 @@ func (m Model) renderReviewStatus() string {
 	// and the end of a long status line is the first thing a narrow window
 	// cuts.
 	if m.review.agentEdits != "" && !m.review.agentEditsTrace {
-		line += statusTextStyle.Render("   ") + agentEditDecisionStyle.Render(agentEditDecisionHint)
+		hint := agentEditDecisionHint
+		if m.agentEdits.stillEditing[m.review.agentEdits] {
+			hint = agentEditStillEditingHint
+		}
+		line += statusTextStyle.Render("   ") + agentEditDecisionStyle.Render(hint)
 	}
 	if !m.review.preparing && len(m.review.files) > 0 {
 		loaded := 0
@@ -281,6 +285,10 @@ func (m Model) renderReviewStatus() string {
 
 // agentEditDecisionHint is a staged review's choice, shown first.
 const agentEditDecisionHint = " a apply all to disk · x discard all · Esc decide "
+
+// agentEditStillEditingHint replaces it while agents still edit the
+// session: applying waits for them.
+const agentEditStillEditingHint = " agents still editing · x discard all · Esc leave "
 
 // reviewSessionBadge is the live review's mark in the status bar: how many
 // files arrived, whether the view follows new ones (or how many are

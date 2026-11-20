@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,7 +26,10 @@ func newTestRegistry(t *testing.T) (*Registry, string, *store.MemoryAgentEditLog
 	must(t, os.WriteFile(filepath.Join(root, "a.go"), []byte("one\ntwo\nthree\ntwo\n"), 0o644))
 	log := store.NewMemoryAgentEditLog()
 	clock := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+	var clockMu sync.Mutex // edits on several goroutines read the clock
 	registry := NewRegistry(root, log).WithClock(func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
 		clock = clock.Add(time.Second)
 		return clock
 	})
@@ -51,18 +55,18 @@ func stagedContent(t *testing.T, registry *Registry, session, rel string) string
 
 func TestReplaceNeedsExactlyOneMatch(t *testing.T) {
 	registry, root, _ := newTestRegistry(t)
-	if _, err := registry.Replace("s1", "a.go", Replacement{Old: "missing", New: "x"}); err == nil || !strings.Contains(err.Error(), "not in a.go") {
+	if _, err := registry.Replace("s1", "", "a.go", Replacement{Old: "missing", New: "x"}); err == nil || !strings.Contains(err.Error(), "not in a.go") {
 		t.Fatalf("no match is refused: %v", err)
 	}
 	if _, ok := registry.Snapshot("s1"); ok {
 		t.Fatal("a refused first edit leaves no session behind")
 	}
-	_, err := registry.Replace("s1", "a.go", Replacement{Old: "two", New: "2"})
+	_, err := registry.Replace("s1", "", "a.go", Replacement{Old: "two", New: "2"})
 	if err == nil || !strings.Contains(err.Error(), "matches 2 times in a.go (lines 2, 4)") {
 		t.Fatalf("several matches are refused with their lines: %v", err)
 	}
 
-	result, err := registry.Replace("s1", "a.go", Replacement{Old: "three", New: "3\n3b"})
+	result, err := registry.Replace("s1", "", "a.go", Replacement{Old: "three", New: "3\n3b"})
 	must(t, err)
 	if result.LineFrom != 3 || result.LineTo != 4 || result.EditCount != 1 || result.StagedFiles != 1 || !result.SessionStart {
 		t.Fatalf("result = %+v", result)
@@ -82,7 +86,7 @@ func TestReplaceRefusesEmptyAndSameText(t *testing.T) {
 		{Old: "one", New: "one"},
 		{Old: "two", New: "2", All: true, HintLine: 2},
 	} {
-		if _, err := registry.Replace("s1", "a.go", replacement); err == nil {
+		if _, err := registry.Replace("s1", "", "a.go", replacement); err == nil {
 			t.Fatalf("%+v must be refused", replacement)
 		}
 	}
@@ -90,7 +94,7 @@ func TestReplaceRefusesEmptyAndSameText(t *testing.T) {
 
 func TestReplaceHintPicksTheMatch(t *testing.T) {
 	registry, root, _ := newTestRegistry(t)
-	result, err := registry.Replace("s1", "a.go", Replacement{Old: "two", New: "TWO", HintLine: 4})
+	result, err := registry.Replace("s1", "", "a.go", Replacement{Old: "two", New: "TWO", HintLine: 4})
 	must(t, err)
 	if result.LineFrom != 4 || stagedContent(t, registry, "s1", "a.go") != "one\ntwo\nthree\nTWO\n" {
 		t.Fatalf("the hint takes the match on its line: %+v", result)
@@ -98,13 +102,13 @@ func TestReplaceHintPicksTheMatch(t *testing.T) {
 
 	// No match covers line 3: the nearest wins, the earlier on a tie.
 	must(t, os.WriteFile(filepath.Join(root, "b.go"), []byte("x\nmid\nx\n\n\n\nx\n"), 0o644))
-	result, err = registry.Replace("s2", "b.go", Replacement{Old: "x", New: "y", HintLine: 5})
+	result, err = registry.Replace("s2", "", "b.go", Replacement{Old: "x", New: "y", HintLine: 5})
 	must(t, err)
 	if result.LineFrom != 3 {
 		t.Fatalf("line 5 is nearest the match on line 3 (2 away, line 7 too — the earlier wins): %+v", result)
 	}
 	// A single match ignores the hint.
-	result, err = registry.Replace("s2", "b.go", Replacement{Old: "mid", New: "MID", HintLine: 40})
+	result, err = registry.Replace("s2", "", "b.go", Replacement{Old: "mid", New: "MID", HintLine: 40})
 	must(t, err)
 	if result.LineFrom != 2 {
 		t.Fatalf("a single match is taken whatever the hint: %+v", result)
@@ -113,13 +117,13 @@ func TestReplaceHintPicksTheMatch(t *testing.T) {
 
 func TestReplaceAllAndEditsStack(t *testing.T) {
 	registry, _, _ := newTestRegistry(t)
-	result, err := registry.Replace("s1", "a.go", Replacement{Old: "two", New: "2", All: true})
+	result, err := registry.Replace("s1", "", "a.go", Replacement{Old: "two", New: "2", All: true})
 	must(t, err)
 	if result.Replaced != 2 || result.LineFrom != 2 || result.LineTo != 4 {
 		t.Fatalf("replace-all = %+v", result)
 	}
 	// The next edit works on the staged content, not the disk.
-	result, err = registry.Replace("s1", "a.go", Replacement{Old: "2\nthree", New: "2+3"})
+	result, err = registry.Replace("s1", "", "a.go", Replacement{Old: "2\nthree", New: "2+3"})
 	must(t, err)
 	if result.EditCount != 2 || result.SessionStart {
 		t.Fatalf("second edit = %+v", result)
@@ -135,12 +139,12 @@ func TestReplaceAllAndEditsStack(t *testing.T) {
 
 func TestWriteStagesANewFile(t *testing.T) {
 	registry, root, _ := newTestRegistry(t)
-	result, err := registry.Write("s1", "pkg/new.go", "package pkg\n\nfunc New() {}\n")
+	result, err := registry.Write("s1", "", "pkg/new.go", "package pkg\n\nfunc New() {}\n")
 	must(t, err)
 	if !result.NewFile || result.Added != 3 || result.Removed != 0 || result.LineFrom != 1 || result.LineTo != 3 {
 		t.Fatalf("new file = %+v", result)
 	}
-	result, err = registry.Write("s1", "a.go", "one\nTWO\nthree\ntwo\n")
+	result, err = registry.Write("s1", "", "a.go", "one\nTWO\nthree\ntwo\n")
 	must(t, err)
 	if result.NewFile || result.Added != 1 || result.Removed != 1 || result.LineFrom != 2 || result.LineTo != 2 || result.StagedFiles != 2 {
 		t.Fatalf("rewrite = %+v", result)
@@ -156,10 +160,10 @@ func TestWriteStagesANewFile(t *testing.T) {
 func TestStagingRefusesBinaryAndOutsideFiles(t *testing.T) {
 	registry, root, _ := newTestRegistry(t)
 	must(t, os.WriteFile(filepath.Join(root, "blob.bin"), []byte("a\x00b"), 0o644))
-	if _, err := registry.Write("s1", "blob.bin", "text"); err == nil || !strings.Contains(err.Error(), "binary") {
+	if _, err := registry.Write("s1", "", "blob.bin", "text"); err == nil || !strings.Contains(err.Error(), "binary") {
 		t.Fatalf("binary files are refused: %v", err)
 	}
-	if _, err := registry.Write("s1", "../outside.go", "x"); err == nil {
+	if _, err := registry.Write("s1", "", "../outside.go", "x"); err == nil {
 		t.Fatal("a path outside the workspace is refused")
 	}
 }
@@ -167,11 +171,11 @@ func TestStagingRefusesBinaryAndOutsideFiles(t *testing.T) {
 func TestApplyWritesAndSkipsConflicts(t *testing.T) {
 	registry, root, log := newTestRegistry(t)
 	must(t, os.WriteFile(filepath.Join(root, "c.go"), []byte("c\n"), 0o644))
-	_, err := registry.Replace("s1", "a.go", Replacement{Old: "one", New: "ONE"})
+	_, err := registry.Replace("s1", "", "a.go", Replacement{Old: "one", New: "ONE"})
 	must(t, err)
-	_, err = registry.Write("s1", "c.go", "C\n")
+	_, err = registry.Write("s1", "", "c.go", "C\n")
 	must(t, err)
-	_, err = registry.Write("s1", "dir/new.go", "new\n")
+	_, err = registry.Write("s1", "", "dir/new.go", "new\n")
 	must(t, err)
 	// Someone changes c.go after it was staged: applying must not lose it.
 	must(t, os.WriteFile(filepath.Join(root, "c.go"), []byte("someone else\n"), 0o644))
@@ -199,7 +203,7 @@ func TestApplyWritesAndSkipsConflicts(t *testing.T) {
 	if summary, ok := registry.Finished("s1"); !ok || summary.Files[0].Content != "" {
 		t.Fatal("this run remembers the finished session, without its contents")
 	}
-	if _, err := registry.Write("s1", "a.go", "again"); err == nil || !strings.Contains(err.Error(), "already finished") {
+	if _, err := registry.Write("s1", "", "a.go", "again"); err == nil || !strings.Contains(err.Error(), "already finished") {
 		t.Fatalf("a finished id does not take more edits: %v", err)
 	}
 
@@ -216,26 +220,26 @@ func TestApplyWritesAndSkipsConflicts(t *testing.T) {
 
 func TestEditsAfterEndAreRefused(t *testing.T) {
 	registry, _, _ := newTestRegistry(t)
-	_, err := registry.Write("s1", "a.go", "x\n")
+	_, err := registry.Write("s1", "", "a.go", "x\n")
 	must(t, err)
-	record, err := registry.MarkAgentEnded("s1")
+	record, allEnded, err := registry.MarkAgentEnded("s1", "")
 	must(t, err)
-	if record.AgentEndedAt.IsZero() {
+	if !allEnded || record.AgentEndedAt.IsZero() {
 		t.Fatal("end is recorded")
 	}
-	if _, err := registry.Write("s1", "a.go", "y\n"); err == nil || !strings.Contains(err.Error(), "already got end") {
+	if _, err := registry.Write("s1", "", "a.go", "y\n"); err == nil || !strings.Contains(err.Error(), "already got end") {
 		t.Fatalf("edits after end are refused: %v", err)
 	}
-	if _, err := registry.MarkAgentEnded("nothing"); err == nil {
+	if _, _, err := registry.MarkAgentEnded("nothing", ""); err == nil {
 		t.Fatal("ending a session that staged nothing is an error")
 	}
 }
 
 func TestPendingSessionsSurviveARestart(t *testing.T) {
 	registry, root, log := newTestRegistry(t)
-	_, err := registry.Write("s1", "a.go", "x\n")
+	_, err := registry.Write("s1", "", "a.go", "x\n")
 	must(t, err)
-	_, err = registry.Write("s2", "a.go", "y\n")
+	_, err = registry.Write("s2", "", "a.go", "y\n")
 	must(t, err)
 	discarded, err := registry.Discard("s2", "the agent", 20)
 	must(t, err)
@@ -254,10 +258,10 @@ func TestPendingSessionsSurviveARestart(t *testing.T) {
 func TestFinishedSessionsAreTrimmedOldestFirst(t *testing.T) {
 	registry, _, log := newTestRegistry(t)
 	for _, id := range []string{"s1", "s2", "s3"} {
-		_, err := registry.Write(id, "a.go", id+"\n")
+		_, err := registry.Write(id, "", "a.go", id+"\n")
 		must(t, err)
 	}
-	_, err := registry.Write("open", "a.go", "still staging\n")
+	_, err := registry.Write("open", "", "a.go", "still staging\n")
 	must(t, err)
 	for _, id := range []string{"s1", "s2", "s3"} {
 		_, err := registry.Discard(id, "the user", 2)
@@ -299,7 +303,7 @@ func TestConcurrentEditsAndReads(t *testing.T) {
 			defer func() { done <- struct{}{} }()
 			for index := range 20 {
 				rel := "f" + string(rune('a'+writer)) + ".go"
-				if _, err := registry.Write("s1", rel, strings.Repeat("x\n", index+1)); err != nil {
+				if _, err := registry.Write("s1", "", rel, strings.Repeat("x\n", index+1)); err != nil {
 					t.Error(err)
 					return
 				}
@@ -333,7 +337,7 @@ func TestAnEditQueuedBehindAFailedFirstEditIsKept(t *testing.T) {
 	must(t, err)
 	queued := make(chan error, 1)
 	go func() {
-		_, err := registry.Write("s1", "a.go", "kept\n")
+		_, err := registry.Write("s1", "", "a.go", "kept\n")
 		queued <- err
 	}()
 	time.Sleep(20 * time.Millisecond) // the write is now waiting on the lock

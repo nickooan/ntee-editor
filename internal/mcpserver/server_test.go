@@ -250,7 +250,7 @@ func TestReplaceAndWriteGoOverTheWire(t *testing.T) {
 	session := h.sessionTag + "1"
 	h.setReply(func(string) string { return "ok replaced a.go L12–L14 · edit 1 · 1 file staged" })
 	result := h.call(1, toolReplace, map[string]any{"path": "a.go", "old_text": "x\n---\ny", "new_text": "z", "line": 12})
-	want, _ := extmsg.EditRequest(extmsg.CommandReplace, session, filepath.Join(h.workingDir, "a.go")+"#L12", extmsg.EncodeReplace(extmsg.ReplacePayload{Old: "x\n---\ny", New: "z"}))
+	want, _ := extmsg.EditRequest(extmsg.CommandReplace, session, strings.TrimSuffix(h.sessionTag, "-"), filepath.Join(h.workingDir, "a.go")+"#L12", extmsg.EncodeReplace(extmsg.ReplacePayload{Old: "x\n---\ny", New: "z"}))
 	if got := h.nextRequest(); got != want {
 		t.Fatalf("replace request = %q, want %q", got, want)
 	}
@@ -261,13 +261,13 @@ func TestReplaceAndWriteGoOverTheWire(t *testing.T) {
 	absolute := filepath.Join(t.TempDir(), "new.go")
 	h.setReply(func(string) string { return "ok staged new.go (new file, 1 line)" })
 	h.call(2, toolWrite, map[string]any{"path": absolute, "content": "package x\n"})
-	want, _ = extmsg.EditRequest(extmsg.CommandWrite, session, absolute, "package x\n")
+	want, _ = extmsg.EditRequest(extmsg.CommandWrite, session, strings.TrimSuffix(h.sessionTag, "-"), absolute, "package x\n")
 	if got := h.nextRequest(); got != want {
 		t.Fatalf("write request = %q, want %q", got, want)
 	}
 
 	h.call(3, toolReplace, map[string]any{"path": "a.go", "old_text": "a", "new_text": "", "replace_all": true})
-	want, _ = extmsg.EditRequest(extmsg.CommandReplace, session, filepath.Join(h.workingDir, "a.go"), extmsg.EncodeReplace(extmsg.ReplacePayload{Old: "a", All: true}))
+	want, _ = extmsg.EditRequest(extmsg.CommandReplace, session, strings.TrimSuffix(h.sessionTag, "-"), filepath.Join(h.workingDir, "a.go"), extmsg.EncodeReplace(extmsg.ReplacePayload{Old: "a", All: true}))
 	if got := h.nextRequest(); got != want {
 		t.Fatalf("replace-all request = %q, want %q", got, want)
 	}
@@ -288,7 +288,7 @@ func TestReadFileNumbersTheLatestContentAndSaysWhereItCameFrom(t *testing.T) {
 		return extmsg.BodyReplyWith("a\nb\nc\nd\n", "staged · edit session other-agent · not written")
 	})
 	result = h.call(2, toolRead, map[string]any{"path": "a.go", "offset": 2, "limit": 2})
-	if want := "a.go — latest staged content from edit session other-agent, NOT on disk yet\n     2\tb\n     3\tc\n(lines 2–3 of 4 — pass offset 4 to read on)"; result.Content[0].Text != want {
+	if want := "a.go — latest staged content from edit session other-agent, NOT on disk yet (your edits build on it; to add them to that change set instead, pass session=other-agent)\n     2\tb\n     3\tc\n(lines 2–3 of 4 — pass offset 4 to read on)"; result.Content[0].Text != want {
 		t.Fatalf("offset/limit read = %q", result.Content[0].Text)
 	}
 	h.nextRequest()
@@ -335,6 +335,7 @@ func TestReadTextCutsVeryLongLines(t *testing.T) {
 func TestSessionsAreAutomatic(t *testing.T) {
 	h := newHarness(t)
 	first, second := h.sessionTag+"1", h.sessionTag+"2"
+	agent := " --agent=" + strings.TrimSuffix(h.sessionTag, "-")
 	if result := h.call(1, toolStatus, nil); !result.IsError || !strings.Contains(result.Content[0].Text, "no edit session yet") {
 		t.Fatalf("status before any edit = %+v", result)
 	}
@@ -343,7 +344,7 @@ func TestSessionsAreAutomatic(t *testing.T) {
 	h.call(2, toolWrite, map[string]any{"path": "a.go", "content": "x"})
 	h.call(3, toolReplace, map[string]any{"path": "a.go", "old_text": "x", "new_text": "y"})
 	for range 2 {
-		if got := h.nextRequest(); !strings.Contains(got, "--edit-session="+first+"\n") {
+		if got := h.nextRequest(); !strings.Contains(got, "--edit-session="+first+agent+"\n") {
 			t.Fatalf("edit went to %q, want session %s", got, first)
 		}
 	}
@@ -352,7 +353,7 @@ func TestSessionsAreAutomatic(t *testing.T) {
 		return "ok edit session " + first + " ended — the user is reviewing 1 staged file; to hear the outcome run: ntee --msg --msg-edit-session " + first + " wait"
 	})
 	result := h.call(4, toolEnd, nil)
-	if got := h.nextRequest(); got != "end --edit-session="+first+"\n" {
+	if got := h.nextRequest(); got != "end --edit-session="+first+agent+"\n" {
 		t.Fatalf("end request = %q", got)
 	}
 	if text := result.Content[0].Text; !strings.Contains(text, "to hear the outcome call edit_wait") || strings.Contains(text, "ntee --msg") {
@@ -367,11 +368,11 @@ func TestSessionsAreAutomatic(t *testing.T) {
 
 	h.setReply(func(string) string { return "ok" })
 	h.call(6, toolWrite, map[string]any{"path": "a.go", "content": "x"})
-	if got := h.nextRequest(); !strings.Contains(got, "--edit-session="+second+"\n") {
+	if got := h.nextRequest(); !strings.Contains(got, "--edit-session="+second+agent+"\n") {
 		t.Fatalf("the edit after end went to %q, want a new session %s", got, second)
 	}
 	h.call(7, toolWrite, map[string]any{"path": "b.go", "content": "x", "session": "side-task"})
-	if got := h.nextRequest(); !strings.Contains(got, "--edit-session=side-task\n") {
+	if got := h.nextRequest(); !strings.Contains(got, "--edit-session=side-task"+agent+"\n") {
 		t.Fatalf("an explicit session is used as given, got %q", got)
 	}
 	h.call(8, toolDiscard, nil)
@@ -380,6 +381,34 @@ func TestSessionsAreAutomatic(t *testing.T) {
 	}
 	if result := h.call(9, toolStatus, nil); !result.IsError {
 		t.Fatalf("after discard there is no current session, got %+v", result)
+	}
+}
+
+func TestAnExplicitSessionJoinsWhenNoneIsCurrent(t *testing.T) {
+	h := newHarness(t)
+	agent := strings.TrimSuffix(h.sessionTag, "-")
+	h.call(1, toolReplace, map[string]any{"path": "a.go", "old_text": "x", "new_text": "y", "session": "their-session"})
+	if got := h.nextRequest(); !strings.HasPrefix(got, "replace --edit-session=their-session --agent="+agent+"\n") {
+		t.Fatalf("the edit joins their session as this agent: %q", got)
+	}
+	h.call(2, toolWrite, map[string]any{"path": "b.go", "content": "x"})
+	if got := h.nextRequest(); !strings.HasPrefix(got, "write --edit-session=their-session --agent=") {
+		t.Fatalf("later edits without a session stay in the joined one: %q", got)
+	}
+	h.setReply(func(string) string {
+		return "ok your part of edit session their-session is done — waiting for 1 other agent (agent-a) to end before the user reviews it; to hear the outcome run: ntee --msg --msg-edit-session their-session wait"
+	})
+	result := h.call(3, toolEnd, nil)
+	if got := h.nextRequest(); got != "end --edit-session=their-session --agent="+agent+"\n" {
+		t.Fatalf("end goes to the joined session: %q", got)
+	}
+	if text := result.Content[0].Text; result.IsError || !strings.Contains(text, "waiting for 1 other agent") || !strings.Contains(text, "call edit_wait") {
+		t.Fatalf("a partial end says to wait: %+v", result)
+	}
+	h.setReply(func(string) string { return "ok finished — edit session their-session applied 2 files" })
+	h.call(4, toolWait, nil)
+	if got := h.nextRequest(); got != extmsg.EditWaitRequest("their-session", 5*time.Minute) {
+		t.Fatalf("wait follows the joined session: %q", got)
 	}
 }
 

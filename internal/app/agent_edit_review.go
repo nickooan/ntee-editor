@@ -1,6 +1,7 @@
 package app
 
 import (
+	"cmp"
 	"fmt"
 	"strings"
 
@@ -57,6 +58,7 @@ func (m Model) enterAgentEditReview(record store.AgentEditSession, trace bool) (
 	return m, func() tea.Msg {
 		files := make([]reviewFile, len(record.Files))
 		notes := make(map[string]string, len(record.Files))
+		shared := len(record.WithAgents().Agents) > 1
 		for index, file := range record.Files {
 			files[index] = reviewFile{
 				workspaceRel: file.Rel,
@@ -70,7 +72,7 @@ func (m Model) enterAgentEditReview(record store.AgentEditSession, trace bool) (
 					refusal = result.Note
 				}
 			}
-			notes[file.Rel] = agentEditFileNote(file, trace, refusal, below)
+			notes[file.Rel] = agentEditFileNote(file, trace, refusal, below, shared)
 		}
 		return agentEditReviewPreparedMsg{gen: gen, files: inTreeOrder(files), notes: notes}
 	}
@@ -111,8 +113,9 @@ func loadStagedReviewFile(file reviewFile, highlightLimit, tabWidth int) reviewF
 
 // agentEditFileNote is a staged file's note: what applying did (a trace,
 // or a file already written with a stacked session), why it cannot be
-// written, the pending sessions it builds on, and the edit log.
-func agentEditFileNote(file store.AgentEditFile, trace bool, refusal string, below []string) string {
+// written, the pending sessions it builds on, and the edit log — naming
+// each edit's agent when several share the session.
+func agentEditFileNote(file store.AgentEditFile, trace bool, refusal string, below []string, shared bool) string {
 	var lines []string
 	if file.Result != "" {
 		result := "**" + string(file.Result) + "**"
@@ -135,7 +138,11 @@ func agentEditFileNote(file store.AgentEditFile, trace bool, refusal string, bel
 		lines = append(lines, countText(len(edits), "edit")+":")
 	}
 	for _, edit := range edits {
-		lines = append(lines, fmt.Sprintf("- %s %s · +%d −%d · %s", edit.Op, lineRangeText(edit.LineFrom, edit.LineTo), edit.Added, edit.Removed, edit.At.Local().Format("15:04:05")))
+		line := fmt.Sprintf("- %s %s · +%d −%d · %s", edit.Op, lineRangeText(edit.LineFrom, edit.LineTo), edit.Added, edit.Removed, edit.At.Local().Format("15:04:05"))
+		if shared {
+			line += " · " + cmp.Or(edit.Agent, "unnamed")
+		}
+		lines = append(lines, line)
 	}
 	return strings.Join(lines, "\n")
 }

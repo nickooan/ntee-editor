@@ -84,7 +84,7 @@ func sendEditCommand(command string, paths []string, session msgSession, options
 		}
 		payload = extmsg.EncodeReplace(extmsg.ReplacePayload{Old: oldText, New: newText, All: options.replaceAll})
 	}
-	request, err := extmsg.EditRequest(command, session.id, path, payload)
+	request, err := extmsg.EditRequest(command, session.id, options.agent, path, payload)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1

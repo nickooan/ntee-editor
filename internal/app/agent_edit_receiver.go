@@ -1,6 +1,7 @@
 package app
 
 import (
+	"cmp"
 	"fmt"
 	"strconv"
 	"strings"
@@ -98,13 +99,13 @@ func (r *ExternalReceiver) handleAgentEdit(message extmsg.Message, settings stor
 		if line > 0 {
 			return extmsg.ErrorReply("write sets the whole file — leave #L" + strconv.Itoa(line) + " off")
 		}
-		result, err = r.agentEdits.Write(id, rel, message.Payload)
+		result, err = r.agentEdits.Write(id, message.Agent, rel, message.Payload)
 	case extmsg.CommandReplace:
 		payload, decodeErr := extmsg.DecodeReplace(message.Payload)
 		if decodeErr != nil {
 			return extmsg.ErrorReply(decodeErr.Error())
 		}
-		result, err = r.agentEdits.Replace(id, rel, staging.Replacement{Old: payload.Old, New: payload.New, All: payload.All, HintLine: line})
+		result, err = r.agentEdits.Replace(id, message.Agent, rel, staging.Replacement{Old: payload.Old, New: payload.New, All: payload.All, HintLine: line})
 	}
 	if err != nil {
 		return extmsg.ErrorReply(err.Error())
@@ -138,7 +139,14 @@ func agentEditReplyText(command string, result staging.EditResult, session strin
 	}
 	text += " · edit " + strconv.Itoa(result.EditCount) + " · " + countText(result.StagedFiles, "file") + " staged"
 	if result.EditCount == 1 && result.BaseSession != "" {
-		text += " · builds on edit session " + result.BaseSession + "'s staged edits to it (not applied yet)"
+		text += " · builds on edit session " + result.BaseSession + "'s staged edits to it (not applied yet; to add to that change set instead, edit in session " + result.BaseSession + ")"
+	}
+	if result.Joined {
+		text += " · joined edit session " + session
+		if len(result.OtherAgents) > 0 {
+			text += " (still editing: " + staging.AgentNames(result.OtherAgents) + ")"
+		}
+		text += " — the user reviews it once every agent in it sends end"
 	}
 	if result.SessionStart {
 		text += " · edit session " + session + " started — the files stay untouched until it is applied; send end when every edit is staged"
@@ -155,6 +163,13 @@ func agentEditStatusText(record store.AgentEditSession) string {
 		state = "ended — waiting for the user to apply or discard"
 	}
 	fmt.Fprintf(&builder, "edit session %s · %s staged · %s\n", record.Session, countText(len(record.Files), "file"), state)
+	if agents := record.WithAgents().Agents; len(agents) > 1 || len(agents) == 1 && agents[0].Agent != "" {
+		parts := make([]string, len(agents))
+		for index, participant := range agents {
+			parts[index] = cmp.Or(participant.Agent, "unnamed") + " " + agentState(participant)
+		}
+		fmt.Fprintf(&builder, "agents: %s\n", strings.Join(parts, " · "))
+	}
 	for _, file := range record.Files {
 		_, _, added, removed := staging.LineChanges(file.BaseContent, file.Content)
 		kind := "modified"
@@ -171,6 +186,24 @@ func agentEditStatusText(record store.AgentEditSession) string {
 		builder.WriteString("\n")
 	}
 	return builder.String()
+}
+
+// agentState is an agent's part in a session, for status and the panel.
+func agentState(participant store.AgentEditParticipant) string {
+	switch {
+	case participant.Stopped:
+		return "stopped by the user"
+	case participant.Editing():
+		return "editing"
+	}
+	return "done"
+}
+
+// agentEditPartEndedText answers an end that leaves other agents editing.
+func agentEditPartEndedText(record store.AgentEditSession) string {
+	editing := record.EditingAgents()
+	return "your part of edit session " + record.Session + " is done — waiting for " + countText(len(editing), "other agent") + " (" + staging.AgentNames(editing) +
+		") to end before the user reviews it; to hear the outcome run: ntee --msg --msg-edit-session " + record.Session + " wait"
 }
 
 func lineRangeText(from, to int) string {

@@ -12,7 +12,9 @@ Every session is one ntee-db record (`store.AgentEditSession`): each file's cont
 
 Concurrency rule: a pending session's record is copy-on-write. An edit takes the set's `saveMu` (so edits and saves of one session run in order), builds the next record from a snapshot, saves it to the log, and only then publishes it under the short `mu`. A failed save leaves the session exactly as it was, and a reader never waits on a db write — it only takes `mu` to copy the record header, sharing slices that are never mutated in place.
 
-A session starts on its first edit (a refused first edit leaves none behind) and takes edits until the agent's end (`MarkAgentEnded`). It then waits for `Finish` (apply results recorded) or `Discard`, both of which move it to the log's finished records, trimmed to the newest `keep`.
+A session starts on its first edit (a refused first edit leaves none behind) and takes edits until its agents' end (`MarkAgentEnded`).
+
+**Agents.** Several agents may contribute to one session: each edit names its agent (`""` = unnamed), an agent's first edit adds it to the session's `Agents`, and every edit records who sent it. `MarkAgentEnded(session, agent)` ends that agent's part; only when no agent is still editing does the session get `AgentEndedAt` and become the user's to review — an agent that ended may take its part up again with another edit until then. `ForceEnd` is the user no longer waiting: the agents still editing are marked `Stopped`, their later edits are refused, and the session is ready. It then waits for `Finish` (apply results recorded) or `Discard`, both of which move it to the log's finished records, trimmed to the newest `keep`.
 
 A file's base is read on its first edit, through the workspace jail (`filetree.ReadContainedFile`). A missing file is a new file. Binary files and files over `MaxFileBytes` (2 MiB, the review page's limit) are refused. Edits stack: a replace works on the content earlier edits staged.
 
@@ -30,7 +32,7 @@ A file's base is read on its first edit, through the workspace jail (`filetree.R
 - `Replace` — stages an exact-text replacement. The old text must match exactly once (`matchOffsets`, non-overlapping), or every match with `All`. With several matches and no `All`, a `HintLine` picks the match covering that line, else the nearest, the earlier on a tie (`pickMatch`); without one the agent is told how many matches there are and on which lines. The reply carries the changed lines in the new content.
 - `edit` — the shared edit path: snapshot, apply, save, publish, as described under Architecture.
 - `Content` — a file's staged content in the session, or its latest content (`Latest`) when the session has not staged it, with the session it came from. This is what `show` and `read` print, since the agent's own file reads see the disk.
-- `MarkAgentEnded`, `Finish`, `Discard` — the end of a session. `Finish` sets each file's `Result` from the apply results and derives the status (`applied`, `partly-applied`, `not-applied`) and an outcome sentence naming each file not written and why.
+- `MarkAgentEnded`, `ForceEnd`, `Finish`, `Discard` — the end of a session (see Agents above for the first two). `Finish` sets each file's `Result` from the apply results and derives the status (`applied`, `partly-applied`, `not-applied`) and an outcome sentence naming each file not written and why.
 - `Registry.ApplyFiles` — writes a session's staged files to disk, run off the UI goroutine. A file is written only if `ApplyCheck` allows it; otherwise it is `conflicted` (or skipped) and left alone. Already settled files keep their result. Results the caller already decided — the open buffer's file, applied on the UI goroutine, or files with unsaved work — come in as `skip`; a decided write names the layers it wrote along (`FileResult.Settles`), and those are settled too.
 - `WriteStaged` — the write itself: new files get their folder created inside the jail, and every write goes through `filetree.WriteViewFile` (atomic).
 
@@ -45,4 +47,4 @@ A file's base is read on its first edit, through the workspace jail (`filetree.R
 - `SettleFile` — records a result on a pending session's file, saved like an edit.
 - `Load` — picks up pending sessions from an earlier run at startup.
 
-*Plus small helpers: `Snapshot`, `Pending`, `Finished`, `Log`, `WithClock`, `DiskMatchesBase`, `setFor`, `dropIfEmpty`, `readBase`, `readDisk`, `fileIn`, `pendingSet`, `applyFile`, `noSession`, `replaceText`, `matchLinesText`, `lineAt`, `lineCount`, `splitLines`, `countFiles`, `abs`.*
+*Plus small helpers: `AgentLabel`, `AgentNames`, `agentList`, `stoppedAgents`, `Snapshot`, `Pending`, `Finished`, `Log`, `WithClock`, `DiskMatchesBase`, `setFor`, `dropIfEmpty`, `readBase`, `readDisk`, `fileIn`, `pendingSet`, `applyFile`, `noSession`, `replaceText`, `matchLinesText`, `lineAt`, `lineCount`, `splitLines`, `countFiles`, `abs`.*

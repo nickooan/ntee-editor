@@ -120,8 +120,15 @@ func (r *ExternalReceiver) Handle(text string) string {
 		}
 		switch message.Command {
 		case extmsg.CommandEnd:
-			if _, err := r.agentEdits.MarkAgentEnded(message.Session); err != nil {
+			record, allEnded, err := r.agentEdits.MarkAgentEnded(message.Session, message.Agent)
+			if err != nil {
 				return extmsg.ErrorReply(err.Error())
+			}
+			if !allEnded {
+				// Other agents still edit: this one's part is done, and the
+				// user is not asked until the last one ends.
+				r.notify(agentEditsChangedMsg{session: message.Session})
+				return extmsg.OkReply(agentEditPartEndedText(record))
 			}
 		case extmsg.CommandWait:
 		default:

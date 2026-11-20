@@ -40,13 +40,13 @@ func TestLatestIsTheTopStagedLayer(t *testing.T) {
 	if content, session := latest(t, registry, "a.go"); content != diskA || session != "" {
 		t.Fatalf("nothing staged: the disk (%q from %q)", content, session)
 	}
-	_, err := registry.Replace("A", "a.go", Replacement{Old: "one", New: "ONE"})
+	_, err := registry.Replace("A", "", "a.go", Replacement{Old: "one", New: "ONE"})
 	must(t, err)
 	if content, session := latest(t, registry, "a.go"); session != "A" || !strings.HasPrefix(content, "ONE\n") {
 		t.Fatalf("one layer: %q from %q", content, session)
 	}
 
-	result, err := registry.Replace("B", "a.go", Replacement{Old: "three", New: "THREE"})
+	result, err := registry.Replace("B", "", "a.go", Replacement{Old: "three", New: "THREE"})
 	must(t, err)
 	if result.BaseSession != "A" {
 		t.Fatalf("B's first edit says what it builds on: %+v", result)
@@ -67,9 +67,9 @@ func TestLatestIsTheTopStagedLayer(t *testing.T) {
 
 func TestADiscardedLayerLeavesItsStackOrphaned(t *testing.T) {
 	registry, root, _ := newTestRegistry(t)
-	_, err := registry.Replace("A", "a.go", Replacement{Old: "one", New: "ONE"})
+	_, err := registry.Replace("A", "", "a.go", Replacement{Old: "one", New: "ONE"})
 	must(t, err)
-	_, err = registry.Replace("B", "a.go", Replacement{Old: "three", New: "THREE"})
+	_, err = registry.Replace("B", "", "a.go", Replacement{Old: "three", New: "THREE"})
 	must(t, err)
 	_, err = registry.Discard("A", "the user", 20)
 	must(t, err)
@@ -88,9 +88,9 @@ func TestADiscardedLayerLeavesItsStackOrphaned(t *testing.T) {
 
 func TestALayerOnAnAppliedSessionAppliesNormally(t *testing.T) {
 	registry, root, _ := newTestRegistry(t)
-	_, err := registry.Replace("A", "a.go", Replacement{Old: "one", New: "ONE"})
+	_, err := registry.Replace("A", "", "a.go", Replacement{Old: "one", New: "ONE"})
 	must(t, err)
-	_, err = registry.Replace("B", "a.go", Replacement{Old: "three", New: "THREE"})
+	_, err = registry.Replace("B", "", "a.go", Replacement{Old: "three", New: "THREE"})
 	must(t, err)
 	recordA, _ := registry.Snapshot("A")
 	_, err = registry.Finish("A", store.AgentEditPolicyReview, registry.ApplyFiles("A", recordA.Files, nil), 20)
@@ -110,11 +110,11 @@ func TestALayerOnAnAppliedSessionAppliesNormally(t *testing.T) {
 
 func TestApplyingAStackedFileWritesAndSettlesTheLayersBelow(t *testing.T) {
 	registry, root, log := newTestRegistry(t)
-	_, err := registry.Replace("A", "a.go", Replacement{Old: "one", New: "ONE"})
+	_, err := registry.Replace("A", "", "a.go", Replacement{Old: "one", New: "ONE"})
 	must(t, err)
-	_, err = registry.Write("A", "other.go", "other\n")
+	_, err = registry.Write("A", "", "other.go", "other\n")
 	must(t, err)
-	_, err = registry.Replace("B", "a.go", Replacement{Old: "three", New: "THREE"})
+	_, err = registry.Replace("B", "", "a.go", Replacement{Old: "three", New: "THREE"})
 	must(t, err)
 
 	recordB, _ := registry.Snapshot("B")
@@ -133,7 +133,7 @@ func TestApplyingAStackedFileWritesAndSettlesTheLayersBelow(t *testing.T) {
 	if pending, _ := log.LoadPendingAgentEdits(); len(pending) != 1 || pending[0].Files[0].Result != store.AgentEditFileApplied {
 		t.Fatalf("the settled result is saved: %+v", pending)
 	}
-	if _, err := registry.Replace("A", "a.go", Replacement{Old: "ONE", New: "1"}); err == nil || !strings.Contains(err.Error(), "already written") {
+	if _, err := registry.Replace("A", "", "a.go", Replacement{Old: "ONE", New: "1"}); err == nil || !strings.Contains(err.Error(), "already written") {
 		t.Fatalf("A cannot edit a file already written: %v", err)
 	}
 	if content, session := latest(t, registry, "a.go"); session != "" || content != "ONE\ntwo\nTHREE\ntwo\n" {
@@ -150,11 +150,11 @@ func TestApplyingAStackedFileWritesAndSettlesTheLayersBelow(t *testing.T) {
 
 func TestAStackedFileConflictsWhenTheLayerBelowChanged(t *testing.T) {
 	registry, root, _ := newTestRegistry(t)
-	_, err := registry.Replace("A", "a.go", Replacement{Old: "one", New: "ONE"})
+	_, err := registry.Replace("A", "", "a.go", Replacement{Old: "one", New: "ONE"})
 	must(t, err)
-	_, err = registry.Replace("B", "a.go", Replacement{Old: "three", New: "THREE"})
+	_, err = registry.Replace("B", "", "a.go", Replacement{Old: "three", New: "THREE"})
 	must(t, err)
-	_, err = registry.Replace("A", "a.go", Replacement{Old: "ONE", New: "1"})
+	_, err = registry.Replace("A", "", "a.go", Replacement{Old: "ONE", New: "1"})
 	must(t, err)
 	recordB, _ := registry.Snapshot("B")
 	_, refusal, ok := registry.ApplyCheck(recordB.Files[0])
@@ -175,9 +175,9 @@ func TestAStackedFileConflictsWhenTheLayerBelowChanged(t *testing.T) {
 
 func TestANewFileStacksToo(t *testing.T) {
 	registry, root, _ := newTestRegistry(t)
-	_, err := registry.Write("A", "pkg/new.go", "package pkg\n")
+	_, err := registry.Write("A", "", "pkg/new.go", "package pkg\n")
 	must(t, err)
-	_, err = registry.Replace("B", "pkg/new.go", Replacement{Old: "package pkg\n", New: "package pkg\n\nfunc New() {}\n"})
+	_, err = registry.Replace("B", "", "pkg/new.go", Replacement{Old: "package pkg\n", New: "package pkg\n\nfunc New() {}\n"})
 	must(t, err)
 	recordB, _ := registry.Snapshot("B")
 	results := registry.ApplyFiles("B", recordB.Files, nil)
@@ -188,9 +188,9 @@ func TestANewFileStacksToo(t *testing.T) {
 
 func TestADecidedWriteSettlesTheLayersItNames(t *testing.T) {
 	registry, _, _ := newTestRegistry(t)
-	_, err := registry.Replace("A", "a.go", Replacement{Old: "one", New: "ONE"})
+	_, err := registry.Replace("A", "", "a.go", Replacement{Old: "one", New: "ONE"})
 	must(t, err)
-	_, err = registry.Replace("B", "a.go", Replacement{Old: "three", New: "THREE"})
+	_, err = registry.Replace("B", "", "a.go", Replacement{Old: "three", New: "THREE"})
 	must(t, err)
 	recordB, _ := registry.Snapshot("B")
 	decided := map[string]FileResult{"a.go": {Result: store.AgentEditFileApplied, Settles: []string{"A"}}}
@@ -208,7 +208,7 @@ func TestConcurrentFirstStagingsNeverFork(t *testing.T) {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			_, err := registry.Write(session, "a.go", diskA+session+"\n")
+			_, err := registry.Write(session, "", "a.go", diskA+session+"\n")
 			must(t, err)
 		}()
 	}

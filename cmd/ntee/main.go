@@ -47,6 +47,7 @@ func main() {
 	msgDiffSession := flag.String("msg-diff-session", "", "with --msg open: like --msg-session, but every step shows the diff against --msg-base (default HEAD) with the note on its line")
 	msgReviewSession := flag.String("msg-review-session", "", "with --msg review: add one file (and an optional --msg-note) to live review session <id> — the review keeps growing as files arrive, until the user quits it (exit 3: stop sending) or you send end (also: --msg --msg-review-session <id> end|wait)")
 	msgEditSession := flag.String("msg-edit-session", "", "with --msg write|replace|show|status|discard|end|wait: stage file edits in edit session <id> instead of writing the files; at end they are applied, or reviewed by the user first (Ctrl+T › agent edits) — see --msg help")
+	msgAgent := flag.String("msg-agent", "", "with --msg --msg-edit-session <id> write|replace|end|status: this agent's id, so several agents can share one edit session — the user reviews it once every agent in it sent end")
 	msgReplaceAll := flag.Bool("msg-replace-all", false, "with --msg --msg-edit-session <id> replace: replace every match of the old text, not exactly one")
 	msgSeparator := flag.String("msg-separator", defaultReplaceSeparator, "with --msg --msg-edit-session <id> replace: the stdin line between the old and the new text")
 	serveMCP := flag.Bool("mcp", false, "serve the agent edit tools (edit_replace, edit_write, edit_end, …) over MCP on stdio, for a coding agent: claude mcp add ntee -- ntee --mcp; each call reaches the running editor like --msg (--msg-root picks one)")
@@ -64,7 +65,7 @@ func main() {
 		os.Exit(runHookFromStdin(*msgRoot))
 	}
 	if *sendMsg {
-		os.Exit(sendMessage(flag.Args(), msgOptions{root: *msgRoot, base: *msgBase, note: *msgNote, session: *msgSession, diffSession: *msgDiffSession, reviewSession: *msgReviewSession, editSession: *msgEditSession, replaceAll: *msgReplaceAll, separator: *msgSeparator, wait: *msgWait}))
+		os.Exit(sendMessage(flag.Args(), msgOptions{root: *msgRoot, base: *msgBase, note: *msgNote, session: *msgSession, diffSession: *msgDiffSession, reviewSession: *msgReviewSession, editSession: *msgEditSession, agent: *msgAgent, replaceAll: *msgReplaceAll, separator: *msgSeparator, wait: *msgWait}))
 	}
 	if *disableLSP || *enableLSP {
 		if *disableLSP && *enableLSP {

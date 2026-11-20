@@ -23,7 +23,7 @@ func stackedSessions(t *testing.T, policy string) (Model, string, *staging.Regis
 		t.Fatal(reply)
 	}
 	reply := receiver.Handle(replaceRequest("B", "main.go", extmsg.ReplacePayload{Old: "\tprintln(1)\n", New: "\tprintln(1)\n\tprintln(2)\n"}))
-	if !strings.Contains(reply, "builds on edit session A's staged edits to it (not applied yet)") {
+	if !strings.Contains(reply, "builds on edit session A's staged edits to it (not applied yet; to add to that change set instead, edit in session A)") {
 		t.Fatalf("B hears it builds on A: %q", reply)
 	}
 	current, _ := settings.LoadExternalSettings()

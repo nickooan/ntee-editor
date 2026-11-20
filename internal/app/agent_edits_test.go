@@ -35,7 +35,7 @@ func settleAgentEdits(m Model, cmd tea.Cmd) Model {
 		msg := queue[0]
 		queue = queue[1:]
 		switch msg.(type) {
-		case agentEditsFinishedMsg, agentEditsFinishedListMsg, agentEditReviewPreparedMsg, reviewPreparedMsg, reviewLoadedMsg, externalSettingsMsg, externalHistoryLoadedMsg:
+		case agentEditsFinishedMsg, agentEditsForceEndedMsg, agentEditsFinishedListMsg, agentEditReviewPreparedMsg, reviewPreparedMsg, reviewLoadedMsg, externalSettingsMsg, externalHistoryLoadedMsg:
 			var next tea.Cmd
 			m, next = deliver(m, msg)
 			queue = append(queue, execCmds(next)...)
@@ -49,7 +49,7 @@ func settleAgentEdits(m Model, cmd tea.Cmd) Model {
 func sendAgentEditControl(t *testing.T, m Model, receiver *ExternalReceiver, command, session string, settings store.ExternalSettings) (Model, chan string) {
 	t.Helper()
 	if command == extmsg.CommandEnd {
-		if _, err := receiver.agentEdits.MarkAgentEnded(session); err != nil {
+		if _, _, err := receiver.agentEdits.MarkAgentEnded(session, ""); err != nil {
 			t.Fatal(err)
 		}
 	}

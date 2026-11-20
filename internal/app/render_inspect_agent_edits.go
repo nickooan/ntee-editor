@@ -1,6 +1,7 @@
 package app
 
 import (
+	"cmp"
 	"fmt"
 	"strings"
 	"time"
@@ -22,7 +23,8 @@ func (m Model) renderInspectAgentEdits(width, height int) string {
 		legend: []panelLegendEntry{
 			{"ntee --msg --msg-edit-session <id> replace <file>", panelCommandStyle, "stage an edit (see ntee --msg help)"},
 			{"Enter on a session", panelCommandStyle, "review a pending one · trace a finished one"},
-			{"a · x on a pending session", panelCommandStyle, "apply · discard it"},
+			{"a · x on a pending session", panelCommandStyle, "apply · discard it (apply waits for every agent in it to end)"},
+			{"f on a session agents still edit", panelCommandStyle, "stop waiting for them: review and apply what is staged"},
 			{"edits review|apply · edits keep <n>", panelCommandStyle, "the same switches from the @inspection > bar"},
 		},
 	}
@@ -85,11 +87,24 @@ func agentEditSessionRow(record store.AgentEditSession, pending bool) panelRow {
 	files := countText(len(record.Files), "file")
 	if pending {
 		state := "staging"
+		agents := record.WithAgents().Agents
+		if editing := len(record.EditingAgents()); len(agents) > 1 && editing > 0 {
+			state = fmt.Sprintf("%d of %d agents editing", editing, len(agents))
+		}
 		if !record.AgentEndedAt.IsZero() {
 			state = "ready to review"
 		}
+		detail := "  " + files
+		if len(agents) > 1 {
+			parts := make([]string, len(agents))
+			for index, participant := range agents {
+				parts[index] = cmp.Or(participant.Agent, "unnamed") + " " + agentState(participant)
+			}
+			detail += " · " + strings.Join(parts, ", ")
+		}
+		detail += " · started " + agentEditTime(record.StartedAt)
 		return panelRow{label: record.Session, pieces: []string{
-			panelCurrentStyle.Render("● "+state) + panelDimStyle.Render("  "+files+" · started "+agentEditTime(record.StartedAt)),
+			panelCurrentStyle.Render("● "+state) + panelDimStyle.Render(detail),
 		}}
 	}
 	style := panelGoodStyle

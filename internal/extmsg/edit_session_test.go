@@ -38,6 +38,11 @@ func TestParseEditSession(t *testing.T) {
 		{text: "staged HEAD\na.go\n", wantErr: "takes no base revision"},
 		{text: "read\na.go\n---\nnote", wantErr: "read takes no note"},
 		{text: "end --edit-session=e1\n", want: Message{Command: "end", Args: []string{}, Session: "e1", SessionKind: SessionEdit}},
+		{text: "end --edit-session=e1 --agent=mcp-1\n", want: Message{Command: "end", Args: []string{}, Session: "e1", SessionKind: SessionEdit, Agent: "mcp-1"}},
+		{text: "write --agent=a1 --edit-session=e1\na.go\n---\nx", want: Message{Command: "write", Args: []string{}, Paths: []string{"a.go"}, Session: "e1", SessionKind: SessionEdit, Agent: "a1", Payload: "x", HasPayload: true}},
+		{text: "write --edit-session=e1 --agent=bad/id\na.go\n---\nx", wantErr: "bad agent id"},
+		{text: "read --agent=a1\na.go\n", wantErr: "--agent= goes with an edit session's write, replace, end or status"},
+		{text: "show --edit-session=e1 --agent=a1\na.go\n", wantErr: "--agent= goes with"},
 		{text: "write\na.go\n---\nx", wantErr: "write needs --edit-session=<id>"},
 		{text: "write --review-session=r1\na.go\n---\nx", wantErr: "write needs --edit-session=<id>"},
 		{text: "write --edit-session=e1\na.go\n", wantErr: "needs its content after a --- line"},
@@ -62,7 +67,7 @@ func TestParseEditSession(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Parse(%q): %v", test.text, err)
 		}
-		if got.Command != test.want.Command || got.Session != test.want.Session || got.SessionKind != test.want.SessionKind ||
+		if got.Command != test.want.Command || got.Session != test.want.Session || got.SessionKind != test.want.SessionKind || got.Agent != test.want.Agent ||
 			got.Payload != test.want.Payload || got.HasPayload != test.want.HasPayload ||
 			strings.Join(got.Paths, "|") != strings.Join(test.want.Paths, "|") || len(got.Args) != len(test.want.Args) {
 			t.Fatalf("Parse(%q) = %+v, want %+v", test.text, got, test.want)
@@ -111,13 +116,19 @@ func TestBodyReplyRoundTrip(t *testing.T) {
 }
 
 func TestEditRequestNamesTheSessionOnlyWhenGiven(t *testing.T) {
-	if got, _ := EditRequest(CommandRead, "", "/p/a.go", ""); got != "read\n/p/a.go\n" {
+	if got, _ := EditRequest(CommandRead, "", "agent-a", "/p/a.go", ""); got != "read\n/p/a.go\n" {
 		t.Fatalf("a read without a session = %q", got)
 	}
-	if got, _ := EditRequest(CommandRead, "e1", "/p/a.go", ""); got != "read --edit-session=e1\n/p/a.go\n" {
+	if got, _ := EditRequest(CommandRead, "e1", "", "/p/a.go", ""); got != "read --edit-session=e1\n/p/a.go\n" {
 		t.Fatalf("a read as a session = %q", got)
 	}
-	if got, _ := EditRequest(CommandWrite, "e1", "/p/a.go", "x"); got != "write --edit-session=e1\n/p/a.go\n---\nx" {
+	if got, _ := EditRequest(CommandWrite, "e1", "", "/p/a.go", "x"); got != "write --edit-session=e1\n/p/a.go\n---\nx" {
 		t.Fatalf("a write = %q", got)
+	}
+	if got, _ := EditRequest(CommandWrite, "e1", "agent-a", "/p/a.go", "x"); got != "write --edit-session=e1 --agent=agent-a\n/p/a.go\n---\nx" {
+		t.Fatalf("a write names its agent: %q", got)
+	}
+	if got, _ := EditRequest(CommandEnd, "e1", "agent-a", "", ""); got != "end --edit-session=e1 --agent=agent-a\n" {
+		t.Fatalf("an end names its agent: %q", got)
 	}
 }

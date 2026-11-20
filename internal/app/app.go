@@ -1113,6 +1113,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case agentEditsFinishedMsg:
 		return m.handleAgentEditsFinished(msg)
 
+	case agentEditsForceEndedMsg:
+		return m.handleAgentEditsForceEnded(msg)
+
 	case agentEditsFinishedListMsg:
 		return m.handleAgentEditsFinishedList(msg)
 

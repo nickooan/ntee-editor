@@ -65,11 +65,12 @@ func textResult(text string, isError bool) toolResult {
 	return toolResult{Content: []textContent{{Type: "text", Text: text}}, IsError: isError}
 }
 
-// editTools turns tool calls into edit session requests. Without a session
-// argument, calls share one generated session id per server process: it
-// starts on the first edit and is let go once the editor answers end or
-// discard, so the next edit opens a new session; wait then targets the
-// session that ended last.
+// editTools turns tool calls into edit session requests. Each server process
+// is one agent, named by prefix on every edit, end and status. Without a
+// session argument, calls share one generated session id per process: it
+// starts on the first edit (or is the other agent's session an edit joined)
+// and is let go once the editor answers end or discard, so the next edit
+// opens a new session; wait then targets the session that ended last.
 type editTools struct {
 	config Config
 	prefix string
@@ -88,11 +89,16 @@ func newEditTools(config Config) *editTools {
 // sessionFor picks the call's session: the explicit one, else (for wait)
 // the session that ended last, else the current one, started when needed.
 func (tools *editTools) sessionFor(name, explicit string) (string, error) {
-	if explicit != "" {
-		return explicit, nil
-	}
 	tools.mu.Lock()
 	defer tools.mu.Unlock()
+	if explicit != "" {
+		// An edit naming another agent's session joins it: later calls
+		// without a session go there too.
+		if (name == toolReplace || name == toolWrite) && tools.current == "" {
+			tools.current = explicit
+		}
+		return explicit, nil
+	}
 	switch name {
 	case toolRead:
 		return tools.current, nil
@@ -174,7 +180,7 @@ func (tools *editTools) call(ctx context.Context, name string, raw json.RawMessa
 		if name == toolReplace && arguments.Line > 0 {
 			target += "#L" + strconv.Itoa(arguments.Line)
 		}
-		if request, err = extmsg.EditRequest(command, session, target, payload); err != nil {
+		if request, err = extmsg.EditRequest(command, session, tools.prefix, target, payload); err != nil {
 			return textResult(err.Error(), true)
 		}
 		if name == toolEnd {
@@ -300,7 +306,7 @@ func readText(arguments toolArguments, session, detail, content string) string {
 	header := arguments.Path + " — on disk, no staged edits"
 	if from, staged := strings.CutPrefix(detail, "staged · edit session "); staged {
 		from, _, _ = strings.Cut(from, " ")
-		header = arguments.Path + " — latest staged content from edit session " + from + ", NOT on disk yet"
+		header = arguments.Path + " — latest staged content from edit session " + from + ", NOT on disk yet (your edits build on it; to add them to that change set instead, pass session=" + from + ")"
 		if from == session {
 			header = arguments.Path + " — your edit session " + from + "'s staged copy, NOT on disk yet"
 		}

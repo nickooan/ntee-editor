@@ -34,6 +34,8 @@ The protocol is newline-delimited JSON-RPC 2.0, hand-rolled for its five methods
 
 Concurrency rule: the reading loop dispatches in order, and each `tools/call` runs on its own goroutine with its own context, registered under its request id before the loop reads on. Responses are written whole under one mutex. So a long `edit_wait` never holds up an `edit_status`, and a cancellation always finds its call. A cancelled call closes its socket connection and sends no response, as MCP asks. When stdin ends, calls still running get to answer before `Serve` returns, because a client closes stdin first and signals only if the process lingers.
 
+Each server process is one agent: its id (`mcp-<start time>-<pid>`) goes on every edit, `edit_end` and `edit_status` as `--agent=`. Agents may share a session: `read_file` names the session whose staged edits it shows, and an edit that passes that session while this process has none joins it — later calls without `session` go there too. The user reviews a shared session once every agent in it sent `edit_end`; an earlier `edit_end` answers that it is waiting for the others, and `edit_wait` hears the outcome.
+
 Sessions are automatic: one generated id per server process (`mcp-<start time>-<pid>-<n>`), started by the first edit and let go once the editor answers `edit_end` or `edit_discard`, so the next edit starts a new one. `edit_wait` without a session waits on the session that ended last. `read_file` reads as the current session (its own staged copy) and never starts one. Every reply but `read_file`'s names its session. An explicit `session` argument runs a separate change set side by side.
 
 **Functions**

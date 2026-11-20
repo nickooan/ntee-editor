@@ -206,7 +206,7 @@ Edit sessions — stage your file edits in the editor instead of writing them:
   ntee --msg --msg-edit-session <id> show <file>
   ntee --msg [--msg-edit-session <id>] read <file>
   ntee --msg staged <file>
-  ntee --msg --msg-edit-session <id> status
+  ntee --msg --msg-edit-session <id> [--msg-agent <name>] status
   ntee --msg --msg-edit-session <id> discard
   ntee --msg --msg-edit-session <id> end
   ntee --msg --msg-edit-session <id> --msg-wait 1h wait
@@ -233,6 +233,13 @@ Edit sessions — stage your file edits in the editor instead of writing them:
       session staged builds on its staged edits; applying yours then writes
       theirs to that file too, once the user agrees. status lists the
       staged files.
+      Several agents may share one session: name yourself with --msg-agent
+      <name> and use the other agent's session id (read and staged print
+      it) for your write, replace and end. The user reviews it once, after
+      every agent in it sent end: an end that leaves others editing prints
+      "ok your part of edit session … is done — waiting for N other
+      agents"; wait then tells you the outcome. The user may stop waiting
+      for an agent that never ends: its later edits are then refused.
       Send end when every edit is staged. What happens then is the user's
       setting (Ctrl+T › agent edits):
         review first (the default)  the user reviews the staged files and
@@ -361,6 +368,7 @@ type msgOptions struct {
 	diffSession   string        // --msg-diff-session: a guided diff session's id
 	reviewSession string        // --msg-review-session: a live review session's id
 	editSession   string        // --msg-edit-session: an edit session's id
+	agent         string        // --msg-agent: this agent's id in a shared edit session, "" = unnamed
 	replaceAll    bool          // --msg-replace-all: a replace takes every match
 	separator     string        // --msg-separator: the line between a replace's old and new text
 	wait          time.Duration // --msg-wait: how long a session request waits for the user
@@ -440,6 +448,9 @@ func sendMessage(args []string, options msgOptions) int {
 	if err == nil {
 		err = checkSessionCommand(command, paths, session, options.base)
 	}
+	if err == nil && options.agent != "" && session.kind != extmsg.SessionEdit {
+		err = errors.New("--msg-agent goes with --msg-edit-session <id>")
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -490,7 +501,11 @@ func sendMessage(args []string, options msgOptions) int {
 		if session.kind == extmsg.SessionEdit {
 			timeout = editEndTimeout // the editor may be writing every staged file
 		}
-		output, code = deliverRequest(socketPath, buildRequest(command, options.base, session.option(), paths, note), session, timeout)
+		option := session.option()
+		if options.agent != "" && command == extmsg.CommandEnd {
+			option += " " + extmsg.AgentOption + options.agent
+		}
+		output, code = deliverRequest(socketPath, buildRequest(command, options.base, option, paths, note), session, timeout)
 	}
 	if code == 1 && !extmsg.IsErrorReply(output) {
 		fmt.Fprintln(os.Stderr, output)

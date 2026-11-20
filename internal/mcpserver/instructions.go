@@ -16,6 +16,7 @@ When an ntee editor is open on the project, read and change files with these too
 Rules:
 - old_text must match exactly once, whitespace included. On "matches N times", add surrounding lines, or pass line (a line inside the match you mean); replace_all changes every match (renames).
 - Sessions are automatic: all edits until edit_end form one session, and the next edit starts a new one. Pass session only to run separate change sets side by side.
+- Another agent's session: read_file names the session whose staged edits it shows. By default your edits go in your own session and build on theirs. If your change belongs to the same change set, pass that session on your first edit: your later calls (edits, edit_end, edit_wait) go there too, and the user reviews it once, after every agent in it sent edit_end. edit_end may then say it is waiting for other agents — call edit_wait.
 - "not applied … changed on disk since it was staged" (or a session it built on changed or was discarded): re-read it with read_file and stage it again (a new session).
 - "ended" or "discarded": the user stopped this change set — do not re-send it unless asked.
 - "set aside for later": the edits stay staged and unwritten until the user decides; carry on, and call edit_wait again when you need the outcome.
@@ -36,7 +37,7 @@ var readSessionProperty = map[string]any{
 
 var sessionProperty = map[string]any{
 	"type":        "string",
-	"description": "Edit session id (1–64 letters, digits, '.', '_' or '-'). Leave it out: edits share one automatic session until edit_end.",
+	"description": "Edit session id (1–64 letters, digits, '.', '_' or '-'). Leave it out: edits share one automatic session until edit_end. Pass another agent's session (from read_file) on an edit to add your changes to it; later calls then use it too.",
 }
 
 var pathProperty = map[string]any{

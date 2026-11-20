@@ -91,7 +91,7 @@ func stagedSession(editorRoot, path string) string {
 	if err != nil {
 		return ""
 	}
-	request, err := extmsg.EditRequest(extmsg.CommandStaged, "", path, "")
+	request, err := extmsg.EditRequest(extmsg.CommandStaged, "", "", path, "")
 	if err != nil {
 		return ""
 	}

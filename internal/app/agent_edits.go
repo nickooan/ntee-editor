@@ -25,7 +25,14 @@ type agentEditsState struct {
 	// pending mirrors registry.Pending() as of the last change, so frames
 	// never take the registry's locks; finished is the log's finished
 	// sessions, loaded off the UI goroutine for the panel.
-	pending        []store.AgentEditSession
+	pending []store.AgentEditSession
+	// stagedFiles maps each root-relative file with unsettled staged edits
+	// to the session on top, rebuilt with pending — the tree's mark and the
+	// open notice read it per frame.
+	stagedFiles map[string]string
+	// openNotice is the staged-file notice shown on the last open, so the
+	// next open of an unstaged file clears it rather than leave it stale.
+	openNotice     string
 	finished       []store.AgentEditSession
 	finishedLoaded bool
 	// choiceSession is the session an open apply/discard/ready overlay is
@@ -59,8 +66,45 @@ func (m Model) WithAgentEdits(registry *staging.Registry) Model {
 func (m Model) refreshAgentEditsPending() Model {
 	if m.agentEdits.registry != nil {
 		m.agentEdits.pending = m.agentEdits.registry.Pending()
+		m.agentEdits.stagedFiles = m.stagedFilesOf(m.agentEdits.pending)
 	}
 	return m
+}
+
+// stagedFilesOf maps each file with unsettled staged edits, by root path,
+// to its top session: the newest one no other session builds on. Unlike
+// staging's Latest it reads no disk, so a stale layer still marks its file.
+func (m Model) stagedFilesOf(sessions []store.AgentEditSession) map[string]string {
+	builtOn := map[string]bool{}
+	for _, session := range sessions {
+		for _, file := range session.Files {
+			if file.Result == "" && file.BaseSession != "" {
+				builtOn[file.BaseSession+"\x00"+file.Rel] = true
+			}
+		}
+	}
+	staged := map[string]string{}
+	for _, session := range sessions { // oldest first: a newer top wins
+		for _, file := range session.Files {
+			if file.Result != "" || builtOn[session.Session+"\x00"+file.Rel] {
+				continue
+			}
+			if rootRel, ok := m.rootRelOf(file.Rel); ok {
+				staged[filepath.ToSlash(rootRel)] = session.Session
+			}
+		}
+	}
+	return staged
+}
+
+// stagedFileNotice tells the user the open file has staged edits that are
+// not on disk; "" when it has none.
+func (m Model) stagedFileNotice() string {
+	session, ok := m.agentEdits.stagedFiles[m.openRel]
+	if !ok || m.openRel == "" {
+		return ""
+	}
+	return "✎ " + m.openRel + " has staged edits (edit session " + session + ") — not on disk yet · Ctrl+T › agent edits"
 }
 
 func (m Model) loadAgentEditsFinishedCmd() tea.Cmd {
@@ -95,6 +139,9 @@ func (m Model) handleAgentEditsChanged(msg agentEditsChangedMsg) (tea.Model, tea
 	}
 	if record, ok := m.agentEdits.registry.Snapshot(msg.session); ok && m.mode != modeReview {
 		m.notice = "✎ agent edit session " + msg.session + " · " + countText(len(record.Files), "file") + " staged"
+		if notice := m.stagedFileNotice(); notice != "" && m.agentEdits.stagedFiles[m.openRel] == msg.session {
+			m.notice = notice
+		}
 	}
 	return m, nil
 }
@@ -129,18 +176,27 @@ func (m Model) handleAgentEditMessage(msg externalMessageMsg) (tea.Model, tea.Cm
 		sendExternalReply(msg.reply, extmsg.ErrorReply("no edit session "+id+" — nothing was staged"))
 		return m, nil
 	}
-	if msg.agentEdits.policy == store.AgentEditPolicyApply {
+	bases := m.pendingBaseSessions(record)
+	if msg.agentEdits.policy == store.AgentEditPolicyApply && len(bases) == 0 {
 		return m.startAgentEditApply(id, store.AgentEditPolicyApply, false, msg.agentEdits.keep, msg.reply)
 	}
-	sendExternalReply(msg.reply, "edit session "+id+" ended — the user is reviewing "+countText(len(record.Files), "staged file")+
-		"; to hear the outcome run: ntee --msg --msg-edit-session "+id+" wait")
+	reviewing := "edit session " + id + " ended — the user is reviewing " + countText(len(record.Files), "staged file")
+	if len(bases) > 0 {
+		reviewing += " (it builds on edit session " + strings.Join(bases, ", ") + ", still pending, so the user decides)"
+	}
+	sendExternalReply(msg.reply, reviewing+"; to hear the outcome run: ntee --msg --msg-edit-session "+id+" wait")
+	if msg.agentEdits.policy == store.AgentEditPolicyApply {
+		m.notice = "✎ edit session " + id + " builds on " + strings.Join(bases, ", ") + "'s pending edits — review it"
+	}
 	if m.choice.open() || m.reviewSessionRunning() {
 		m.notice = "✎ agent edits ready: session " + id + " · " + countText(len(record.Files), "file") + " — review them under Ctrl+T › agent edits"
 		return m, nil
 	}
-	if msg.sessionAutoStart {
+	if msg.sessionAutoStart || msg.agentEdits.policy == store.AgentEditPolicyApply {
 		m, prepare := m.enterAgentEditReview(record, false)
-		m.notice = "✎ EDITS opened without asking"
+		if msg.agentEdits.policy != store.AgentEditPolicyApply {
+			m.notice = "✎ EDITS opened without asking"
+		}
 		return m, prepare
 	}
 	m.agentEdits.choiceSession = id
@@ -253,6 +309,9 @@ func (m Model) startAgentEditApply(id, policy string, replaceUnsaved bool, keep 
 
 	decided := map[string]staging.FileResult{}
 	for _, file := range record.Files {
+		if file.Result != "" {
+			continue // written along with a session stacked on this one
+		}
 		if m.agentEditFileIsOpen(file.Rel) {
 			if m.edit.dirty && !replaceUnsaved {
 				decided[file.Rel] = staging.FileResult{Result: store.AgentEditFileSkipped, Note: "unsaved edits in the editor"}
@@ -274,25 +333,22 @@ func (m Model) startAgentEditApply(id, policy string, replaceUnsaved bool, keep 
 		_ = m.db.DeleteDraft(rootRel)
 		delete(m.draftSet, rootRel)
 	}
-	workspaceRoot := m.workspaceRoot
 	m.notice = "applying edit session " + id + "…"
 	return m, func() tea.Msg {
-		results := staging.ApplyFiles(workspaceRoot, record.Files, decided)
+		results := registry.ApplyFiles(id, record.Files, decided)
 		finished, err := registry.Finish(id, policy, results, keep)
 		return agentEditsFinishedMsg{session: id, record: finished, err: err, reply: reply}
 	}
 }
 
 // applyAgentEditToBuffer puts a staged file's content into the open buffer
-// as one undoable step and saves it — unless the file changed on disk since
-// it was staged.
+// as one undoable step and saves it — unless it cannot be written
+// (staging's ApplyCheck: it changed on disk, or a layer below it did). The
+// result names the layers below, settled once the session finishes.
 func (m Model) applyAgentEditToBuffer(file store.AgentEditFile) (Model, staging.FileResult) {
-	matches, err := staging.DiskMatchesBase(m.workspaceRoot, file)
-	switch {
-	case err != nil:
-		return m, staging.FileResult{Result: store.AgentEditFileSkipped, Note: "cannot read it: " + err.Error()}
-	case !matches:
-		return m, staging.FileResult{Result: store.AgentEditFileConflicted, Note: "changed on disk since it was staged"}
+	below, refusal, ok := m.agentEdits.registry.ApplyCheck(file)
+	if !ok {
+		return m, refusal
 	}
 	m = m.flushBurst()
 	lines := splitBufferLines(file.Content)
@@ -311,7 +367,7 @@ func (m Model) applyAgentEditToBuffer(file store.AgentEditFile) (Model, staging.
 		m.errText = previousError
 		return m, staging.FileResult{Result: store.AgentEditFileSkipped, Note: "write failed: " + note}
 	}
-	return m, staging.FileResult{Result: store.AgentEditFileApplied}
+	return m, staging.FileResult{Result: store.AgentEditFileApplied, Settles: below}
 }
 
 // handleAgentEditsFinished lands an applied or discarded session: the agent
@@ -383,14 +439,49 @@ func (m Model) agentEditApplyChoice(record store.AgentEditSession) choiceOverlay
 	choice := choiceOverlay{kind: choiceApplyAgentEdits, title: "Apply edit session " + record.Session + "?"}
 	choice.body = append(choice.body, overlayLine{text: "write " + countText(len(record.Files), "file") + " to disk", style: overlayLineStrong})
 	choice.body = append(choice.body, agentEditFileLines(record)...)
+	apply := "Apply"
+	if stacked := m.stackedAgentEditLines(record); len(stacked) > 0 {
+		choice.body = append(choice.body, stacked...)
+		apply = "Apply both"
+	}
 	unsaved := m.unsavedAgentEditFiles(record)
 	if len(unsaved) == 0 {
-		choice.choices = []string{"Apply", "Cancel"}
+		choice.choices = []string{apply, "Cancel"}
 		return choice
 	}
 	choice.body = append(choice.body, overlayLine{text: "unsaved edits in " + strings.Join(unsaved, ", "), style: overlayLineHighlight})
-	choice.choices = []string{"Apply, replace unsaved", "Apply, skip those", "Cancel"}
+	choice.choices = []string{apply + ", replace unsaved", apply + ", skip those", "Cancel"}
 	return choice
+}
+
+// pendingBaseSessions lists the pending sessions the record's files build
+// on: applying it writes their edits to those files too.
+func (m Model) pendingBaseSessions(record store.AgentEditSession) []string {
+	var bases []string
+	for _, file := range record.Files {
+		if file.Result != "" {
+			continue
+		}
+		if base := m.agentEdits.registry.PendingBase(file); base != "" && !slices.Contains(bases, base) {
+			bases = append(bases, base)
+		}
+	}
+	return bases
+}
+
+// stackedAgentEditLines warns, per file, that applying writes the edits of
+// the pending session it builds on too.
+func (m Model) stackedAgentEditLines(record store.AgentEditSession) []overlayLine {
+	var lines []overlayLine
+	for _, file := range record.Files {
+		if file.Result != "" {
+			continue
+		}
+		if base := m.agentEdits.registry.PendingBase(file); base != "" {
+			lines = append(lines, overlayLine{text: file.Rel + " builds on edit session " + base + "'s edits, which aren't applied yet — applying writes them to it too", style: overlayLineHighlight})
+		}
+	}
+	return lines
 }
 
 // agentEditDiscardChoice confirms dropping a session's staged edits.
@@ -436,7 +527,7 @@ func (m Model) resolveAgentEditsChoice(kind choiceOverlayKind, chosen int, choic
 	case choiceLeaveAgentEditReview:
 		switch chosen {
 		case 0:
-			if len(m.unsavedAgentEditFiles(record)) > 0 {
+			if len(m.unsavedAgentEditFiles(record)) > 0 || len(m.pendingBaseSessions(record)) > 0 {
 				m.agentEdits.choiceSession = id
 				m.choice = m.agentEditApplyChoice(record)
 				return m, nil

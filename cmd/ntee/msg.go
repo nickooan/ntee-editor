@@ -204,6 +204,8 @@ Edit sessions — stage your file edits in the editor instead of writing them:
   EOF
   ntee --msg --msg-edit-session <id> --msg-replace-all replace <file> <<'EOF' … EOF
   ntee --msg --msg-edit-session <id> show <file>
+  ntee --msg [--msg-edit-session <id>] read <file>
+  ntee --msg staged <file>
   ntee --msg --msg-edit-session <id> status
   ntee --msg --msg-edit-session <id> discard
   ntee --msg --msg-edit-session <id> end
@@ -222,9 +224,15 @@ Edit sessions — stage your file edits in the editor instead of writing them:
       a file holds a "<<< :new" line itself, pick another separator line
       with --msg-separator "<line>". The reply names the lines that changed
       in the staged content ("ok replaced a.go L12–L14 · edit 2").
-      Your own file reads see the disk, not your staged edits: read a staged
-      file back with show (it prints the file's disk content when you have
-      not staged it). status lists the staged files.
+      Your own file reads see the disk, not staged edits — yours or another
+      agent's. read prints a file's latest content: your session's staged
+      copy, else the newest edits any session staged, else the disk (stderr
+      says which); any agent may read, with no session. show is read for
+      your session. staged says whether a file has staged edits ("ok staged
+      · edit session <id>" or "ok not staged"). Editing a file another
+      session staged builds on its staged edits; applying yours then writes
+      theirs to that file too, once the user agrees. status lists the
+      staged files.
       Send end when every edit is staged. What happens then is the user's
       setting (Ctrl+T › agent edits):
         review first (the default)  the user reviews the staged files and
@@ -246,6 +254,8 @@ Edit sessions — stage your file edits in the editor instead of writing them:
                 error …               exit 1  the old text is missing,
                                               matches several times, …
         show    the content, byte for byte (nothing else)
+        read    the content, byte for byte; on stderr "ntee: disk" or
+                "ntee: staged · edit session <id> · not written"
         status  one line per staged file
         end     review first:   ok edit session … ended — the user is
                                 reviewing N staged files     exit 0
@@ -262,9 +272,13 @@ Edit sessions — stage your file edits in the editor instead of writing them:
       the content after a "---" line — a replace's as {"old","new","all"}
       JSON, which this command builds for you.
       As MCP tools: "ntee --mcp" serves these commands on stdio as
-      edit_replace, edit_write, edit_show, edit_status, edit_discard,
+      read_file, edit_replace, edit_write, edit_status, edit_discard,
       edit_end and edit_wait, with automatic session ids — set it up once
       with: claude mcp add ntee -- ntee --mcp
+      "ntee --hook" is a Claude Code PreToolUse hook: it stops the built-in
+      Read, Edit, MultiEdit and Write on a file with staged edits and points
+      the agent at read_file / edit_replace (matcher "Read|Edit|MultiEdit|
+      Write", command "ntee --hook"); with no editor running it allows all.
 
 A base revision (a commit hash, tag, branch, HEAD~2, …) is always compared
 with the current files on disk, uncommitted changes included. It travels on
@@ -441,7 +455,8 @@ func sendMessage(args []string, options msgOptions) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	if session.kind == extmsg.SessionEdit && command != extmsg.CommandEnd && command != extmsg.CommandWait {
+	if session.kind == extmsg.SessionEdit && command != extmsg.CommandEnd && command != extmsg.CommandWait ||
+		command == extmsg.CommandRead || command == extmsg.CommandStaged {
 		return sendEditCommand(command, paths, session, options)
 	}
 	if command == extmsg.CommandReview && len(paths) == 0 {
@@ -546,6 +561,13 @@ func checkSessionCommand(command string, paths []string, session msgSession, bas
 		}
 	case extmsg.CommandWrite, extmsg.CommandReplace, extmsg.CommandShow, extmsg.CommandStatus, extmsg.CommandDiscard:
 		return fmt.Errorf("%s goes with an edit session: ntee --msg --msg-edit-session <id> %s …", command, command)
+	case extmsg.CommandRead, extmsg.CommandStaged:
+		if session.id != "" {
+			return fmt.Errorf("%s takes no %s — only an optional --msg-edit-session <id>", command, session.flag())
+		}
+		if len(paths) != 1 {
+			return fmt.Errorf("%s needs exactly one file, got %d", command, len(paths))
+		}
 	case extmsg.CommandReview:
 		switch {
 		case session.id == "":

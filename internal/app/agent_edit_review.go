@@ -53,7 +53,7 @@ func (m Model) enterAgentEditReview(record store.AgentEditSession, trace bool) (
 		agentEditsTrace: trace,
 	}
 	m.mode = modeReview
-	gen, workspaceRoot := m.review.gen, m.workspaceRoot
+	gen, registry := m.review.gen, m.agentEdits.registry
 	return m, func() tea.Msg {
 		files := make([]reviewFile, len(record.Files))
 		notes := make(map[string]string, len(record.Files))
@@ -62,12 +62,15 @@ func (m Model) enterAgentEditReview(record store.AgentEditSession, trace bool) (
 				workspaceRel: file.Rel,
 				staged:       &stagedReviewSource{base: file.BaseContent, baseExists: file.BaseExists, content: file.Content},
 			}
-			conflict := false
-			if !trace {
-				matches, err := staging.DiskMatchesBase(workspaceRoot, file)
-				conflict = err != nil || !matches
+			refusal, below := "", []string(nil)
+			if !trace && file.Result == "" {
+				var result staging.FileResult
+				var ok bool
+				if below, result, ok = registry.ApplyCheck(file); !ok {
+					refusal = result.Note
+				}
 			}
-			notes[file.Rel] = agentEditFileNote(file, trace, conflict)
+			notes[file.Rel] = agentEditFileNote(file, trace, refusal, below)
 		}
 		return agentEditReviewPreparedMsg{gen: gen, files: inTreeOrder(files), notes: notes}
 	}
@@ -106,19 +109,23 @@ func loadStagedReviewFile(file reviewFile, highlightLimit, tabWidth int) reviewF
 	return finishReviewDocument(file, document, source.content, true, highlightLimit, tabWidth)
 }
 
-// agentEditFileNote is a staged file's note: what applying did (trace), a
-// conflict warning (pending), and the edit log.
-func agentEditFileNote(file store.AgentEditFile, trace, conflict bool) string {
+// agentEditFileNote is a staged file's note: what applying did (a trace,
+// or a file already written with a stacked session), why it cannot be
+// written, the pending sessions it builds on, and the edit log.
+func agentEditFileNote(file store.AgentEditFile, trace bool, refusal string, below []string) string {
 	var lines []string
-	if trace && file.Result != "" {
+	if file.Result != "" {
 		result := "**" + string(file.Result) + "**"
 		if file.ResultNote != "" {
 			result += " — " + file.ResultNote
 		}
 		lines = append(lines, result)
 	}
-	if conflict {
-		lines = append(lines, "**changed on disk since it was staged** — applying skips this file")
+	if refusal != "" {
+		lines = append(lines, "**"+refusal+"** — applying skips this file")
+	}
+	if len(below) > 0 {
+		lines = append(lines, "**builds on edit session "+strings.Join(below, ", ")+"'s staged edits**, not applied yet — the diff shows this session's changes; applying writes theirs to this file too")
 	}
 	edits := file.Edits
 	if len(edits) > maxAgentEditNoteEdits {

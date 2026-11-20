@@ -8,6 +8,7 @@
 //
 //	ntee --msg [--msg-note <text|->] [--msg-session <id> | --msg-diff-session <id> | --msg-review-session <id>] <open|review|end|wait|help> [paths…]   send a request to a running editor
 //	ntee --mcp [--msg-root <dir>]   serve the agent edit tools over MCP on stdio (claude mcp add ntee -- ntee --mcp)
+//	ntee --hook [--msg-root <dir>]  Claude Code PreToolUse hook: deny Read/Edit/Write on files with staged edits
 package main
 
 import (
@@ -49,6 +50,7 @@ func main() {
 	msgReplaceAll := flag.Bool("msg-replace-all", false, "with --msg --msg-edit-session <id> replace: replace every match of the old text, not exactly one")
 	msgSeparator := flag.String("msg-separator", defaultReplaceSeparator, "with --msg --msg-edit-session <id> replace: the stdin line between the old and the new text")
 	serveMCP := flag.Bool("mcp", false, "serve the agent edit tools (edit_replace, edit_write, edit_end, …) over MCP on stdio, for a coding agent: claude mcp add ntee -- ntee --mcp; each call reaches the running editor like --msg (--msg-root picks one)")
+	runAsHook := flag.Bool("hook", false, "run as a Claude Code PreToolUse hook (matcher Read|Edit|MultiEdit|Write): deny the built-in file tools on a file with edits staged in the running editor, pointing the agent at the ntee MCP tools; allows everything when no editor runs")
 	msgWait := flag.Duration("msg-wait", 10*time.Minute, "with --msg --msg-session|--msg-diff-session|--msg-review-session <id> wait: how long to wait for the session to end before printing \"ok waiting\" (exit 4); the editor answers within 1h — run wait as a background task for long tours")
 	flag.Parse()
 	if *showVersion {
@@ -57,6 +59,9 @@ func main() {
 	}
 	if *serveMCP {
 		os.Exit(serveAgentTools(*msgRoot))
+	}
+	if *runAsHook {
+		os.Exit(runHookFromStdin(*msgRoot))
 	}
 	if *sendMsg {
 		os.Exit(sendMessage(flag.Args(), msgOptions{root: *msgRoot, base: *msgBase, note: *msgNote, session: *msgSession, diffSession: *msgDiffSession, reviewSession: *msgReviewSession, editSession: *msgEditSession, replaceAll: *msgReplaceAll, separator: *msgSeparator, wait: *msgWait}))

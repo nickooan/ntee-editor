@@ -50,6 +50,8 @@ func TestCheckEditSessionCommands(t *testing.T) {
 		{command: "write", paths: []string{"a.go"}},
 		{command: "replace", paths: []string{"a.go#L3"}},
 		{command: "show", paths: []string{"a.go"}},
+		{command: "read", paths: []string{"a.go"}},
+		{command: "staged", paths: []string{"a.go"}},
 		{command: "status"},
 		{command: "discard"},
 		{command: "end"},
@@ -70,6 +72,15 @@ func TestCheckEditSessionCommands(t *testing.T) {
 	if err := checkSessionCommand("write", []string{"a.go"}, msgSession{}, ""); err == nil || !strings.Contains(err.Error(), "goes with an edit session") {
 		t.Fatalf("write without an edit session: %v", err)
 	}
+	if err := checkSessionCommand("read", []string{"a.go"}, msgSession{}, ""); err != nil {
+		t.Fatalf("read needs no session: %v", err)
+	}
+	if err := checkSessionCommand("staged", nil, msgSession{}, ""); err == nil || !strings.Contains(err.Error(), "exactly one file") {
+		t.Fatalf("staged names one file: %v", err)
+	}
+	if err := checkSessionCommand("read", []string{"a.go"}, msgSession{id: "r1", kind: extmsg.SessionReview}, ""); err == nil || !strings.Contains(err.Error(), "only an optional --msg-edit-session") {
+		t.Fatalf("read takes no review session: %v", err)
+	}
 	if _, err := sessionFromOptions(msgOptions{editSession: "e1", reviewSession: "r1"}); err == nil {
 		t.Fatal("one session flag at a time")
 	}
@@ -86,6 +97,10 @@ func TestMsgHelpExplainsEditSessions(t *testing.T) {
 		"Ctrl+T › agent edits",
 		"Builds and tests\n      see staged edits only once they are applied",
 		"claude mcp add ntee -- ntee --mcp",
+		"ntee --msg [--msg-edit-session <id>] read <file>",
+		"ntee --msg staged <file>",
+		"read_file, edit_replace",
+		"\"ntee --hook\" is a Claude Code PreToolUse hook",
 	} {
 		if !strings.Contains(msgHelp, want) {
 			t.Fatalf("msg help is missing %q", want)

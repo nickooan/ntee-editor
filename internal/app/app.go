@@ -1661,6 +1661,9 @@ func (m Model) showOpenedFile(rel string, f filetree.OpenViewFile) Model {
 		m = m.anchorCursorLine()
 	}
 	m.mode = modeEdit
+	if notice := m.stagedFileNotice(); notice != "" || m.notice == m.agentEdits.openNotice {
+		m.notice, m.agentEdits.openNotice = notice, notice
+	}
 	return m
 }
 

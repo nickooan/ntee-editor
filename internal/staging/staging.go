@@ -10,8 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
-	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
@@ -50,17 +48,21 @@ type EditResult struct {
 	LineTo       int
 	Added        int
 	Removed      int
-	Replaced     int  // replace: how many matches were replaced
-	NewFile      bool // the file does not exist on disk
-	EditCount    int  // edits staged for this file so far
-	StagedFiles  int  // files staged in the session
-	SessionStart bool // this edit started the session
+	Replaced     int    // replace: how many matches were replaced
+	NewFile      bool   // the file does not exist on disk
+	EditCount    int    // edits staged for this file so far
+	StagedFiles  int    // files staged in the session
+	SessionStart bool   // this edit started the session
+	BaseSession  string // the pending session whose staged copy the file was built on; "" = the disk
 }
 
 // FileResult is what applying did with one file.
 type FileResult struct {
 	Result store.AgentEditFileResult
 	Note   string
+	// Settles lists the pending sessions whose copy of the file a write
+	// also wrote (see ApplyCheck); ApplyFiles settles them.
+	Settles []string
 }
 
 // Registry holds the edit sessions of one workspace. Edits arrive on the
@@ -70,6 +72,11 @@ type Registry struct {
 	workspaceRoot string
 	log           store.AgentEditLogStore
 	now           func() time.Time
+
+	// layerMu serializes a file's first staging in a session — reading the
+	// top layer through publishing the record — so two sessions never both
+	// build on the same layer. Taken after a set's saveMu, never before.
+	layerMu sync.Mutex
 
 	mu       sync.Mutex
 	pending  map[string]*stagedSet
@@ -178,7 +185,9 @@ func (r *Registry) edit(session, rel string, apply func(current string) (string,
 	files := slices.Clone(record.Files)
 	index := slices.IndexFunc(files, func(file store.AgentEditFile) bool { return file.Rel == rel })
 	if index < 0 {
-		file, err := r.readBase(rel)
+		r.layerMu.Lock()
+		defer r.layerMu.Unlock()
+		file, err := r.baseFor(rel)
 		if err != nil {
 			r.dropIfEmpty(session, set)
 			return EditResult{}, err
@@ -187,6 +196,9 @@ func (r *Registry) edit(session, rel string, apply func(current string) (string,
 		index = len(files) - 1
 	}
 	file := files[index]
+	if file.Result != "" {
+		return EditResult{}, fmt.Errorf("%s was already written (%s) — start a new edit session to change it again", rel, file.ResultNote)
+	}
 	next, edit, result, err := apply(file.Content)
 	if err != nil {
 		r.dropIfEmpty(session, set)
@@ -209,6 +221,7 @@ func (r *Registry) edit(session, rel string, apply func(current string) (string,
 	result.EditCount = len(file.Edits)
 	result.StagedFiles = len(files)
 	result.SessionStart = created
+	result.BaseSession = file.BaseSession
 	return result, nil
 }
 
@@ -285,27 +298,19 @@ func (r *Registry) readBase(rel string) (store.AgentEditFile, error) {
 	return file, nil
 }
 
-// Content is rel's staged content in the session, or its disk content when
-// the session has not staged it (or there is no such session). exists is
+// Content is rel's staged content in the session, or — when the session
+// has not staged it (or there is no such session) — its latest content
+// (Latest). session names where it came from ("" = the disk); exists is
 // false for a file neither staged nor on disk.
-func (r *Registry) Content(session, rel string) (content string, staged, exists bool, err error) {
+func (r *Registry) Content(session, rel string) (content, from string, exists bool, err error) {
 	if record, ok := r.Snapshot(session); ok {
 		for _, file := range record.Files {
 			if file.Rel == rel {
-				return file.Content, true, true, nil
+				return file.Content, session, true, nil
 			}
 		}
 	}
-	data, binary, err := filetree.ReadContainedFile(r.workspaceRoot, rel)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		return "", false, false, nil
-	case err != nil:
-		return "", false, false, err
-	case binary:
-		return "", false, true, fmt.Errorf("%s is a binary file", rel)
-	}
-	return string(data), false, true, nil
+	return r.Latest(rel)
 }
 
 // Snapshot is the pending session's record.
@@ -387,6 +392,9 @@ func (r *Registry) Finish(session, policy string, results map[string]FileResult,
 		var notApplied []string
 		for index, file := range files {
 			result, ok := results[file.Rel]
+			if file.Result != "" {
+				result, ok = FileResult{Result: file.Result, Note: file.ResultNote}, true
+			}
 			if !ok {
 				result = FileResult{Result: store.AgentEditFileSkipped, Note: "not applied"}
 			}
@@ -464,45 +472,6 @@ func DiskMatchesBase(workspaceRoot string, file store.AgentEditFile) (bool, erro
 		return false, err
 	}
 	return file.BaseExists && string(data) == file.BaseContent, nil
-}
-
-// ApplyFiles writes each file's staged content, except those in skip (whose
-// result is given) and those that changed on disk since they were staged.
-// It touches the disk: run it off the UI goroutine.
-func ApplyFiles(workspaceRoot string, files []store.AgentEditFile, skip map[string]FileResult) map[string]FileResult {
-	results := make(map[string]FileResult, len(files))
-	for _, file := range files {
-		if result, ok := skip[file.Rel]; ok {
-			results[file.Rel] = result
-			continue
-		}
-		results[file.Rel] = ApplyFile(workspaceRoot, file)
-	}
-	return results
-}
-
-// ApplyFile writes one staged file unless it changed on disk since it was
-// staged.
-func ApplyFile(workspaceRoot string, file store.AgentEditFile) FileResult {
-	matches, err := DiskMatchesBase(workspaceRoot, file)
-	switch {
-	case err != nil:
-		return FileResult{Result: store.AgentEditFileSkipped, Note: "cannot read it: " + err.Error()}
-	case !matches:
-		return FileResult{Result: store.AgentEditFileConflicted, Note: "changed on disk since it was staged"}
-	}
-	if !file.BaseExists {
-		if !filetree.IsContained(workspaceRoot, file.Rel) {
-			return FileResult{Result: store.AgentEditFileSkipped, Note: "path outside the project"}
-		}
-		if err := os.MkdirAll(filepath.Dir(filepath.Join(workspaceRoot, filepath.FromSlash(file.Rel))), 0o755); err != nil {
-			return FileResult{Result: store.AgentEditFileSkipped, Note: "cannot create its folder: " + err.Error()}
-		}
-	}
-	if err := filetree.WriteViewFile(workspaceRoot, file.Rel, file.Content); err != nil {
-		return FileResult{Result: store.AgentEditFileSkipped, Note: "write failed: " + err.Error()}
-	}
-	return FileResult{Result: store.AgentEditFileApplied}
 }
 
 // replaceText applies a replacement to content. Matches don't overlap; with

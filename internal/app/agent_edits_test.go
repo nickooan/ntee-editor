@@ -96,8 +96,21 @@ func TestAgentEditReceiverStagesWithoutTouchingFiles(t *testing.T) {
 		t.Fatalf("show prints the staged content: %q", body)
 	}
 	_, body, _ = extmsg.SplitBodyReply(receiver.Handle("show --edit-session=other\nmain.go\n"))
-	if body != "package main\n\nfunc main() {\n}\n" {
-		t.Fatalf("show of an unstaged file prints the disk: %q", body)
+	if body != "package main\n\nfunc main() {\n\tprintln(1)\n}\n" {
+		t.Fatalf("another session's show prints the latest content, e1's staged copy: %q", body)
+	}
+	line, body, _ := extmsg.SplitBodyReply(receiver.Handle("read\nmain.go\n"))
+	if extmsg.BodyDetail(line) != "staged · edit session e1 · not written" || body != "package main\n\nfunc main() {\n\tprintln(1)\n}\n" {
+		t.Fatalf("read without a session gets the latest content and says where from: %q %q", line, body)
+	}
+	if line, body, _ = extmsg.SplitBodyReply(receiver.Handle("read\nlib/util.ts\n")); extmsg.BodyDetail(line) != "disk" || body != "export const héllo = 1\n" {
+		t.Fatalf("an unstaged file reads from disk: %q %q", line, body)
+	}
+	if reply := receiver.Handle("staged\nmain.go\n"); reply != "ok staged · edit session e1" {
+		t.Fatalf("staged = %q", reply)
+	}
+	if reply := receiver.Handle("staged\nlib/util.ts\n"); reply != "ok not staged" {
+		t.Fatalf("staged of an unstaged file = %q", reply)
 	}
 	_, body, _ = extmsg.SplitBodyReply(receiver.Handle("status --edit-session=e1\n"))
 	if !strings.Contains(body, "2 files staged · open for edits") || !strings.Contains(body, "main.go\tmodified · +1 −0 · 1 edit") || !strings.Contains(body, "cmd/new.go\tnew") {

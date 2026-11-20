@@ -29,6 +29,14 @@ func TestParseEditSession(t *testing.T) {
 		}},
 		{text: "show --edit-session=e1\na.go\n", want: Message{Command: "show", Args: []string{}, Paths: []string{"a.go"}, Session: "e1", SessionKind: SessionEdit}},
 		{text: "status --edit-session=e1\n", want: Message{Command: "status", Args: []string{}, Session: "e1", SessionKind: SessionEdit}},
+		// read and staged are for any agent: the edit session is optional.
+		{text: "read\na.go\n", want: Message{Command: "read", Args: []string{}, Paths: []string{"a.go"}}},
+		{text: "read --edit-session=e1\na.go\n", want: Message{Command: "read", Args: []string{}, Paths: []string{"a.go"}, Session: "e1", SessionKind: SessionEdit}},
+		{text: "staged\na.go\n", want: Message{Command: "staged", Args: []string{}, Paths: []string{"a.go"}}},
+		{text: "read\n", wantErr: "read needs exactly one path"},
+		{text: "read --review-session=r1\na.go\n", wantErr: "read takes no --review-session="},
+		{text: "staged HEAD\na.go\n", wantErr: "takes no base revision"},
+		{text: "read\na.go\n---\nnote", wantErr: "read takes no note"},
 		{text: "end --edit-session=e1\n", want: Message{Command: "end", Args: []string{}, Session: "e1", SessionKind: SessionEdit}},
 		{text: "write\na.go\n---\nx", wantErr: "write needs --edit-session=<id>"},
 		{text: "write --review-session=r1\na.go\n---\nx", wantErr: "write needs --edit-session=<id>"},
@@ -82,6 +90,13 @@ func TestBodyReplyRoundTrip(t *testing.T) {
 	if _, got, hasBody := SplitBodyReply(BodyReply("")); !hasBody || got != "" {
 		t.Fatal("an empty file is an empty body")
 	}
+	line, got, hasBody = SplitBodyReply(BodyReplyWith(body, "staged · edit session e1 · not written"))
+	if !hasBody || got != body || BodyDetail(line) != "staged · edit session e1 · not written" {
+		t.Fatalf("a body with a detail: %q %q %v", line, got, hasBody)
+	}
+	if BodyDetail(strings.SplitN(BodyReply(body), "\n", 2)[0]) != "" {
+		t.Fatal("a plain body reply has no detail")
+	}
 
 	socketPath := filepath.Join(shortSocketDir(t), "ntee.sock")
 	server, err := Listen(socketPath, func(string) string { return BodyReply(body) })
@@ -92,5 +107,17 @@ func TestBodyReplyRoundTrip(t *testing.T) {
 	_, got, hasBody, err = SendForBody(socketPath, "show --edit-session=e1\na.go\n", time.Second)
 	if err != nil || !hasBody || got != body {
 		t.Fatalf("over the socket: %q %v %v", got, hasBody, err)
+	}
+}
+
+func TestEditRequestNamesTheSessionOnlyWhenGiven(t *testing.T) {
+	if got, _ := EditRequest(CommandRead, "", "/p/a.go", ""); got != "read\n/p/a.go\n" {
+		t.Fatalf("a read without a session = %q", got)
+	}
+	if got, _ := EditRequest(CommandRead, "e1", "/p/a.go", ""); got != "read --edit-session=e1\n/p/a.go\n" {
+		t.Fatalf("a read as a session = %q", got)
+	}
+	if got, _ := EditRequest(CommandWrite, "e1", "/p/a.go", "x"); got != "write --edit-session=e1\n/p/a.go\n---\nx" {
+		t.Fatalf("a write = %q", got)
 	}
 }

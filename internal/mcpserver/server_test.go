@@ -208,7 +208,7 @@ func TestInitializeListAndPing(t *testing.T) {
 	if initialized.ProtocolVersion != "2025-03-26" || initialized.ServerInfo.Name != "ntee" || initialized.Capabilities["tools"] == nil {
 		t.Fatalf("initialize = %+v", initialized)
 	}
-	if !strings.Contains(initialized.Instructions, "instead of your own Edit/Write tools") || !strings.Contains(initialized.Instructions, "edit_wait") {
+	if !strings.Contains(initialized.Instructions, "instead of your own Read/Edit/Write tools") || !strings.Contains(initialized.Instructions, "read_file before you edit") || !strings.Contains(initialized.Instructions, "edit_wait") {
 		t.Fatalf("instructions do not teach the flow: %q", initialized.Instructions)
 	}
 
@@ -235,7 +235,7 @@ func TestInitializeListAndPing(t *testing.T) {
 			t.Fatalf("%s has no object schema", tool.Name)
 		}
 	}
-	if got := strings.Join(names, ","); got != "edit_replace,edit_write,edit_show,edit_status,edit_discard,edit_end,edit_wait" {
+	if got := strings.Join(names, ","); got != "edit_replace,edit_write,read_file,edit_status,edit_discard,edit_end,edit_wait" {
 		t.Fatalf("tools = %s", got)
 	}
 
@@ -273,21 +273,62 @@ func TestReplaceAndWriteGoOverTheWire(t *testing.T) {
 	}
 }
 
-func TestShowReturnsTheBodyAsIs(t *testing.T) {
+func TestReadFileNumbersTheLatestContentAndSaysWhereItCameFrom(t *testing.T) {
 	h := newHarness(t)
-	h.call(1, toolWrite, map[string]any{"path": "a.go", "content": "x"})
+	h.setReply(func(string) string { return extmsg.BodyReplyWith("one\n\n  three\n", "disk") })
+	result := h.call(1, toolRead, map[string]any{"path": "a.go"})
+	if result.IsError || result.Content[0].Text != "a.go — on disk, no staged edits\n     1\tone\n     2\t\n     3\t  three" {
+		t.Fatalf("read = %q", result.Content[0].Text)
+	}
+	if got := h.nextRequest(); got != "read\n"+filepath.Join(h.workingDir, "a.go")+"\n" {
+		t.Fatalf("without a session a read names none (and starts none): %q", got)
+	}
+
+	h.setReply(func(string) string {
+		return extmsg.BodyReplyWith("a\nb\nc\nd\n", "staged · edit session other-agent · not written")
+	})
+	result = h.call(2, toolRead, map[string]any{"path": "a.go", "offset": 2, "limit": 2})
+	if want := "a.go — latest staged content from edit session other-agent, NOT on disk yet\n     2\tb\n     3\tc\n(lines 2–3 of 4 — pass offset 4 to read on)"; result.Content[0].Text != want {
+		t.Fatalf("offset/limit read = %q", result.Content[0].Text)
+	}
 	h.nextRequest()
-	h.setReply(func(string) string { return extmsg.BodyReply("line 1\n\n  ok tail\n") })
-	result := h.call(2, toolShow, map[string]any{"path": "a.go"})
-	if result.IsError || result.Content[0].Text != "line 1\n\n  ok tail\n" {
-		t.Fatalf("show = %+v", result)
+	if result = h.call(3, toolRead, map[string]any{"path": "a.go", "offset": 9}); !strings.Contains(result.Content[0].Text, "offset 9 is past the end: the file has 4 lines") {
+		t.Fatalf("past the end = %q", result.Content[0].Text)
 	}
-	if got := h.nextRequest(); got != "show --edit-session="+h.sessionTag+"1\n"+filepath.Join(h.workingDir, "a.go")+"\n" {
-		t.Fatalf("show request = %q", got)
+	h.nextRequest()
+
+	h.setReply(func(string) string { return "ok staged a.go" })
+	h.call(4, toolWrite, map[string]any{"path": "a.go", "content": "x"})
+	h.nextRequest()
+	own := h.sessionTag + "1"
+	h.setReply(func(string) string {
+		return extmsg.BodyReplyWith("x\n", "staged · edit session "+own+" · not written")
+	})
+	if result = h.call(5, toolRead, map[string]any{"path": "a.go"}); result.Content[0].Text != "a.go — your edit session "+own+"'s staged copy, NOT on disk yet\n     1\tx" {
+		t.Fatalf("own copy = %q", result.Content[0].Text)
 	}
+	if got := h.nextRequest(); got != "read --edit-session="+own+"\n"+filepath.Join(h.workingDir, "a.go")+"\n" {
+		t.Fatalf("a read goes as the current session: %q", got)
+	}
+
+	h.setReply(func(string) string { return "error no such file: b.go — not staged and not on disk" })
+	if result = h.call(6, toolRead, map[string]any{"path": "b.go"}); !result.IsError || result.Content[0].Text != "error no such file: b.go — not staged and not on disk" {
+		t.Fatalf("a refusal comes back as is: %+v", result)
+	}
+	h.nextRequest()
 	h.setReply(func(string) string { return extmsg.BodyReply("a.go\tmodified · +1 −0 · 1 edit\n") })
-	if result := h.call(3, toolStatus, nil); result.Content[0].Text != "a.go\tmodified · +1 −0 · 1 edit\n\nedit session: "+h.sessionTag+"1" {
+	if result := h.call(7, toolStatus, nil); result.Content[0].Text != "a.go\tmodified · +1 −0 · 1 edit\n\nedit session: "+own {
 		t.Fatalf("status = %q", result.Content[0].Text)
+	}
+}
+
+func TestReadTextCutsVeryLongLines(t *testing.T) {
+	text := readText(toolArguments{Path: "a.go"}, "", "disk", strings.Repeat("é", maxReadLineRunes+5)+"\n")
+	if !strings.HasSuffix(text, "… [line cut at 2000 characters]") || strings.Count(text, "é") != maxReadLineRunes {
+		t.Fatalf("long line = %q…", text[:40])
+	}
+	if text := readText(toolArguments{Path: "a.go"}, "", "disk", ""); text != "a.go — on disk, no staged edits\n(empty file)" {
+		t.Fatalf("empty = %q", text)
 	}
 }
 
@@ -363,7 +404,7 @@ func TestEditorRepliesAndRefusals(t *testing.T) {
 		{toolReplace, map[string]any{"path": "a.go", "old_text": "x", "new_text": "y", "line": 3, "replace_all": true}, "leave it off with replace_all"},
 		{toolWrite, map[string]any{"content": "x"}, "needs path"},
 		{toolWrite, map[string]any{"path": "a.go"}, "needs content"},
-		{toolShow, map[string]any{}, "needs path"},
+		{toolRead, map[string]any{}, "needs path"},
 		{toolWait, map[string]any{"timeout_seconds": 7200}, "at most 3600"},
 		{toolWrite, map[string]any{"path": 5}, "bad arguments"},
 	}
@@ -501,7 +542,7 @@ func TestCallsRunningWhenInputEndsStillAnswer(t *testing.T) {
 func TestToolTermsReplaceCLIHints(t *testing.T) {
 	cases := map[string]string{
 		"ok edit session e1 ended — the user is reviewing 2 staged files; to hear the outcome run: ntee --msg --msg-edit-session e1 wait": "ok edit session e1 ended — the user is reviewing 2 staged files; to hear the outcome call edit_wait",
-		"error the old text is not in a.go — copy it exactly, whitespace included (ntee --msg show prints the staged content)":            "error the old text is not in a.go — copy it exactly, whitespace included (edit_show prints the staged content)",
+		"error the old text is not in a.go — copy it exactly, whitespace included (ntee --msg show prints the staged content)":            "error the old text is not in a.go — copy it exactly, whitespace included (read_file shows the staged content)",
 		"ok replaced a.go L1–L2 · edit 1 · 1 file staged":                                                                                 "ok replaced a.go L1–L2 · edit 1 · 1 file staged",
 	}
 	for reply, want := range cases {

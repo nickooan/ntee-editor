@@ -1436,6 +1436,8 @@ var (
 	// dirs. The dir variant keeps dirStyle's bold weight.
 	uncommittedFileStyle = lipgloss.NewStyle().Foreground(colYellow).Background(colBg)
 	uncommittedDirStyle  = lipgloss.NewStyle().Foreground(colYellow).Bold(true).Background(colBg)
+	// The tree's mark on a file with agent edits staged but not written.
+	stagedFileMarkStyle = lipgloss.NewStyle().Foreground(colOrange).Bold(true).Background(colBg)
 
 	// Autocomplete dropdown rows.
 	completionItemStyle      = lipgloss.NewStyle().Foreground(colFg).Background(colBgChrome)

@@ -72,15 +72,28 @@ func (r *ExternalReceiver) handleAgentEdit(message extmsg.Message, settings stor
 	rel, line := splitLineAnchor(anchored)
 	var result staging.EditResult
 	switch message.Command {
-	case extmsg.CommandShow:
-		content, _, exists, err := r.agentEdits.Content(id, rel)
+	case extmsg.CommandShow, extmsg.CommandRead:
+		content, from, exists, err := r.agentEdits.Content(id, rel)
 		switch {
 		case err != nil:
 			return extmsg.ErrorReply(err.Error())
 		case !exists:
 			return extmsg.ErrorReply("no such file: " + rel + " — not staged and not on disk")
+		case from == "" && len(content) > extmsg.MaxBodyBytes:
+			return extmsg.ErrorReply(rel + " is larger than " + strconv.Itoa(extmsg.MaxBodyBytes>>20) + " MB and has no staged edits — read it with your own tools")
+		case message.Command == extmsg.CommandShow:
+			return extmsg.BodyReply(content)
 		}
-		return extmsg.BodyReply(content)
+		return extmsg.BodyReplyWith(content, readDetail(from))
+	case extmsg.CommandStaged:
+		session, err := r.agentEdits.StagedIn(rel)
+		switch {
+		case err != nil:
+			return extmsg.ErrorReply(err.Error())
+		case session == "":
+			return extmsg.OkReply("not staged")
+		}
+		return extmsg.OkReply("staged · edit session " + session)
 	case extmsg.CommandWrite:
 		if line > 0 {
 			return extmsg.ErrorReply("write sets the whole file — leave #L" + strconv.Itoa(line) + " off")
@@ -100,6 +113,15 @@ func (r *ExternalReceiver) handleAgentEdit(message extmsg.Message, settings stor
 	return extmsg.OkReply(agentEditReplyText(message.Command, result, id))
 }
 
+// readDetail says where a read's content came from, on its reply's first
+// line: "staged · edit session <id> · not written" or "disk".
+func readDetail(session string) string {
+	if session == "" {
+		return "disk"
+	}
+	return "staged · edit session " + session + " · not written"
+}
+
 // agentEditReplyText is what an agent hears after a staged edit.
 func agentEditReplyText(command string, result staging.EditResult, session string) string {
 	var text string
@@ -115,6 +137,9 @@ func agentEditReplyText(command string, result staging.EditResult, session strin
 		}
 	}
 	text += " · edit " + strconv.Itoa(result.EditCount) + " · " + countText(result.StagedFiles, "file") + " staged"
+	if result.EditCount == 1 && result.BaseSession != "" {
+		text += " · builds on edit session " + result.BaseSession + "'s staged edits to it (not applied yet)"
+	}
 	if result.SessionStart {
 		text += " · edit session " + session + " started — the files stay untouched until it is applied; send end when every edit is staged"
 	}
@@ -136,7 +161,14 @@ func agentEditStatusText(record store.AgentEditSession) string {
 		if !file.BaseExists {
 			kind = "new"
 		}
-		fmt.Fprintf(&builder, "%s\t%s · +%d −%d · %s\n", file.Rel, kind, added, removed, countText(len(file.Edits), "edit"))
+		fmt.Fprintf(&builder, "%s\t%s · +%d −%d · %s", file.Rel, kind, added, removed, countText(len(file.Edits), "edit"))
+		switch {
+		case file.Result != "":
+			fmt.Fprintf(&builder, " · %s (%s)", file.Result, file.ResultNote)
+		case file.BaseSession != "":
+			fmt.Fprintf(&builder, " · builds on edit session %s", file.BaseSession)
+		}
+		builder.WriteString("\n")
 	}
 	return builder.String()
 }

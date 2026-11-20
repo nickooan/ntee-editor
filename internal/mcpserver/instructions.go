@@ -1,12 +1,14 @@
 package mcpserver
 
+import "fmt"
+
 // instructions is sent at initialize: it teaches the agent when and how to
 // use the edit tools instead of writing files itself.
 const instructions = `ntee stages your file edits in the user's running ntee editor instead of writing them to disk.
 
-When an ntee editor is open on the project, make every file change with these tools instead of your own Edit/Write tools or shell writes:
-1. edit_replace (exact text → new text) or edit_write (a whole file, also for new files), once per change. Edits stack: a later replace works on what earlier edits staged.
-2. edit_show prints a file as staged — your own file reads still see the disk.
+When an ntee editor is open on the project, read and change files with these tools instead of your own Read/Edit/Write tools or shell reads and writes:
+1. read_file before you edit a file: it shows the latest content — edits staged by you or by another agent that are not on disk yet. Your own Read, cat and editors see only the disk. Grep and Glob search the disk too: re-read their matches with read_file before editing them.
+2. edit_replace (exact text → new text) or edit_write (a whole file, also for new files), once per change. Edits stack: a later replace works on what earlier edits staged, and editing a file another agent staged builds on their staged edits.
 3. edit_end when the change set is complete. Depending on the user's setting the editor either applies everything at once, or opens it for the user to review.
 4. If edit_end says the user is reviewing, call edit_wait (again while it says still waiting) until it reports the outcome.
 5. Builds, tests and linters see your edits only once they are applied: run them after edit_end (and edit_wait) reports them applied.
@@ -14,7 +16,7 @@ When an ntee editor is open on the project, make every file change with these to
 Rules:
 - old_text must match exactly once, whitespace included. On "matches N times", add surrounding lines, or pass line (a line inside the match you mean); replace_all changes every match (renames).
 - Sessions are automatic: all edits until edit_end form one session, and the next edit starts a new one. Pass session only to run separate change sets side by side.
-- "not applied … changed on disk since it was staged": that file changed under you — re-read it and stage it again (a new session).
+- "not applied … changed on disk since it was staged" (or a session it built on changed or was discarded): re-read it with read_file and stage it again (a new session).
 - "ended" or "discarded": the user stopped this change set — do not re-send it unless asked.
 - "set aside for later": the edits stay staged and unwritten until the user decides; carry on, and call edit_wait again when you need the outcome.
 - If a tool says no ntee editor is running, nothing was staged: make the edit with your usual file tools.`
@@ -25,6 +27,11 @@ type toolDefinition struct {
 	Description string         `json:"description"`
 	InputSchema map[string]any `json:"inputSchema"`
 	Annotations map[string]any `json:"annotations,omitempty"`
+}
+
+var readSessionProperty = map[string]any{
+	"type":        "string",
+	"description": "Read as this edit session sees the file (its own staged copy). Leave it out: the automatic session, else the latest content.",
 }
 
 var sessionProperty = map[string]any{
@@ -71,10 +78,21 @@ var toolDefinitions = []toolDefinition{
 		}, "path", "content"),
 	},
 	{
-		Name:        toolShow,
-		Title:       "Show a staged file",
-		Description: "Print a file as staged in the current edit session (or as on disk when the session has not touched it). Use it to check staged edits — your own file reads see the disk.",
-		InputSchema: objectSchema(map[string]any{"path": pathProperty}, "path"),
+		Name:  toolRead,
+		Title: "Read a file's latest content",
+		Description: "Read a file through the ntee editor, with line numbers: its latest content, including edits staged by any agent and not written to disk yet (the header says which). " +
+			"Your current session reads its own staged copy. Use it instead of your own Read whenever ntee is open.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"path":    pathProperty,
+				"offset":  map[string]any{"type": "integer", "minimum": 1, "description": "The first line to read (default 1)."},
+				"limit":   map[string]any{"type": "integer", "minimum": 1, "description": fmt.Sprintf("How many lines to read (default %d).", defaultReadLines)},
+				"session": readSessionProperty,
+			},
+			"required":             []string{"path"},
+			"additionalProperties": false,
+		},
 		Annotations: map[string]any{"readOnlyHint": true},
 	},
 	{

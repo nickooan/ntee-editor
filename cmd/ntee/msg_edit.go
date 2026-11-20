@@ -28,7 +28,7 @@ func checkEditCommand(command string, paths []string, session msgSession, base s
 		return errors.New("--msg-base does not go with an edit session")
 	}
 	switch command {
-	case extmsg.CommandWrite, extmsg.CommandReplace, extmsg.CommandShow:
+	case extmsg.CommandWrite, extmsg.CommandReplace, extmsg.CommandShow, extmsg.CommandRead, extmsg.CommandStaged:
 		if len(paths) != 1 {
 			return fmt.Errorf("%s needs exactly one file, got %d", command, len(paths))
 		}
@@ -37,14 +37,15 @@ func checkEditCommand(command string, paths []string, session msgSession, base s
 			return fmt.Errorf("%s takes no paths: ntee --msg %s %s %s", command, session.flag(), session.id, command)
 		}
 	default:
-		return errors.New("--msg-edit-session goes with write, replace, show, status, discard, end and wait")
+		return errors.New("--msg-edit-session goes with write, replace, show, read, staged, status, discard, end and wait")
 	}
 	return nil
 }
 
 // sendEditCommand sends one edit session request (end and wait go the
-// session way) and prints the reply; show and status print the editor's
-// content as is. It returns the exit code.
+// session way), or a read or staged with or without a session, and prints
+// the reply; show, read and status print the editor's content as is — a
+// read says on stderr where it came from. It returns the exit code.
 func sendEditCommand(command string, paths []string, session msgSession, options msgOptions) int {
 	if options.replaceAll && command != extmsg.CommandReplace {
 		fmt.Fprintln(os.Stderr, "--msg-replace-all goes with replace")
@@ -99,6 +100,9 @@ func sendEditCommand(command string, paths []string, session msgSession, options
 		fmt.Fprintln(os.Stderr, "cannot reach the editor: "+err.Error())
 		return 1
 	case hasBody:
+		if detail := extmsg.BodyDetail(line); detail != "" {
+			fmt.Fprintln(os.Stderr, "ntee: "+detail)
+		}
 		fmt.Print(body)
 		return 0
 	}

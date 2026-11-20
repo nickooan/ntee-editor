@@ -113,7 +113,8 @@ func (r *ExternalReceiver) Handle(text string) string {
 		return extmsg.ErrorReply(err.Error())
 	}
 	isEditEnd := message.SessionKind == extmsg.SessionEdit && message.Command == extmsg.CommandEnd
-	if message.SessionKind == extmsg.SessionEdit {
+	isRead := message.Command == extmsg.CommandRead || message.Command == extmsg.CommandStaged
+	if message.SessionKind == extmsg.SessionEdit || isRead {
 		if r.agentEdits == nil {
 			return extmsg.ErrorReply("this editor takes no agent edits — open a folder to use them")
 		}

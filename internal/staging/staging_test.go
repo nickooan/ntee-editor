@@ -41,9 +41,9 @@ func readFile(t *testing.T, root, rel string) string {
 
 func stagedContent(t *testing.T, registry *Registry, session, rel string) string {
 	t.Helper()
-	content, staged, _, err := registry.Content(session, rel)
+	content, from, _, err := registry.Content(session, rel)
 	must(t, err)
-	if !staged {
+	if from != session {
 		t.Fatalf("%s is not staged in %s", rel, session)
 	}
 	return content
@@ -148,8 +148,8 @@ func TestWriteStagesANewFile(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "pkg")); !os.IsNotExist(err) {
 		t.Fatal("staging creates nothing on disk")
 	}
-	if _, _, exists, _ := registry.Content("other", "pkg/new.go"); exists {
-		t.Fatal("another session sees the disk, where the file is not")
+	if content, from, exists, _ := registry.Content("other", "pkg/new.go"); !exists || from != "s1" || content != "package pkg\n\nfunc New() {}\n" {
+		t.Fatalf("another session sees the latest content, s1's staged new file: %q from %q", content, from)
 	}
 }
 
@@ -177,7 +177,7 @@ func TestApplyWritesAndSkipsConflicts(t *testing.T) {
 	must(t, os.WriteFile(filepath.Join(root, "c.go"), []byte("someone else\n"), 0o644))
 
 	record, _ := registry.Snapshot("s1")
-	results := ApplyFiles(root, record.Files, nil)
+	results := registry.ApplyFiles("s1", record.Files, nil)
 	if results["a.go"].Result != store.AgentEditFileApplied || results["dir/new.go"].Result != store.AgentEditFileApplied {
 		t.Fatalf("results = %+v", results)
 	}
@@ -340,7 +340,7 @@ func TestAnEditQueuedBehindAFailedFirstEditIsKept(t *testing.T) {
 	registry.dropIfEmpty("s1", set)
 	set.saveMu.Unlock()
 	must(t, <-queued)
-	if content, staged, _, _ := registry.Content("s1", "a.go"); !staged || content != "kept\n" {
-		t.Fatalf("the queued edit landed on a live session: %q staged=%v", content, staged)
+	if content, from, _, _ := registry.Content("s1", "a.go"); from != "s1" || content != "kept\n" {
+		t.Fatalf("the queued edit landed on a live session: %q from %q", content, from)
 	}
 }

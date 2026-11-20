@@ -44,6 +44,10 @@ const (
 	CommandShow    = "show"    // a file's staged content (its disk content when not staged)
 	CommandStatus  = "status"  // the session's staged files
 	CommandDiscard = "discard" // drop the session's staged edits
+
+	// Reads through the editor, for any agent; an edit session is optional.
+	CommandRead   = "read"   // a file's latest content: staged by some session, else the disk
+	CommandStaged = "staged" // which session, if any, has staged edits to a file
 )
 
 // SessionKind is what a session shows. The first-line option that names the
@@ -251,6 +255,17 @@ func Parse(text string) (Message, error) {
 				return Message{}, err
 			}
 		}
+	case CommandRead, CommandStaged:
+		switch {
+		case message.SessionKind != SessionNone && message.SessionKind != SessionEdit:
+			return Message{}, errors.New(message.Command + " takes no " + message.SessionKind.Option() + " — only an optional " + EditSessionOption + "<id>")
+		case len(message.Args) > 0:
+			return Message{}, errors.New(message.Command + " takes no base revision")
+		case noteSeen:
+			return Message{}, errors.New(message.Command + " takes no note")
+		case len(message.Paths) != 1:
+			return Message{}, fmt.Errorf("%s needs exactly one path, got %d", message.Command, len(message.Paths))
+		}
 	case CommandStatus, CommandDiscard:
 		if err := checkEditSessionCommand(message, noteSeen); err != nil {
 			return Message{}, err
@@ -259,7 +274,7 @@ func Parse(text string) (Message, error) {
 			return Message{}, errors.New(message.Command + " takes only the session option")
 		}
 	default:
-		return Message{}, fmt.Errorf("unknown command %q — use open, review, end or wait (an edit session also takes write, replace, show, status and discard)", message.Command)
+		return Message{}, fmt.Errorf("unknown command %q — use open, review, read, staged, end or wait (an edit session also takes write, replace, show, status and discard)", message.Command)
 	}
 	return message, nil
 }
@@ -379,16 +394,29 @@ func BodyReply(body string) string {
 	return "ok " + strconv.Itoa(len(body)) + "\n" + body
 }
 
+// BodyReplyWith is a BodyReply whose first line also says where the content
+// came from: "ok <bytes> <detail>".
+func BodyReplyWith(body, detail string) string {
+	return strings.TrimSpace("ok "+strconv.Itoa(len(body))+" "+oneLine(detail)) + "\n" + body
+}
+
 // SplitBodyReply splits a raw reply into its first line and, for a
 // BodyReply, its body. A reply without a well-formed body comes back as its
 // trimmed text with hasBody false.
 func SplitBodyReply(raw string) (line, body string, hasBody bool) {
 	header, rest, found := strings.Cut(raw, "\n")
-	size, err := strconv.Atoi(strings.TrimPrefix(header, "ok "))
+	sizeText, _, _ := strings.Cut(strings.TrimPrefix(header, "ok "), " ")
+	size, err := strconv.Atoi(sizeText)
 	if !found || !strings.HasPrefix(header, "ok ") || err != nil || size < 0 || size > len(rest) {
 		return strings.TrimSpace(raw), "", false
 	}
 	return header, rest[:size], true
+}
+
+// BodyDetail is the detail of a BodyReplyWith first line, "" for none.
+func BodyDetail(line string) string {
+	_, detail, _ := strings.Cut(strings.TrimPrefix(line, "ok "), " ")
+	return detail
 }
 
 // IsEndedReply reports whether a reply line ends a session.

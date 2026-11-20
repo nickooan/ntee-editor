@@ -42,7 +42,7 @@ func SendWithTimeout(socketPath, text string, timeout time.Duration) (string, er
 // (BodyReply): it reads up to MaxBodyBytes and keeps the body byte for
 // byte. line is the reply's first line.
 func SendForBody(socketPath, text string, timeout time.Duration) (line, body string, hasBody bool, err error) {
-	reply, err := exchange(context.Background(), socketPath, text, timeout, MaxBodyBytes+64)
+	reply, err := exchange(context.Background(), socketPath, text, timeout, MaxBodyBytes+bodyHeaderBytes)
 	if err != nil {
 		return "", "", false, err
 	}

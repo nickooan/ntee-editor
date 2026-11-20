@@ -51,9 +51,13 @@ type AgentEditSession struct {
 // staged (BaseContent, the conflict check's reference), the staged content,
 // and the edits that led from one to the other.
 type AgentEditFile struct {
-	Rel         string              `json:"rel"` // workspace-relative
-	BaseExists  bool                `json:"baseExists"`
-	BaseContent string              `json:"baseContent"`
+	Rel         string `json:"rel"` // workspace-relative
+	BaseExists  bool   `json:"baseExists"`
+	BaseContent string `json:"baseContent"`
+	// BaseSession is the pending session whose staged copy this file was
+	// built on (BaseContent is that copy); "" = the disk. Empty is the
+	// meaning older records already have.
+	BaseSession string              `json:"baseSession,omitempty"`
 	Content     string              `json:"content"`
 	Result      AgentEditFileResult `json:"result"` // "" while pending
 	ResultNote  string              `json:"resultNote"`

@@ -10,7 +10,21 @@ Set it up once per agent, for example in Claude Code:
 claude mcp add ntee -- ntee --mcp
 ```
 
-The agent then sees `edit_replace`, `edit_write`, `edit_show`, `edit_status`, `edit_discard`, `edit_end` and `edit_wait`. To make Claude Code always stage edits, the user may also deny its built-in `Edit` and `Write` tools in the project's permissions. That is the user's choice; ntee configures nothing.
+The agent then sees `read_file`, `edit_replace`, `edit_write`, `edit_status`, `edit_discard`, `edit_end` and `edit_wait`. `read_file` reads a file's latest content through the editor — edits staged by any agent and not yet on disk included — so a second agent working on the project sees the first one's staged changes, and its edits to those files build on them.
+
+The agent's own Read, Edit and Write tools only see the disk. To keep Claude Code from using them on a file with staged edits, add the optional hook `ntee --hook` to the project's `.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "Read|Edit|MultiEdit|Write", "hooks": [{ "type": "command", "command": "ntee --hook" }] }
+    ]
+  }
+}
+```
+
+Before each matched call the hook asks the running editor whether the file has staged edits (`staged`). If it has, the call is denied with a reason pointing at `mcp__ntee__read_file` / `edit_replace` / `edit_write`; otherwise — and whenever there is no editor to ask — it is allowed silently. The user may also deny the built-in `Edit` and `Write` tools outright in the project's permissions. Both are the user's choice; ntee configures nothing.
 
 **Architecture**
 
@@ -20,7 +34,7 @@ The protocol is newline-delimited JSON-RPC 2.0, hand-rolled for its five methods
 
 Concurrency rule: the reading loop dispatches in order, and each `tools/call` runs on its own goroutine with its own context, registered under its request id before the loop reads on. Responses are written whole under one mutex. So a long `edit_wait` never holds up an `edit_status`, and a cancellation always finds its call. A cancelled call closes its socket connection and sends no response, as MCP asks. When stdin ends, calls still running get to answer before `Serve` returns, because a client closes stdin first and signals only if the process lingers.
 
-Sessions are automatic: one generated id per server process (`mcp-<start time>-<pid>-<n>`), started by the first edit and let go once the editor answers `edit_end` or `edit_discard`, so the next edit starts a new one. `edit_wait` without a session waits on the session that ended last. Every reply but `edit_show` names its session. An explicit `session` argument runs a separate change set side by side.
+Sessions are automatic: one generated id per server process (`mcp-<start time>-<pid>-<n>`), started by the first edit and let go once the editor answers `edit_end` or `edit_discard`, so the next edit starts a new one. `edit_wait` without a session waits on the session that ended last. `read_file` reads as the current session (its own staged copy) and never starts one. Every reply but `read_file`'s names its session. An explicit `session` argument runs a separate change set side by side.
 
 **Functions**
 
@@ -34,14 +48,15 @@ Sessions are automatic: one generated id per server process (`mcp-<start time>-<
 ### tools.go
 
 - `editTools.call` — one tool call: checks the arguments (`commandFor`), resolves a relative path against the working directory, finds the editor, picks the session, builds the request (`extmsg.EditRequest`, or `EditWaitRequest` with the call's budget, default 300 s, at most 1 h), and sends it with `extmsg.SendEdit`. An `error …` reply, a refused argument or a missing editor is an `isError` result with a sentence saying how to fix it. `edit_end` waits up to 45 s, since the editor may be writing every staged file. A wait the editor answers `ok waiting`, or one that runs out first, says to call `edit_wait` again. When the user set the session aside for later (Esc → Keep for later, or Later on the ready prompt), the reply says so: the edits are still staged and unwritten, and the agent may carry on and wait again when it needs the outcome. An editor that hangs up without answering (`extmsg.ErrNoReply`, e.g. restarted mid-wait) is an `isError` result telling the agent to check `edit_status` and call again: a pending session survives the restart.
-- `forTools` — rewrites the editor's `ntee --msg` hints into tool terms (`call edit_wait`, `edit_show prints`, `pass line`, `with replace_all`), so the agent is never told to run a command it does not use.
+- `readText` — `read_file`'s output: a header saying where the content came from ("on disk, no staged edits", "latest staged content from edit session A, NOT on disk yet", or the caller's own staged copy), then the lines numbered like `cat -n` from `offset` for `limit` lines (default 2000; a line over 2000 characters is cut, saying so), and a footer naming the next offset when lines are left.
+- `forTools` — rewrites the editor's `ntee --msg` hints into tool terms (`call edit_wait`, `read_file shows`, `pass line`, `with replace_all`), so the agent is never told to run a command it does not use.
 - `sessionFor` / `sessionClosed` — the automatic session id, as described under Architecture.
 
 *Plus: `newEditTools`, `textResult`, `noEditorText`, `stillWaitingText`, `needsPath`, `knownTool`.*
 
 ### instructions.go
 
-- `instructions` — the teaching text sent at `initialize`: when to use the tools, the replace → show → end → wait flow, the matching rules, and what each outcome asks of the agent.
-- `toolDefinitions` — the seven tools with their JSON schemas and hints (`readOnlyHint` for show, status and wait; `destructiveHint` for discard).
+- `instructions` — the teaching text sent at `initialize`: when to use the tools, the read → replace → end → wait flow (read with `read_file`, since Read, Grep and Glob see only the disk), the matching rules, and what each outcome asks of the agent.
+- `toolDefinitions` — the seven tools with their JSON schemas and hints (`readOnlyHint` for read_file, status and wait; `destructiveHint` for discard).
 
-*Plus: `objectSchema`, which adds the optional `session` property to every tool.*
+*Plus: `objectSchema`, which adds the optional `session` property to every edit tool (`read_file` has its own schema, with `offset` and `limit`).*

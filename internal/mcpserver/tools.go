@@ -22,12 +22,16 @@ const (
 	// waitReplyMargin is how much longer than its budget a wait listens:
 	// the editor answers "ok waiting" just before the budget runs out.
 	waitReplyMargin = 5 * time.Second
+	// defaultReadLines and maxReadLineRunes shape read_file's output like a
+	// numbered file read.
+	defaultReadLines = 2000
+	maxReadLineRunes = 2000
 )
 
 const (
 	toolReplace = "edit_replace"
 	toolWrite   = "edit_write"
-	toolShow    = "edit_show"
+	toolRead    = "read_file"
 	toolStatus  = "edit_status"
 	toolDiscard = "edit_discard"
 	toolEnd     = "edit_end"
@@ -43,6 +47,8 @@ type toolArguments struct {
 	Line           int     `json:"line"`
 	Content        *string `json:"content"`
 	TimeoutSeconds int     `json:"timeout_seconds"`
+	Offset         int     `json:"offset"`
+	Limit          int     `json:"limit"`
 }
 
 type textContent struct {
@@ -88,6 +94,8 @@ func (tools *editTools) sessionFor(name, explicit string) (string, error) {
 	tools.mu.Lock()
 	defer tools.mu.Unlock()
 	switch name {
+	case toolRead:
+		return tools.current, nil
 	case toolWait:
 		if tools.lastEnded != "" {
 			return tools.lastEnded, nil
@@ -179,6 +187,9 @@ func (tools *editTools) call(ctx context.Context, name string, raw json.RawMessa
 		if name == toolWait && os.IsTimeout(err) {
 			return textResult(stillWaitingText(session), false)
 		}
+		if errors.Is(err, extmsg.ErrNoReply) && name == toolRead {
+			return textResult(err.Error()+"; call "+toolRead+" again", true)
+		}
 		if errors.Is(err, extmsg.ErrNoReply) {
 			return textResult(err.Error()+"; edit session "+session+" stays staged if it was pending — check with "+toolStatus+", then call "+name+" again if needed", true)
 		}
@@ -188,8 +199,10 @@ func (tools *editTools) call(ctx context.Context, name string, raw json.RawMessa
 		tools.sessionClosed(name, session)
 	}
 	switch {
-	case hasBody && name == toolShow:
-		return textResult(body, false)
+	case hasBody && name == toolRead:
+		return textResult(readText(arguments, session, extmsg.BodyDetail(line), body), false)
+	case name == toolRead:
+		return textResult(forTools(line), extmsg.IsErrorReply(line))
 	case hasBody:
 		return textResult(body+"\nedit session: "+session, false)
 	case name == toolWait && strings.HasPrefix(line, "ok waiting") && strings.Contains(line, "aside for later"):
@@ -234,8 +247,11 @@ func commandFor(name string, arguments toolArguments) (command, payload string, 
 			return "", "", fmt.Errorf("%s needs content: the whole new file", name)
 		}
 		return extmsg.CommandWrite, *arguments.Content, nil
-	case toolShow:
-		return extmsg.CommandShow, "", nil
+	case toolRead:
+		if arguments.Offset < 0 || arguments.Limit < 0 {
+			return "", "", fmt.Errorf("offset and limit start at 1")
+		}
+		return extmsg.CommandRead, "", nil
 	case toolStatus:
 		return extmsg.CommandStatus, "", nil
 	case toolDiscard:
@@ -252,7 +268,7 @@ func commandFor(name string, arguments toolArguments) (command, payload string, 
 }
 
 func needsPath(name string) bool {
-	return name == toolReplace || name == toolWrite || name == toolShow
+	return name == toolReplace || name == toolWrite || name == toolRead
 }
 
 func knownTool(name string) bool {
@@ -268,11 +284,51 @@ var cliWaitHint = regexp.MustCompile(`run: ntee --msg --msg-edit-session \S+ wai
 
 // hintsForTools rewrites the editor's ntee --msg hints into tool terms.
 var hintsForTools = strings.NewReplacer(
-	"ntee --msg show prints", toolShow+" prints",
+	"ntee --msg show prints", toolRead+" shows",
 	"add #L<n> to the path", "pass line",
 	"with --msg-replace-all", "with replace_all",
 )
 
 func forTools(reply string) string {
 	return hintsForTools.Replace(cliWaitHint.ReplaceAllString(reply, "call "+toolWait))
+}
+
+// readText is read_file's output: a header saying where the content came
+// from, the requested lines numbered like cat -n, and a footer when lines
+// are left.
+func readText(arguments toolArguments, session, detail, content string) string {
+	header := arguments.Path + " — on disk, no staged edits"
+	if from, staged := strings.CutPrefix(detail, "staged · edit session "); staged {
+		from, _, _ = strings.Cut(from, " ")
+		header = arguments.Path + " — latest staged content from edit session " + from + ", NOT on disk yet"
+		if from == session {
+			header = arguments.Path + " — your edit session " + from + "'s staged copy, NOT on disk yet"
+		}
+	}
+	if content == "" {
+		return header + "\n(empty file)"
+	}
+	lines := strings.Split(strings.TrimSuffix(content, "\n"), "\n")
+	first := max(arguments.Offset, 1)
+	if first > len(lines) {
+		return fmt.Sprintf("%s\n(offset %d is past the end: the file has %d lines)", header, first, len(lines))
+	}
+	count := arguments.Limit
+	if count <= 0 {
+		count = defaultReadLines
+	}
+	last := min(len(lines), first+count-1)
+	var builder strings.Builder
+	builder.WriteString(header + "\n")
+	for index := first; index <= last; index++ {
+		line := lines[index-1]
+		if runes := []rune(line); len(runes) > maxReadLineRunes {
+			line = string(runes[:maxReadLineRunes]) + fmt.Sprintf("… [line cut at %d characters]", maxReadLineRunes)
+		}
+		fmt.Fprintf(&builder, "%6d\t%s\n", index, line)
+	}
+	if last < len(lines) {
+		fmt.Fprintf(&builder, "(lines %d–%d of %d — pass offset %d to read on)\n", first, last, len(lines), last+1)
+	}
+	return strings.TrimSuffix(builder.String(), "\n")
 }

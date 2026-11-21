@@ -35,7 +35,9 @@ type agentEditsState struct {
 	openNotice string
 	// stillEditing holds the pending sessions some agent still edits,
 	// rebuilt with pending: the header's label and the review's hint.
-	stillEditing   map[string]bool
+	stillEditing map[string]bool
+	// checking holds the finalising sessions: their agents check them.
+	checking       map[string]bool
 	finished       []store.AgentEditSession
 	finishedLoaded bool
 	// choiceSession is the session an open apply/discard/ready overlay is
@@ -70,10 +72,13 @@ func (m Model) refreshAgentEditsPending() Model {
 	if m.agentEdits.registry != nil {
 		m.agentEdits.pending = m.agentEdits.registry.Pending()
 		m.agentEdits.stagedFiles = m.stagedFilesOf(m.agentEdits.pending)
-		m.agentEdits.stillEditing = map[string]bool{}
+		m.agentEdits.stillEditing, m.agentEdits.checking = map[string]bool{}, map[string]bool{}
 		for _, session := range m.agentEdits.pending {
-			if session.AgentEndedAt.IsZero() {
+			switch session.Phase() {
+			case store.PhaseEditing:
 				m.agentEdits.stillEditing[session.Session] = true
+			case store.PhaseFinalising:
+				m.agentEdits.checking[session.Session] = true
 			}
 		}
 	}
@@ -185,17 +190,23 @@ func (m Model) handleAgentEditMessage(msg externalMessageMsg) (tea.Model, tea.Cm
 		sendExternalReply(msg.reply, extmsg.ErrorReply("no edit session "+id+" — nothing was staged"))
 		return m, nil
 	}
-	bases := m.pendingBaseSessions(record)
-	if msg.agentEdits.policy == store.AgentEditPolicyApply && len(bases) == 0 {
+	bases, failed := m.pendingBaseSessions(record), failedChecks(record)
+	if msg.agentEdits.policy == store.AgentEditPolicyApply && len(bases) == 0 && len(failed) == 0 {
 		return m.startAgentEditApply(id, store.AgentEditPolicyApply, false, msg.agentEdits.keep, msg.reply)
 	}
 	reviewing := "edit session " + id + " ended — the user is reviewing " + countText(len(record.Files), "staged file")
-	if len(bases) > 0 {
+	switch {
+	case len(bases) > 0:
 		reviewing += " (it builds on edit session " + strings.Join(bases, ", ") + ", still pending, so the user decides)"
+	case len(failed) > 0 && msg.agentEdits.policy == store.AgentEditPolicyApply:
+		reviewing += " (a check failed, so the user decides)"
 	}
 	sendExternalReply(msg.reply, reviewing+"; to hear the outcome run: ntee --msg --msg-edit-session "+id+" wait")
-	if msg.agentEdits.policy == store.AgentEditPolicyApply {
+	switch {
+	case msg.agentEdits.policy == store.AgentEditPolicyApply && len(bases) > 0:
 		m.notice = "✎ edit session " + id + " builds on " + strings.Join(bases, ", ") + "'s pending edits — review it"
+	case msg.agentEdits.policy == store.AgentEditPolicyApply:
+		m.notice = "✎ edit session " + id + ": " + staging.AgentNames(failed) + "'s check failed — review it"
 	}
 	if m.choice.open() || m.reviewSessionRunning() {
 		m.notice = "✎ agent edits ready: session " + id + " · " + countText(len(record.Files), "file") + " — review them under Ctrl+T › agent edits"
@@ -440,6 +451,13 @@ func agentEditsReadyChoice(record store.AgentEditSession) choiceOverlay {
 	choice.body = append(choice.body, overlayLine{text: meaning, style: overlayLineHighlight})
 	choice.body = append(choice.body, overlayLine{text: countText(len(record.Files), "file") + " staged", style: overlayLineStrong})
 	choice.body = append(choice.body, agentEditFileLines(record)...)
+	for _, line := range checkLines(record) {
+		style := overlayLineStrong
+		if strings.HasPrefix(line, "✗") {
+			style = overlayLineHighlight
+		}
+		choice.body = append(choice.body, overlayLine{text: line, style: style})
+	}
 	choice.body = append(choice.body, overlayLine{text: "later: Ctrl+T › agent edits", style: overlayLineDim})
 	return choice
 }
@@ -451,6 +469,12 @@ func (m Model) agentEditApplyChoice(record store.AgentEditSession) choiceOverlay
 	choice := choiceOverlay{kind: choiceApplyAgentEdits, title: "Apply edit session " + record.Session + "?"}
 	choice.body = append(choice.body, overlayLine{text: "write " + countText(len(record.Files), "file") + " to disk", style: overlayLineStrong})
 	choice.body = append(choice.body, agentEditFileLines(record)...)
+	for _, line := range checkLines(record) {
+		choice.body = append(choice.body, overlayLine{text: line})
+	}
+	if checking := record.CheckingAgents(); record.Phase() == store.PhaseFinalising && len(checking) > 0 {
+		choice.body = append(choice.body, overlayLine{text: "checks still running: " + staging.AgentNames(checking) + " — applying now skips them", style: overlayLineHighlight})
+	}
 	apply := "Apply"
 	if stacked := m.stackedAgentEditLines(record); len(stacked) > 0 {
 		choice.body = append(choice.body, stacked...)
@@ -603,16 +627,22 @@ func (m Model) askForceEndAgentEdits(id string) Model {
 	case !ok:
 		m.errText = "no edit session " + id + " is pending"
 		return m
-	case !record.AgentEndedAt.IsZero():
-		m.notice = "every agent in edit session " + id + " has ended — a applies it"
+	case record.Phase() == store.PhaseReady:
+		m.notice = "edit session " + id + " is ready — a applies it"
 		return m
 	}
-	editing := record.WithAgents().EditingAgents()
 	m.agentEdits.choiceSession = id
 	m.choice = choiceOverlay{kind: choiceForceEndAgentEdits, title: "Stop waiting for edit session " + id + "?", choices: []string{"Stop waiting", "Cancel"}}
+	if editing := record.WithAgents().EditingAgents(); len(editing) > 0 {
+		m.choice.body = append(m.choice.body,
+			overlayLine{text: "still editing: " + staging.AgentNames(editing), style: overlayLineStrong},
+			overlayLine{text: "their further edits are refused; you then review and apply what is staged", style: overlayLineHighlight},
+		)
+		return m
+	}
 	m.choice.body = append(m.choice.body,
-		overlayLine{text: "still editing: " + staging.AgentNames(editing), style: overlayLineStrong},
-		overlayLine{text: "their further edits are refused; you then review and apply what is staged", style: overlayLineHighlight},
+		overlayLine{text: "still checking: " + staging.AgentNames(record.CheckingAgents()), style: overlayLineStrong},
+		overlayLine{text: "their checks are skipped; you then review and apply what is staged", style: overlayLineHighlight},
 	)
 	return m
 }
@@ -688,6 +718,62 @@ func (m Model) deferAgentEdits(id string) Model {
 	delete(waiters, id)
 	m.agentEdits.waiters = waiters
 	return m
+}
+
+// answerAgentEditWaiters answers every agent waiting on the session with
+// reply, a "waiting — …" that says what changed; they wait again.
+func (m Model) answerAgentEditWaiters(id, reply string) Model {
+	if len(m.agentEdits.waiters[id]) == 0 {
+		return m
+	}
+	for _, waiter := range m.agentEdits.waiters[id] {
+		select {
+		case waiter <- reply:
+		default:
+		}
+	}
+	waiters := cloneWaiters(m.agentEdits.waiters)
+	delete(waiters, id)
+	m.agentEdits.waiters = waiters
+	return m
+}
+
+// handleAgentEditsLayerChanged tells the waiting agents of a session that
+// the copy one of its files builds on changed underneath it.
+func (m Model) handleAgentEditsLayerChanged(msg agentEditsLayerChangedMsg) (tea.Model, tea.Cmd) {
+	m = m.refreshAgentEditsPending()
+	text := "waiting — edit session " + msg.below + " changed " + msg.rel + " after edit session " + msg.session + " built on it: "
+	if msg.rebased {
+		text += "your edits to it were replayed onto the new copy — read it again to see both; wait again to hear the outcome"
+	} else {
+		text += "your copy can no longer be applied as it is (" + msg.reason + ") — read it again and stage your change on the current content (in a new session, or join " + msg.below + ")"
+		if m.mode != modeReview {
+			m.notice = "✎ edit session " + msg.session + "'s " + msg.rel + " no longer fits edit session " + msg.below + "'s newer copy"
+		}
+	}
+	m = m.answerAgentEditWaiters(msg.session, text)
+	return m, nil
+}
+
+// handleAgentEditsFinalising asks the session's waiting agents to check it.
+func (m Model) handleAgentEditsFinalising(msg agentEditsFinalisingMsg) (tea.Model, tea.Cmd) {
+	m = m.refreshAgentEditsPending()
+	m = m.answerAgentEditWaiters(msg.session, "waiting — edit session "+msg.session+" is finalising: every agent ended; build and test it in its sandbox (sandbox), report with check, then wait again for the user's decision")
+	if m.mode != modeReview {
+		m.notice = "⚙ edit session " + msg.session + " finalising — its agents check it in a sandbox"
+	}
+	return m, nil
+}
+
+// handleAgentEditsReopened tells the session's waiting agents it is back to
+// editing: their checks are due again later.
+func (m Model) handleAgentEditsReopened(msg agentEditsReopenedMsg) (tea.Model, tea.Cmd) {
+	m = m.refreshAgentEditsPending()
+	m = m.answerAgentEditWaiters(msg.session, "waiting — edit session "+msg.session+" is back to editing ("+staging.AgentLabel(msg.agent)+" is fixing it): its sandbox is gone; check again once every agent has sent end — wait again to hear when")
+	if m.mode != modeReview {
+		m.notice = "✎ edit session " + msg.session + " is back to editing — " + staging.AgentLabel(msg.agent) + " is fixing it"
+	}
+	return m, nil
 }
 
 func agentEditDeferredReply(id string) string {

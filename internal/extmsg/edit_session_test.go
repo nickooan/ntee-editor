@@ -33,6 +33,20 @@ func TestParseEditSession(t *testing.T) {
 		{text: "read\na.go\n", want: Message{Command: "read", Args: []string{}, Paths: []string{"a.go"}}},
 		{text: "read --edit-session=e1\na.go\n", want: Message{Command: "read", Args: []string{}, Paths: []string{"a.go"}, Session: "e1", SessionKind: SessionEdit}},
 		{text: "staged\na.go\n", want: Message{Command: "staged", Args: []string{}, Paths: []string{"a.go"}}},
+		{text: "sandbox --edit-session=e1\n", want: Message{Command: "sandbox", Args: []string{}, Session: "e1", SessionKind: SessionEdit}},
+		{text: "sandbox --edit-session=e1 fresh\n/p/libs/core\n", want: Message{Command: "sandbox", Args: []string{"fresh"}, Paths: []string{"/p/libs/core"}, Session: "e1", SessionKind: SessionEdit}},
+		{text: "sandbox --edit-session=e1 drop\n", want: Message{Command: "sandbox", Args: []string{"drop"}, Session: "e1", SessionKind: SessionEdit}},
+		{text: "sandbox\n", wantErr: "sandbox needs --edit-session=<id>"},
+		{text: "replace --edit-session=e1 --expect=0123456789ab\na.go\n---\n" + replace, want: Message{Command: "replace", Args: []string{}, Paths: []string{"a.go"}, Session: "e1", SessionKind: SessionEdit, Payload: replace, HasPayload: true, Expect: "0123456789ab"}},
+		{text: "replace --edit-session=e1 --expect=nope\na.go\n---\n" + replace, wantErr: "bad --expect=nope"},
+		{text: "show --edit-session=e1 --expect=0123456789ab\na.go\n", wantErr: "--expect= goes with an edit session's write or replace"},
+		{text: "check --edit-session=e1 --agent=a1 fail\n---\ngo test: 2 failing\n", want: Message{Command: "check", Args: []string{"fail"}, Session: "e1", SessionKind: SessionEdit, Agent: "a1"}},
+		{text: "check --edit-session=e1\n", wantErr: "check takes one result: pass, fail or skip"},
+		{text: "check --edit-session=e1 maybe\n", wantErr: "check takes one result"},
+		{text: "check pass\n", wantErr: "check needs --edit-session=<id>"},
+		{text: "check --edit-session=e1 pass\na.go\n", wantErr: "check takes no paths"},
+		{text: "sandbox --edit-session=e1 again\n", wantErr: "sandbox takes fresh or drop at most"},
+		{text: "sandbox --edit-session=e1 drop\n/p/x\n", wantErr: "sandbox drop takes no folders"},
 		{text: "read\n", wantErr: "read needs exactly one path"},
 		{text: "read --review-session=r1\na.go\n", wantErr: "read takes no --review-session="},
 		{text: "staged HEAD\na.go\n", wantErr: "takes no base revision"},
@@ -41,7 +55,7 @@ func TestParseEditSession(t *testing.T) {
 		{text: "end --edit-session=e1 --agent=mcp-1\n", want: Message{Command: "end", Args: []string{}, Session: "e1", SessionKind: SessionEdit, Agent: "mcp-1"}},
 		{text: "write --agent=a1 --edit-session=e1\na.go\n---\nx", want: Message{Command: "write", Args: []string{}, Paths: []string{"a.go"}, Session: "e1", SessionKind: SessionEdit, Agent: "a1", Payload: "x", HasPayload: true}},
 		{text: "write --edit-session=e1 --agent=bad/id\na.go\n---\nx", wantErr: "bad agent id"},
-		{text: "read --agent=a1\na.go\n", wantErr: "--agent= goes with an edit session's write, replace, end or status"},
+		{text: "read --agent=a1\na.go\n", wantErr: "--agent= goes with an edit session's write, replace, end, status or check"},
 		{text: "show --edit-session=e1 --agent=a1\na.go\n", wantErr: "--agent= goes with"},
 		{text: "write\na.go\n---\nx", wantErr: "write needs --edit-session=<id>"},
 		{text: "write --review-session=r1\na.go\n---\nx", wantErr: "write needs --edit-session=<id>"},
@@ -67,7 +81,7 @@ func TestParseEditSession(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Parse(%q): %v", test.text, err)
 		}
-		if got.Command != test.want.Command || got.Session != test.want.Session || got.SessionKind != test.want.SessionKind || got.Agent != test.want.Agent ||
+		if got.Command != test.want.Command || got.Session != test.want.Session || got.SessionKind != test.want.SessionKind || got.Agent != test.want.Agent || got.Expect != test.want.Expect ||
 			got.Payload != test.want.Payload || got.HasPayload != test.want.HasPayload ||
 			strings.Join(got.Paths, "|") != strings.Join(test.want.Paths, "|") || len(got.Args) != len(test.want.Args) {
 			t.Fatalf("Parse(%q) = %+v, want %+v", test.text, got, test.want)
@@ -130,5 +144,39 @@ func TestEditRequestNamesTheSessionOnlyWhenGiven(t *testing.T) {
 	}
 	if got, _ := EditRequest(CommandEnd, "e1", "agent-a", "", ""); got != "end --edit-session=e1 --agent=agent-a\n" {
 		t.Fatalf("an end names its agent: %q", got)
+	}
+}
+
+func TestSandboxRequest(t *testing.T) {
+	if got := SandboxRequest("e1", "", nil); got != "sandbox --edit-session=e1\n" {
+		t.Fatalf("plain = %q", got)
+	}
+	if got := SandboxRequest("e1", SandboxFresh, []string{"/p/libs/core"}); got != "sandbox --edit-session=e1 fresh\n/p/libs/core\n" {
+		t.Fatalf("fresh with include = %q", got)
+	}
+	if message, err := Parse(SandboxRequest("e1", SandboxDrop, nil)); err != nil || message.Args[0] != "drop" {
+		t.Fatalf("a request parses: %+v %v", message, err)
+	}
+}
+
+func TestCheckRequest(t *testing.T) {
+	request := CheckRequest("e1", "a1", CheckFail, "go test: 2 failing\n  TestX")
+	message, err := Parse(request)
+	if err != nil || message.Command != CommandCheck || message.Args[0] != CheckFail || message.Agent != "a1" || message.LineNote != "go test: 2 failing\n  TestX" {
+		t.Fatalf("a check request round-trips: %q → %+v %v", request, message, err)
+	}
+	if got := CheckRequest("e1", "", CheckPass, ""); got != "check --edit-session=e1 pass\n" {
+		t.Fatalf("plain = %q", got)
+	}
+}
+
+func TestWithExpect(t *testing.T) {
+	request, _ := EditRequest(CommandReplace, "e1", "a1", "/p/a.go", EncodeReplace(ReplacePayload{Old: "x", New: "y"}))
+	message, err := Parse(WithExpect(request, "0123456789ab"))
+	if err != nil || message.Expect != "0123456789ab" || message.Agent != "a1" || message.Paths[0] != "/p/a.go" {
+		t.Fatalf("the version rides on the first line: %+v %v", message, err)
+	}
+	if WithExpect(request, "") != request {
+		t.Fatal("no version, no change")
 	}
 }

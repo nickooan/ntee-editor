@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -18,7 +19,7 @@ func EditRequest(command, session, agent, absolutePath, payload string) (string,
 	if session != "" {
 		request += " " + EditSessionOption + session
 	}
-	if agent != "" && slices.Contains([]string{CommandWrite, CommandReplace, CommandEnd, CommandStatus}, command) {
+	if agent != "" && slices.Contains([]string{CommandWrite, CommandReplace, CommandEnd, CommandStatus, CommandCheck}, command) {
 		request += " " + AgentOption + agent
 	}
 	request += "\n"
@@ -34,8 +35,48 @@ func EditRequest(command, session, agent, absolutePath, payload string) (string,
 	return request, nil
 }
 
+// WithExpect adds the version an edit was made on to a write or replace
+// request's first line; "" leaves the request as it is.
+func WithExpect(request, version string) string {
+	if version == "" {
+		return request
+	}
+	first, rest, _ := strings.Cut(request, "\n")
+	return first + " " + ExpectOption + version + "\n" + rest
+}
+
 // bodyHeaderBytes is room for a body reply's first line.
 const bodyHeaderBytes = 1 << 10
+
+// SandboxRequest is an edit session's sandbox request: mode is "",
+// SandboxFresh or SandboxDrop; include lists more folders to copy in, one
+// per line.
+func SandboxRequest(session, mode string, include []string) string {
+	request := CommandSandbox + " " + EditSessionOption + session
+	if mode != "" {
+		request += " " + mode
+	}
+	request += "\n"
+	for _, folder := range include {
+		request += folder + "\n"
+	}
+	return request
+}
+
+// CheckRequest is an agent's check of its finalising session: result is
+// CheckPass, CheckFail or CheckSkip; the note (what it ran, what failed)
+// follows the separator line.
+func CheckRequest(session, agent, result, note string) string {
+	request := CommandCheck + " " + EditSessionOption + session
+	if agent != "" {
+		request += " " + AgentOption + agent
+	}
+	request += " " + result + "\n"
+	if note != "" {
+		request += LineNoteSeparator + "\n" + note
+	}
+	return request
+}
 
 // EditWaitRequest is an edit session's wait carrying the sender's budget, so
 // the editor answers "ok waiting …" before the sender gives up.

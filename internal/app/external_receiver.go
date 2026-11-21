@@ -112,7 +112,9 @@ func (r *ExternalReceiver) Handle(text string) string {
 	if err != nil {
 		return extmsg.ErrorReply(err.Error())
 	}
-	isEditEnd := message.SessionKind == extmsg.SessionEdit && message.Command == extmsg.CommandEnd
+	// The request that makes an edit session the user's — the last check,
+	// or an older session's last end — goes on to the UI.
+	isEditEnd := message.SessionKind == extmsg.SessionEdit && (message.Command == extmsg.CommandEnd || message.Command == extmsg.CommandCheck)
 	isRead := message.Command == extmsg.CommandRead || message.Command == extmsg.CommandStaged
 	if message.SessionKind == extmsg.SessionEdit || isRead {
 		if r.agentEdits == nil {
@@ -130,6 +132,25 @@ func (r *ExternalReceiver) Handle(text string) string {
 				r.notify(agentEditsChangedMsg{session: message.Session})
 				return extmsg.OkReply(agentEditPartEndedText(record))
 			}
+			if record.Phase() == store.PhaseFinalising {
+				// Every agent's edits are in: one sandbox is built from them
+				// for all, and the user is asked once every agent checked.
+				go r.agentEdits.Sandbox(message.Session, false, nil)
+				r.notify(agentEditsFinalisingMsg{session: message.Session})
+				return extmsg.OkReply(agentEditFinalisingText(message.Session))
+			}
+		case extmsg.CommandCheck:
+			result := map[string]store.AgentEditCheckResult{extmsg.CheckPass: store.CheckPassed, extmsg.CheckFail: store.CheckFailed, extmsg.CheckSkip: store.CheckSkipped}[message.Args[0]]
+			record, allChecked, err := r.agentEdits.RecordCheck(message.Session, message.Agent, result, message.LineNote)
+			if err != nil {
+				return extmsg.ErrorReply(err.Error())
+			}
+			if !allChecked {
+				r.notify(agentEditsChangedMsg{session: message.Session})
+				checking := record.CheckingAgents()
+				return extmsg.OkReply("check recorded — waiting for " + countText(len(checking), "other agent") + "'s check (" + staging.AgentNames(checking) +
+					") before the user reviews edit session " + message.Session + "; to hear the outcome run: ntee --msg --msg-edit-session " + message.Session + " wait")
+			}
 		case extmsg.CommandWait:
 		default:
 			return r.handleAgentEdit(message, settings)
@@ -145,7 +166,7 @@ func (r *ExternalReceiver) Handle(text string) string {
 	}
 	// A review session's note may go without a line: it then sits at the
 	// file's first change.
-	if message.LineNote != "" && message.SessionKind != extmsg.SessionReview {
+	if message.LineNote != "" && message.SessionKind != extmsg.SessionReview && message.SessionKind != extmsg.SessionEdit {
 		if _, line := splitLineAnchor(paths[0]); line == 0 {
 			return extmsg.ErrorReply("a note needs a line: " + message.Paths[0] + "#L<n>")
 		}

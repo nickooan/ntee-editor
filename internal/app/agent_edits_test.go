@@ -46,12 +46,12 @@ func settleAgentEdits(m Model, cmd tea.Cmd) Model {
 
 // sendAgentEditControl delivers an edit session's end or wait to the UI as
 // the receiver hands it over, and returns the channel its sender waits on.
+// An end stands for the session becoming the user's: its agent ends and
+// checks it (readyAgentEdits).
 func sendAgentEditControl(t *testing.T, m Model, receiver *ExternalReceiver, command, session string, settings store.ExternalSettings) (Model, chan string) {
 	t.Helper()
 	if command == extmsg.CommandEnd {
-		if _, _, err := receiver.agentEdits.MarkAgentEnded(session, ""); err != nil {
-			t.Fatal(err)
-		}
+		readyAgentEdits(t, receiver, session, "")
 	}
 	reply := make(chan string, 1)
 	record := sessionRecord(command, session, "", "")
@@ -60,6 +60,22 @@ func sendAgentEditControl(t *testing.T, m Model, receiver *ExternalReceiver, com
 		agentEdits: agentEditSettings{policy: settings.AgentEditPolicy, keep: settings.AgentEditKeep},
 	})
 	return settleAgentEdits(m, cmd), reply
+}
+
+// readyAgentEdits ends the agents' parts and records a passing check from
+// each, so the session is the user's to review.
+func readyAgentEdits(t *testing.T, receiver *ExternalReceiver, session string, agents ...string) {
+	t.Helper()
+	for _, agent := range agents {
+		if _, _, err := receiver.agentEdits.MarkAgentEnded(session, agent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, agent := range agents {
+		if _, _, err := receiver.agentEdits.RecordCheck(session, agent, store.CheckPassed, "tests ok"); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func replaceRequest(session, path string, payload extmsg.ReplacePayload) string {
@@ -81,7 +97,7 @@ func TestAgentEditReceiverStagesWithoutTouchingFiles(t *testing.T) {
 		t.Fatalf("write reply = %q", reply)
 	}
 	reply = receiver.Handle(replaceRequest("e1", "main.go", extmsg.ReplacePayload{Old: "func main() {\n}", New: "func main() {\n\tprintln(1)\n}"}))
-	if reply != "ok replaced main.go L3–L5 · edit 1 · 2 files staged" {
+	if reply != "ok replaced main.go L3–L5 · edit 1 · 2 files staged · version "+staging.Version("package main\n\nfunc main() {\n\tprintln(1)\n}\n") {
 		t.Fatalf("replace reply = %q", reply)
 	}
 	if reply = receiver.Handle(replaceRequest("e1", "main.go", extmsg.ReplacePayload{Old: "nowhere", New: "x"})); !strings.HasPrefix(reply, "error the old text is not in main.go") {
@@ -100,10 +116,10 @@ func TestAgentEditReceiverStagesWithoutTouchingFiles(t *testing.T) {
 		t.Fatalf("another session's show prints the latest content, e1's staged copy: %q", body)
 	}
 	line, body, _ := extmsg.SplitBodyReply(receiver.Handle("read\nmain.go\n"))
-	if extmsg.BodyDetail(line) != "staged · edit session e1 · not written" || body != "package main\n\nfunc main() {\n\tprintln(1)\n}\n" {
+	if extmsg.BodyDetail(line) != "staged · edit session e1 · not written · version "+staging.Version(body) || body != "package main\n\nfunc main() {\n\tprintln(1)\n}\n" {
 		t.Fatalf("read without a session gets the latest content and says where from: %q %q", line, body)
 	}
-	if line, body, _ = extmsg.SplitBodyReply(receiver.Handle("read\nlib/util.ts\n")); extmsg.BodyDetail(line) != "disk" || body != "export const héllo = 1\n" {
+	if line, body, _ = extmsg.SplitBodyReply(receiver.Handle("read\nlib/util.ts\n")); extmsg.BodyDetail(line) != "disk · version "+staging.Version(body) || body != "export const héllo = 1\n" {
 		t.Fatalf("an unstaged file reads from disk: %q %q", line, body)
 	}
 	if reply := receiver.Handle("staged\nmain.go\n"); reply != "ok staged · edit session e1" {

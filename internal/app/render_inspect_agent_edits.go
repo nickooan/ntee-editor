@@ -91,11 +91,14 @@ func agentEditSessionRow(record store.AgentEditSession, pending bool) panelRow {
 		if editing := len(record.EditingAgents()); len(agents) > 1 && editing > 0 {
 			state = fmt.Sprintf("%d of %d agents editing", editing, len(agents))
 		}
-		if !record.AgentEndedAt.IsZero() {
+		switch record.Phase() {
+		case store.PhaseFinalising:
+			state = fmt.Sprintf("checking: %d of %d in", len(agents)-len(record.CheckingAgents()), len(agents))
+		case store.PhaseReady:
 			state = "ready to review"
 		}
 		detail := "  " + files
-		if len(agents) > 1 {
+		if len(agents) > 1 || record.Phase() != store.PhaseEditing {
 			parts := make([]string, len(agents))
 			for index, participant := range agents {
 				parts[index] = cmp.Or(participant.Agent, "unnamed") + " " + agentState(participant)

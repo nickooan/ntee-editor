@@ -64,6 +64,8 @@ func (r *ExternalReceiver) handleAgentEdit(message extmsg.Message, settings stor
 		}
 		r.notify(agentEditsChangedMsg{session: id})
 		return extmsg.OkReply("discarded edit session " + id + " — " + countText(len(record.Files), "staged file") + " dropped, nothing written")
+	case extmsg.CommandSandbox:
+		return r.handleSandbox(message)
 	}
 
 	anchored, err := r.resolvePath(message.Paths[0], false)
@@ -85,7 +87,14 @@ func (r *ExternalReceiver) handleAgentEdit(message extmsg.Message, settings stor
 		case message.Command == extmsg.CommandShow:
 			return extmsg.BodyReply(content)
 		}
-		return extmsg.BodyReplyWith(content, readDetail(from))
+		detail := readDetail(from) + " · version " + r.agentEdits.Remember(content)
+		if from != "" && from == id {
+			if stale := r.agentEdits.StaleNote(id, rel); stale != "" {
+				detail += " · stale: " + stale
+			}
+		}
+		repo, others := r.agentEdits.SessionsInRepo(rel, id, from)
+		return extmsg.BodyReplyWith(content, detail+repoSessionsDetail(repo, others))
 	case extmsg.CommandStaged:
 		session, err := r.agentEdits.StagedIn(rel)
 		switch {
@@ -99,19 +108,96 @@ func (r *ExternalReceiver) handleAgentEdit(message extmsg.Message, settings stor
 		if line > 0 {
 			return extmsg.ErrorReply("write sets the whole file — leave #L" + strconv.Itoa(line) + " off")
 		}
-		result, err = r.agentEdits.Write(id, message.Agent, rel, message.Payload)
+		result, err = r.agentEdits.WriteExpecting(id, message.Agent, rel, message.Payload, message.Expect)
 	case extmsg.CommandReplace:
 		payload, decodeErr := extmsg.DecodeReplace(message.Payload)
 		if decodeErr != nil {
 			return extmsg.ErrorReply(decodeErr.Error())
 		}
-		result, err = r.agentEdits.Replace(id, message.Agent, rel, staging.Replacement{Old: payload.Old, New: payload.New, All: payload.All, HintLine: line})
+		result, err = r.agentEdits.Replace(id, message.Agent, rel, staging.Replacement{Old: payload.Old, New: payload.New, All: payload.All, HintLine: line, Expect: message.Expect})
 	}
 	if err != nil {
 		return extmsg.ErrorReply(err.Error())
 	}
 	r.notify(agentEditsChangedMsg{session: id})
-	return extmsg.OkReply(agentEditReplyText(message.Command, result, id))
+	if result.Reopened {
+		r.notify(agentEditsReopenedMsg{session: id, agent: message.Agent})
+	}
+	for _, rebase := range result.Rebased {
+		r.notify(agentEditsLayerChangedMsg{session: rebase.Session, below: id, rel: rel, rebased: rebase.Rebased, reason: rebase.Reason})
+	}
+	text := agentEditReplyText(message.Command, result, id)
+	for _, note := range result.Notes {
+		text += " · note: " + note
+	}
+	for _, rebase := range result.Rebased {
+		if rebase.Rebased {
+			text += " · edit session " + rebase.Session + " built on your older copy of " + rel + "; its edits were replayed onto this one"
+			continue
+		}
+		text += " · edit session " + rebase.Session + " built on your older copy of " + rel + " and can no longer be applied as it is (" + rebase.Reason + ") — it was told"
+	}
+	if result.SessionStart {
+		if repo, others := r.agentEdits.SessionsInRepo(rel, id, result.BaseSession); len(others) > 0 {
+			text += " · edit session " + others[0].Session + " is also changing " + staging.RepoName(repo) + editingText(others[0].Editing) +
+				" — to join it instead, discard this session and edit in session " + others[0].Session
+		}
+	}
+	return extmsg.OkReply(text + " · version " + result.Version)
+}
+
+// handleSandbox builds, refreshes or drops the session's sandbox, here on
+// the socket goroutine: a copy can take a while, and the UI never waits.
+func (r *ExternalReceiver) handleSandbox(message extmsg.Message) string {
+	id := message.Session
+	mode := ""
+	if len(message.Args) == 1 {
+		mode = message.Args[0]
+	}
+	if mode == extmsg.SandboxDrop {
+		r.agentEdits.DropSandbox(id)
+		return extmsg.OkReply("dropped the sandbox of edit session " + id)
+	}
+	include := make([]string, 0, len(message.Paths))
+	for _, raw := range message.Paths {
+		rel, err := r.resolvePath(raw, false)
+		if err != nil {
+			return extmsg.ErrorReply(err.Error())
+		}
+		include = append(include, rel)
+	}
+	result, err := r.agentEdits.Sandbox(id, mode == extmsg.SandboxFresh, include)
+	if err != nil {
+		return extmsg.ErrorReply(err.Error())
+	}
+	units := make([]string, len(result.Units))
+	for index, unit := range result.Units {
+		units[index] = staging.RepoName(unit)
+	}
+	return extmsg.OkReply("sandbox " + result.Path + " · holds " + strings.Join(units, ", ") + " (laid out like the project) · " +
+		countText(result.Placed, "staged file") + " in place · copied " + result.BuiltAt.Local().Format("15:04:05") +
+		" — build, test and search there; edits made there are not staged (stage them, then ask for the sandbox again to refresh); it is deleted when the session is applied or discarded")
+}
+
+// repoSessionsDetail adds to a read's detail the sessions still open that
+// change the file's repo, so the reader can join one: " · also editing
+// <repo>: S (a, b); T (c)".
+func repoSessionsDetail(repo string, sessions []staging.RepoSession) string {
+	if len(sessions) == 0 {
+		return ""
+	}
+	parts := make([]string, len(sessions))
+	for index, session := range sessions {
+		parts[index] = session.Session + " (" + staging.AgentNames(session.Editing) + ")"
+	}
+	return " · also editing " + staging.RepoName(repo) + ": " + strings.Join(parts, "; ")
+}
+
+func editingText(agents []string) string {
+	if len(agents) == 0 {
+		return ""
+	}
+	return " (still editing: " + staging.AgentNames(agents) + ")"
 }
 
 // readDetail says where a read's content came from, on its reply's first
@@ -141,6 +227,9 @@ func agentEditReplyText(command string, result staging.EditResult, session strin
 	if result.EditCount == 1 && result.BaseSession != "" {
 		text += " · builds on edit session " + result.BaseSession + "'s staged edits to it (not applied yet; to add to that change set instead, edit in session " + result.BaseSession + ")"
 	}
+	if result.Reopened {
+		text += " · edit session " + session + " is back to editing — its sandbox is gone and every agent checks again once you send end"
+	}
 	if result.Joined {
 		text += " · joined edit session " + session
 		if len(result.OtherAgents) > 0 {
@@ -159,7 +248,10 @@ func agentEditReplyText(command string, result staging.EditResult, session strin
 func agentEditStatusText(record store.AgentEditSession) string {
 	var builder strings.Builder
 	state := "open for edits"
-	if !record.AgentEndedAt.IsZero() {
+	switch record.Phase() {
+	case store.PhaseFinalising:
+		state = "finalising — its agents check it in the sandbox"
+	case store.PhaseReady:
 		state = "ended — waiting for the user to apply or discard"
 	}
 	fmt.Fprintf(&builder, "edit session %s · %s staged · %s\n", record.Session, countText(len(record.Files), "file"), state)
@@ -188,22 +280,81 @@ func agentEditStatusText(record store.AgentEditSession) string {
 	return builder.String()
 }
 
-// agentState is an agent's part in a session, for status and the panel.
+// agentState is an agent's part in a session, for status and the panel:
+// editing, then its check once the session finalises.
 func agentState(participant store.AgentEditParticipant) string {
 	switch {
 	case participant.Stopped:
 		return "stopped by the user"
 	case participant.Editing():
 		return "editing"
+	case participant.Check != "":
+		return string(participant.Check)
 	}
 	return "done"
+}
+
+// checkLines lists each agent's check for the user: "✓ agent-a passed —
+// go test ./... ok".
+func checkLines(record store.AgentEditSession) []string {
+	var lines []string
+	for _, participant := range record.WithAgents().Agents {
+		mark := map[store.AgentEditCheckResult]string{store.CheckPassed: "✓", store.CheckFailed: "✗", store.CheckSkipped: "–"}[participant.Check]
+		if mark == "" {
+			continue
+		}
+		line := mark + " " + cmp.Or(participant.Agent, "unnamed") + " " + string(participant.Check)
+		if note := strings.TrimSpace(strings.SplitN(participant.CheckNote, "\n", 2)[0]); note != "" {
+			line += " — " + note
+		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+// failedChecks lists the agents whose check failed.
+func failedChecks(record store.AgentEditSession) []string {
+	var failed []string
+	for _, participant := range record.Agents {
+		if participant.Check == store.CheckFailed {
+			failed = append(failed, participant.Agent)
+		}
+	}
+	return failed
+}
+
+// agentEditsFinalisingMsg tells the UI a session's agents all ended: its
+// waiting agents are asked to check it.
+type agentEditsFinalisingMsg struct {
+	session string
+}
+
+// agentEditsReopenedMsg tells the UI one of a finalising session's agents
+// edited it again: it is back to editing, and the checks are due anew.
+type agentEditsReopenedMsg struct {
+	session, agent string
+}
+
+// agentEditsLayerChangedMsg tells the UI a session's copy of rel was built
+// on a lower session's copy that just changed: its edits were replayed onto
+// the new copy, or could not be.
+type agentEditsLayerChangedMsg struct {
+	session, below, rel string
+	rebased             bool
+	reason              string
+}
+
+// agentEditFinalisingText tells agents what finalising asks of them.
+func agentEditFinalisingText(session string) string {
+	return "edit session " + session + " is finalising — every agent's edits are in and no one else may join; build and test them in its sandbox (run: ntee --msg --msg-edit-session " + session +
+		" sandbox), then report with check pass, fail or skip (what you ran in a note); the user reviews once every agent checked — to hear the outcome run: ntee --msg --msg-edit-session " + session + " wait"
 }
 
 // agentEditPartEndedText answers an end that leaves other agents editing.
 func agentEditPartEndedText(record store.AgentEditSession) string {
 	editing := record.EditingAgents()
 	return "your part of edit session " + record.Session + " is done — waiting for " + countText(len(editing), "other agent") + " (" + staging.AgentNames(editing) +
-		") to end before the user reviews it; to hear the outcome run: ntee --msg --msg-edit-session " + record.Session + " wait"
+		") to end; then the session finalises and you check it in its sandbox — to hear when, run: ntee --msg --msg-edit-session " + record.Session + " wait"
 }
 
 func lineRangeText(from, to int) string {

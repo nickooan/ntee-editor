@@ -1,6 +1,7 @@
 package mcpserver
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -36,19 +37,26 @@ const (
 	toolDiscard = "edit_discard"
 	toolEnd     = "edit_end"
 	toolWait    = "edit_wait"
+	toolSandbox = "edit_sandbox"
+	toolCheck   = "edit_check"
 )
 
 type toolArguments struct {
-	Session        string  `json:"session"`
-	Path           string  `json:"path"`
-	OldText        *string `json:"old_text"`
-	NewText        *string `json:"new_text"`
-	ReplaceAll     bool    `json:"replace_all"`
-	Line           int     `json:"line"`
-	Content        *string `json:"content"`
-	TimeoutSeconds int     `json:"timeout_seconds"`
-	Offset         int     `json:"offset"`
-	Limit          int     `json:"limit"`
+	Session        string   `json:"session"`
+	Path           string   `json:"path"`
+	OldText        *string  `json:"old_text"`
+	NewText        *string  `json:"new_text"`
+	ReplaceAll     bool     `json:"replace_all"`
+	Line           int      `json:"line"`
+	Content        *string  `json:"content"`
+	TimeoutSeconds int      `json:"timeout_seconds"`
+	Offset         int      `json:"offset"`
+	Limit          int      `json:"limit"`
+	Fresh          bool     `json:"fresh"`
+	Drop           bool     `json:"drop"`
+	Include        []string `json:"include"`
+	Result         string   `json:"result"`
+	Note           string   `json:"note"`
 }
 
 type textContent struct {
@@ -78,12 +86,19 @@ type editTools struct {
 	mu        sync.Mutex
 	current   string
 	lastEnded string
-	count     int
+	// lastOver: the session that ended last is the user's now (or over), so
+	// the next edit starts a new session rather than reopening it.
+	lastOver bool
+	count    int
+	// versions is each file's version as this agent last saw it (read_file
+	// or an edit's reply), sent with its next edit so a change made under
+	// it by another agent is caught.
+	versions map[string]string
 }
 
 func newEditTools(config Config) *editTools {
 	stamp := config.Now().Format("20060102-150405")
-	return &editTools{config: config, prefix: "mcp-" + stamp + "-" + strconv.Itoa(os.Getpid())}
+	return &editTools{config: config, prefix: "mcp-" + stamp + "-" + strconv.Itoa(os.Getpid()), versions: map[string]string{}}
 }
 
 // sessionFor picks the call's session: the explicit one, else (for wait)
@@ -102,6 +117,13 @@ func (tools *editTools) sessionFor(name, explicit string) (string, error) {
 	switch name {
 	case toolRead:
 		return tools.current, nil
+	case toolSandbox, toolCheck:
+		// After edit_end the session finalises: its sandbox and checks
+		// belong to the session that ended.
+		if session := cmp.Or(tools.current, tools.lastEnded); session != "" {
+			return session, nil
+		}
+		return "", fmt.Errorf("no edit session yet — stage your edits and call %s first, or pass session", toolEnd)
 	case toolWait:
 		if tools.lastEnded != "" {
 			return tools.lastEnded, nil
@@ -111,7 +133,13 @@ func (tools *editTools) sessionFor(name, explicit string) (string, error) {
 		}
 		return "", fmt.Errorf("no edit session to wait on — call %s first, or pass session", toolEnd)
 	case toolReplace, toolWrite:
-		if tools.current == "" {
+		switch {
+		case tools.current != "":
+		case tools.lastEnded != "" && !tools.lastOver:
+			// A fix after edit_end goes to the same session: it is still
+			// being edited or finalising, and the editor reopens it.
+			tools.current = tools.lastEnded
+		default:
 			tools.count++
 			tools.current = tools.prefix + "-" + strconv.Itoa(tools.count)
 		}
@@ -130,9 +158,59 @@ func (tools *editTools) sessionClosed(name, session string) {
 	if session == tools.current {
 		tools.current = ""
 	}
-	if name == toolEnd {
-		tools.lastEnded = session
+	if name == toolDiscard {
+		tools.versions = map[string]string{}
 	}
+	if name == toolEnd {
+		tools.lastEnded, tools.lastOver = session, false
+	}
+}
+
+// sessionOver notes that the session is the user's now, or finished: the
+// next edit starts a new session.
+func (tools *editTools) sessionOver(session string) {
+	tools.mu.Lock()
+	defer tools.mu.Unlock()
+	// The versions this agent saw were of that session's copies, gone
+	// now: its next edits are checked again once it reads.
+	tools.versions = map[string]string{}
+	if session == tools.lastEnded {
+		tools.lastOver = true
+	}
+	if session == tools.current {
+		tools.current = ""
+	}
+}
+
+func (tools *editTools) versionOf(path string) string {
+	tools.mu.Lock()
+	defer tools.mu.Unlock()
+	return tools.versions[path]
+}
+
+func (tools *editTools) saw(path, version string) {
+	tools.mu.Lock()
+	defer tools.mu.Unlock()
+	tools.versions[path] = version
+}
+
+var versionWord = regexp.MustCompile(`· version ([0-9a-f]{12})\b`)
+
+// versionIn is the file version a read's detail or an edit's reply names.
+func versionIn(line string) string {
+	if match := versionWord.FindStringSubmatch(line); match != nil {
+		return match[1]
+	}
+	return ""
+}
+
+var staleWord = regexp.MustCompile(` · stale: (.*?)(?: · also editing |$)`)
+
+// overReply reports whether a reply says the session takes no more edits:
+// the user is reviewing it, it finished, or an edit was refused for that.
+func overReply(line string) bool {
+	return strings.Contains(line, "the user is reviewing") || strings.HasPrefix(line, "ok finished") || strings.HasPrefix(line, "ended ") ||
+		strings.HasPrefix(line, "error edit session") && strings.Contains(line, " applied ") || strings.Contains(line, "start a new session")
 }
 
 func (tools *editTools) call(ctx context.Context, name string, raw json.RawMessage) toolResult {
@@ -175,6 +253,24 @@ func (tools *editTools) call(ctx context.Context, name string, raw json.RawMessa
 		}
 		budget := time.Duration(min(seconds, maxWaitSeconds)) * time.Second
 		request, timeout = extmsg.EditWaitRequest(session, budget), budget+waitReplyMargin
+	case toolCheck:
+		request = extmsg.CheckRequest(session, tools.prefix, arguments.Result, arguments.Note)
+	case toolSandbox:
+		mode := ""
+		switch {
+		case arguments.Drop:
+			mode = extmsg.SandboxDrop
+		case arguments.Fresh:
+			mode = extmsg.SandboxFresh
+		}
+		include := make([]string, len(arguments.Include))
+		for index, folder := range arguments.Include {
+			if !filepath.IsAbs(folder) {
+				folder = filepath.Join(tools.config.WorkingDir, folder)
+			}
+			include[index] = folder
+		}
+		request, timeout = extmsg.SandboxRequest(session, mode, include), tools.config.SandboxTimeout
 	default:
 		target := absolutePath
 		if name == toolReplace && arguments.Line > 0 {
@@ -182,6 +278,9 @@ func (tools *editTools) call(ctx context.Context, name string, raw json.RawMessa
 		}
 		if request, err = extmsg.EditRequest(command, session, tools.prefix, target, payload); err != nil {
 			return textResult(err.Error(), true)
+		}
+		if name == toolReplace || name == toolWrite {
+			request = extmsg.WithExpect(request, tools.versionOf(absolutePath))
 		}
 		if name == toolEnd {
 			timeout = tools.config.EndTimeout
@@ -204,6 +303,17 @@ func (tools *editTools) call(ctx context.Context, name string, raw json.RawMessa
 	if name == toolEnd || name == toolDiscard {
 		tools.sessionClosed(name, session)
 	}
+	if version := versionIn(line); version != "" && absolutePath != "" && (name == toolRead || name == toolReplace || name == toolWrite) {
+		tools.saw(absolutePath, version)
+	}
+	if overReply(line) {
+		tools.sessionOver(session)
+		if (name == toolReplace || name == toolWrite) && arguments.Session == "" && strings.Contains(line, "start a new session") {
+			// The session this edit went to is the user's now: the edit
+			// opens a new one (which builds on it) instead.
+			return tools.call(ctx, name, raw)
+		}
+	}
 	switch {
 	case hasBody && name == toolRead:
 		return textResult(readText(arguments, session, extmsg.BodyDetail(line), body), false)
@@ -211,6 +321,8 @@ func (tools *editTools) call(ctx context.Context, name string, raw json.RawMessa
 		return textResult(forTools(line), extmsg.IsErrorReply(line))
 	case hasBody:
 		return textResult(body+"\nedit session: "+session, false)
+	case name == toolWait && strings.HasPrefix(line, "ok waiting") && (strings.Contains(line, "is finalising") || strings.Contains(line, "back to editing")):
+		return textResult(forTools(line)+"\nedit session: "+session, false)
 	case name == toolWait && strings.HasPrefix(line, "ok waiting") && strings.Contains(line, "aside for later"):
 		return textResult("the user set edit session "+session+" aside for later — still staged, nothing written; carry on with other work, and call "+toolWait+" when you need their decision", false)
 	case name == toolWait && (strings.HasPrefix(line, "ok waiting") || strings.HasPrefix(line, "waiting")):
@@ -264,6 +376,16 @@ func commandFor(name string, arguments toolArguments) (command, payload string, 
 		return extmsg.CommandDiscard, "", nil
 	case toolEnd:
 		return extmsg.CommandEnd, "", nil
+	case toolCheck:
+		if arguments.Result != extmsg.CheckPass && arguments.Result != extmsg.CheckFail && arguments.Result != extmsg.CheckSkip {
+			return "", "", fmt.Errorf("%s needs result: pass, fail or skip", name)
+		}
+		return extmsg.CommandCheck, "", nil
+	case toolSandbox:
+		if arguments.Drop && (arguments.Fresh || len(arguments.Include) > 0) {
+			return "", "", fmt.Errorf("drop takes neither fresh nor include")
+		}
+		return extmsg.CommandSandbox, "", nil
 	case toolWait:
 		if arguments.TimeoutSeconds > maxWaitSeconds {
 			return "", "", fmt.Errorf("timeout_seconds is at most %d", maxWaitSeconds)
@@ -288,14 +410,20 @@ func knownTool(name string) bool {
 
 var cliWaitHint = regexp.MustCompile(`run: ntee --msg --msg-edit-session \S+ wait`)
 
+var cliSandboxHint = regexp.MustCompile(`run: ntee --msg --msg-edit-session \S+ sandbox`)
+
 // hintsForTools rewrites the editor's ntee --msg hints into tool terms.
 var hintsForTools = strings.NewReplacer(
 	"ntee --msg show prints", toolRead+" shows",
+	"its sandbox (sandbox)", "its sandbox ("+toolSandbox+")",
+	"report with check pass, fail or skip", "report with "+toolCheck+" (pass, fail or skip)",
+	"report with check,", "report with "+toolCheck+",",
 	"add #L<n> to the path", "pass line",
 	"with --msg-replace-all", "with replace_all",
 )
 
 func forTools(reply string) string {
+	reply = cliSandboxHint.ReplaceAllString(reply, "call "+toolSandbox)
 	return hintsForTools.Replace(cliWaitHint.ReplaceAllString(reply, "call "+toolWait))
 }
 
@@ -310,6 +438,13 @@ func readText(arguments toolArguments, session, detail, content string) string {
 		if from == session {
 			header = arguments.Path + " — your edit session " + from + "'s staged copy, NOT on disk yet"
 		}
+	}
+	if match := staleWord.FindStringSubmatch(detail); match != nil {
+		header += "\n⚠ your copy can no longer be applied as it is: " + match[1] + " — read the file without your session (or after leaving it) to see the latest, and stage your change on that in a new session, or join the session below it"
+	}
+	if _, others, found := strings.Cut(detail, " · also editing "); found {
+		repo, list, _ := strings.Cut(others, ": ")
+		header += "\nopen edit sessions changing " + repo + ": " + list + " — if your change belongs with one of theirs, pass session=<its id> on your edits; else your own session builds on theirs"
 	}
 	if content == "" {
 		return header + "\n(empty file)"

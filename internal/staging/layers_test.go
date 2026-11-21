@@ -148,18 +148,41 @@ func TestApplyingAStackedFileWritesAndSettlesTheLayersBelow(t *testing.T) {
 	}
 }
 
-func TestAStackedFileConflictsWhenTheLayerBelowChanged(t *testing.T) {
+func TestAChangeUnderAStackedFileIsReplayedOrRefused(t *testing.T) {
 	registry, root, _ := newTestRegistry(t)
 	_, err := registry.Replace("A", "", "a.go", Replacement{Old: "one", New: "ONE"})
 	must(t, err)
 	_, err = registry.Replace("B", "", "a.go", Replacement{Old: "three", New: "THREE"})
 	must(t, err)
-	_, err = registry.Replace("A", "", "a.go", Replacement{Old: "ONE", New: "1"})
+
+	// A changes a line B did not touch: B's edits are replayed on A's new copy.
+	result, err := registry.Replace("A", "", "a.go", Replacement{Old: "ONE", New: "1"})
 	must(t, err)
+	if len(result.Rebased) != 1 || !result.Rebased[0].Rebased || result.Rebased[0].Session != "B" {
+		t.Fatalf("B is replayed onto A's new copy: %+v", result.Rebased)
+	}
+	fileB := snapshotFile(t, registry, "B", "a.go")
+	if fileB.BaseContent != "1\ntwo\nthree\ntwo\n" || fileB.Content != "1\ntwo\nTHREE\ntwo\n" {
+		t.Fatalf("B now builds on A's latest: %+v", fileB)
+	}
 	recordB, _ := registry.Snapshot("B")
+	if _, _, ok := registry.ApplyCheck(recordB.Files[0]); !ok {
+		t.Fatal("so B applies cleanly")
+	}
+
+	// A changes the very text B replaced: B's edit cannot be replayed.
+	result, err = registry.Replace("A", "", "a.go", Replacement{Old: "three", New: "3"})
+	must(t, err)
+	if len(result.Rebased) != 1 || result.Rebased[0].Rebased || !strings.Contains(result.Rebased[0].Reason, "edit 1 no longer applies") {
+		t.Fatalf("the replay fails and says why: %+v", result.Rebased)
+	}
+	recordB, _ = registry.Snapshot("B")
 	_, refusal, ok := registry.ApplyCheck(recordB.Files[0])
 	if ok || refusal.Result != store.AgentEditFileConflicted || !strings.Contains(refusal.Note, "edit session A changed it after this session built on it") {
 		t.Fatalf("refusal = %+v", refusal)
+	}
+	if note := registry.StaleNote("B", "a.go"); !strings.Contains(note, "edit session A changed it") {
+		t.Fatalf("B's copy says it is stale: %q", note)
 	}
 	registry.ApplyFiles("B", recordB.Files, nil)
 	if readFile(t, root, "a.go") != diskA || snapshotFile(t, registry, "A", "a.go").Result != "" {

@@ -235,7 +235,7 @@ func TestInitializeListAndPing(t *testing.T) {
 			t.Fatalf("%s has no object schema", tool.Name)
 		}
 	}
-	if got := strings.Join(names, ","); got != "edit_replace,edit_write,read_file,edit_status,edit_discard,edit_end,edit_wait" {
+	if got := strings.Join(names, ","); got != "edit_replace,edit_write,read_file,edit_status,edit_discard,edit_end,edit_sandbox,edit_check,edit_wait" {
 		t.Fatalf("tools = %s", got)
 	}
 
@@ -409,6 +409,152 @@ func TestAnExplicitSessionJoinsWhenNoneIsCurrent(t *testing.T) {
 	h.call(4, toolWait, nil)
 	if got := h.nextRequest(); got != extmsg.EditWaitRequest("their-session", 5*time.Minute) {
 		t.Fatalf("wait follows the joined session: %q", got)
+	}
+}
+
+func TestEditSandboxAsksForTheCurrentSessionsBox(t *testing.T) {
+	h := newHarness(t)
+	if result := h.call(1, toolSandbox, nil); !result.IsError || !strings.Contains(result.Content[0].Text, "no edit session yet") {
+		t.Fatalf("a sandbox never starts a session: %+v", result)
+	}
+	h.noRequest()
+	h.call(2, toolWrite, map[string]any{"path": "a.go", "content": "x"})
+	h.nextRequest()
+	session := h.sessionTag + "1"
+	h.setReply(func(string) string {
+		return "ok sandbox /box/" + session + " · holds the project · 1 staged file in place"
+	})
+	result := h.call(3, toolSandbox, nil)
+	if got := h.nextRequest(); got != extmsg.SandboxRequest(session, "", nil) {
+		t.Fatalf("request = %q", got)
+	}
+	if result.IsError || !strings.HasPrefix(result.Content[0].Text, "ok sandbox /box/"+session) {
+		t.Fatalf("reply = %+v", result)
+	}
+	h.call(4, toolSandbox, map[string]any{"fresh": true, "include": []string{"../libs/core"}})
+	if got, want := h.nextRequest(), extmsg.SandboxRequest(session, extmsg.SandboxFresh, []string{filepath.Join(h.workingDir, "../libs/core")}); got != want {
+		t.Fatalf("fresh with include = %q, want %q", got, want)
+	}
+	h.call(5, toolSandbox, map[string]any{"drop": true})
+	if got := h.nextRequest(); got != extmsg.SandboxRequest(session, extmsg.SandboxDrop, nil) {
+		t.Fatalf("drop = %q", got)
+	}
+	if result := h.call(6, toolSandbox, map[string]any{"drop": true, "fresh": true}); !result.IsError {
+		t.Fatal("drop and fresh together are refused")
+	}
+}
+
+func TestReadFileNamesOpenSessionsInTheRepo(t *testing.T) {
+	text := readText(toolArguments{Path: "a.go"}, "", "disk · also editing ntee-editor: S (agent-a, agent-b)", "x\n")
+	if !strings.HasPrefix(text, "a.go — on disk, no staged edits\nopen edit sessions changing ntee-editor: S (agent-a, agent-b) — if your change belongs with one of theirs, pass session=<its id>") {
+		t.Fatalf("header = %q", text)
+	}
+}
+
+func TestFinalisingChecksAndFixesFollowTheEndedSession(t *testing.T) {
+	h := newHarness(t)
+	agent := strings.TrimSuffix(h.sessionTag, "-")
+	session := h.sessionTag + "1"
+	h.call(1, toolWrite, map[string]any{"path": "a.go", "content": "x"})
+	h.nextRequest()
+	h.setReply(func(string) string {
+		return "ok edit session " + session + " is finalising — every agent's edits are in and no one else may join; build and test them in its sandbox (run: ntee --msg --msg-edit-session " + session +
+			" sandbox), then report with check pass, fail or skip (what you ran in a note); the user reviews once every agent checked — to hear the outcome run: ntee --msg --msg-edit-session " + session + " wait"
+	})
+	result := h.call(2, toolEnd, nil)
+	h.nextRequest()
+	if text := result.Content[0].Text; !strings.Contains(text, "(call edit_sandbox)") || !strings.Contains(text, "report with edit_check (pass, fail or skip)") || !strings.Contains(text, "call edit_wait") {
+		t.Fatalf("the finalising reply speaks in tools: %q", text)
+	}
+
+	h.setReply(func(string) string { return "ok sandbox /box · holds the project · 1 staged file in place" })
+	h.call(3, toolSandbox, nil)
+	if got := h.nextRequest(); got != extmsg.SandboxRequest(session, "", nil) {
+		t.Fatalf("the sandbox is the ended session's: %q", got)
+	}
+	h.setReply(func(string) string {
+		return "ok replaced a.go L1 · edit 2 · 1 file staged · edit session " + session + " is back to editing"
+	})
+	h.call(4, toolReplace, map[string]any{"path": "a.go", "old_text": "x", "new_text": "y"})
+	if got := h.nextRequest(); !strings.HasPrefix(got, "replace --edit-session="+session+" ") {
+		t.Fatalf("a fix after edit_end goes to the same session: %q", got)
+	}
+	h.setReply(func(string) string { return "ok edit session " + session + " is finalising — …" })
+	h.call(5, toolEnd, nil)
+	h.nextRequest()
+	h.setReply(func(string) string {
+		return "ok edit session " + session + " ended — the user is reviewing 1 staged file; to hear the outcome call edit_wait"
+	})
+	h.call(6, toolCheck, map[string]any{"result": "pass", "note": "go test ./... ok"})
+	if got, want := h.nextRequest(), extmsg.CheckRequest(session, agent, extmsg.CheckPass, "go test ./... ok"); got != want {
+		t.Fatalf("check = %q, want %q", got, want)
+	}
+	if result := h.call(7, toolCheck, map[string]any{"result": "maybe"}); !result.IsError {
+		t.Fatal("a check needs pass, fail or skip")
+	}
+
+	// The session is the user's now: the next edit is refused there, and
+	// goes to a new session instead.
+	h.setReply(func(request string) string {
+		if strings.Contains(request, "--edit-session="+session+" ") {
+			return "error edit session " + session + " is ready for the user's review — start a new session for more edits"
+		}
+		return "ok staged b.go"
+	})
+	h.call(8, toolWrite, map[string]any{"path": "b.go", "content": "z"})
+	if got := h.nextRequest(); !strings.HasPrefix(got, "write --edit-session="+h.sessionTag+"2 ") {
+		t.Fatalf("an edit after the user took over starts a new session: %q", got)
+	}
+}
+
+func TestWaitPassesOnFinalisingAndReopening(t *testing.T) {
+	h := newHarness(t)
+	h.call(1, toolWrite, map[string]any{"path": "a.go", "content": "x"})
+	h.nextRequest()
+	h.call(2, toolEnd, nil)
+	h.nextRequest()
+	h.setReply(func(string) string {
+		return "ok waiting — edit session S is finalising: every agent ended; build and test it in its sandbox (sandbox), report with check, then wait again for the user's decision"
+	})
+	result := h.call(3, toolWait, nil)
+	h.nextRequest()
+	if text := result.Content[0].Text; result.IsError || !strings.Contains(text, "its sandbox (edit_sandbox), report with edit_check,") {
+		t.Fatalf("a finalising wait says what to do, in tools: %+v", result)
+	}
+}
+
+func TestEditsCarryTheVersionTheAgentLastSaw(t *testing.T) {
+	h := newHarness(t)
+	h.setReply(func(string) string { return extmsg.BodyReplyWith("x\n", "disk · version 0123456789ab") })
+	h.call(1, toolRead, map[string]any{"path": "a.go"})
+	h.nextRequest()
+	h.setReply(func(string) string { return "ok replaced a.go L1 · edit 1 · 1 file staged · version abcdefabcdef" })
+	h.call(2, toolReplace, map[string]any{"path": "a.go", "old_text": "x", "new_text": "y"})
+	if got := h.nextRequest(); !strings.Contains(strings.SplitN(got, "\n", 2)[0], " --expect=0123456789ab") {
+		t.Fatalf("the edit names the version read: %q", got)
+	}
+	h.call(3, toolWrite, map[string]any{"path": "a.go", "content": "z"})
+	if got := h.nextRequest(); !strings.Contains(strings.SplitN(got, "\n", 2)[0], " --expect=abcdefabcdef") {
+		t.Fatalf("the next edit names the version the last one left: %q", got)
+	}
+	h.call(4, toolWrite, map[string]any{"path": "b.go", "content": "z"})
+	if got := h.nextRequest(); strings.Contains(got, "--expect=") {
+		t.Fatalf("a file never seen is edited unchecked: %q", got)
+	}
+	h.setReply(func(string) string { return "ok discarded edit session x — 2 staged files dropped, nothing written" })
+	h.call(5, toolDiscard, nil)
+	h.nextRequest()
+	h.setReply(func(string) string { return "ok staged a.go" })
+	h.call(6, toolWrite, map[string]any{"path": "a.go", "content": "again"})
+	if got := h.nextRequest(); strings.Contains(got, "--expect=") {
+		t.Fatalf("once the session is gone, so are the versions of its copies: %q", got)
+	}
+}
+
+func TestReadFileWarnsAboutAStaleCopy(t *testing.T) {
+	text := readText(toolArguments{Path: "a.go"}, "S", "staged · edit session S · not written · version 0123456789ab · stale: edit session A changed it after this session built on it", "x\n")
+	if !strings.Contains(text, "⚠ your copy can no longer be applied as it is: edit session A changed it after this session built on it") {
+		t.Fatalf("header = %q", text)
 	}
 }
 

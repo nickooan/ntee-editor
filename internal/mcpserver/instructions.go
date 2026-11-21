@@ -9,14 +9,16 @@ const instructions = `ntee stages your file edits in the user's running ntee edi
 When an ntee editor is open on the project, read and change files with these tools instead of your own Read/Edit/Write tools or shell reads and writes:
 1. read_file before you edit a file: it shows the latest content — edits staged by you or by another agent that are not on disk yet. Your own Read, cat and editors see only the disk. Grep and Glob search the disk too: re-read their matches with read_file before editing them.
 2. edit_replace (exact text → new text) or edit_write (a whole file, also for new files), once per change. Edits stack: a later replace works on what earlier edits staged, and editing a file another agent staged builds on their staged edits.
-3. edit_end when the change set is complete. Depending on the user's setting the editor either applies everything at once, or opens it for the user to review.
-4. If edit_end says the user is reviewing, call edit_wait (again while it says still waiting) until it reports the outcome.
-5. Builds, tests and linters see your edits only once they are applied: run them after edit_end (and edit_wait) reports them applied.
+3. edit_end when your part of the change set is complete. Once every agent in the session has sent edit_end, the session finalises: no one may join or edit it but its own agents, and the user is not asked yet.
+4. Check it: edit_sandbox returns a scratch copy of every repo the session touches, laid out like the project, with all of its staged edits in place (built once every agent ended, so nobody's half-done change is in it). Run your build and tests there, in any language, then report with edit_check — result pass, fail or skip, and a short note of what you ran and found. The user is asked to review once every agent reported, and sees your note. Never edit files in the sandbox.
+5. A check failed and you can fix it: stage the fix with edit_replace/edit_write (the session goes back to editing; every agent checks again), then edit_end again. If you cannot fix it, report fail with a note that says why.
+6. Call edit_wait (again while it says still waiting) until it reports the outcome; it also tells you when the session finalises or is back to editing. Builds, tests, linters, Grep and shell commands in the project see the edits only once they are applied.
 
 Rules:
 - old_text must match exactly once, whitespace included. On "matches N times", add surrounding lines, or pass line (a line inside the match you mean); replace_all changes every match (renames).
 - Sessions are automatic: all edits until edit_end form one session, and the next edit starts a new one. Pass session only to run separate change sets side by side.
-- Another agent's session: read_file names the session whose staged edits it shows. By default your edits go in your own session and build on theirs. If your change belongs to the same change set, pass that session on your first edit: your later calls (edits, edit_end, edit_wait) go there too, and the user reviews it once, after every agent in it sent edit_end. edit_end may then say it is waiting for other agents — call edit_wait.
+- Another agent's session: read_file names the session whose staged edits it shows, and any open session changing the same repo. By default your edits go in your own session and build on theirs. If your change belongs to the same change set, pass that session on your first edit: your later calls (edits, edit_end, edit_check, edit_wait) go there too. edit_end may say it is waiting for other agents — call edit_wait. A session that is finalising refuses newcomers: work in your own session.
+- Several agents may edit one file. Edits apply in the order they arrive; each of yours is checked against the version you last read or edited (sent for you). "changed since you read it": another agent changed the file under you — read it again with read_file and stage your change on what is there now. A note saying another agent changed the same lines means: make sure your change fits theirs.
 - "not applied … changed on disk since it was staged" (or a session it built on changed or was discarded): re-read it with read_file and stage it again (a new session).
 - "ended" or "discarded": the user stopped this change set — do not re-send it unless asked.
 - "set aside for later": the edits stay staged and unwritten until the user decides; carry on, and call edit_wait again when you need the outcome.
@@ -116,6 +118,27 @@ var toolDefinitions = []toolDefinition{
 		Description: "Finish the session once the change set is complete. Per the user's setting the editor applies every staged file at once (the reply says which were applied), " +
 			"or opens them for the user to review — then call edit_wait to hear the outcome. Files changed on disk since they were staged are never overwritten.",
 		InputSchema: objectSchema(map[string]any{}),
+	},
+	{
+		Name:  toolSandbox,
+		Title: "Build sandbox of the staged edits",
+		Description: "Make (or refresh) a scratch copy of every repo the current edit session touches, laid out like the project, with the session's staged files in place — to build, test and search the staged code before the user reviews it. " +
+			"The reply names its folder. Never edit files there: stage changes with edit_replace and call this again. Deleted when the session is applied or discarded.",
+		InputSchema: objectSchema(map[string]any{
+			"fresh":   map[string]any{"type": "boolean", "description": "Rebuild the copy from the disk as it is now (picks up files changed on disk since it was made)."},
+			"drop":    map[string]any{"type": "boolean", "description": "Delete the sandbox now."},
+			"include": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "More folders the build needs (e.g. a sibling repo), relative to the project or absolute."},
+		}),
+	},
+	{
+		Name:  toolCheck,
+		Title: "Report your check of the finalising session",
+		Description: "After every agent sent edit_end, report what your build and tests in the sandbox (edit_sandbox) found: pass, fail or skip, with a short note. " +
+			"The user is asked to review once every agent reported. To fix a failure instead, stage the fix — the session goes back to editing.",
+		InputSchema: objectSchema(map[string]any{
+			"result": map[string]any{"type": "string", "enum": []string{"pass", "fail", "skip"}, "description": "What the check found."},
+			"note":   map[string]any{"type": "string", "description": "What you ran and what it showed, e.g. 'go test ./... ok' or 'npm test: 2 failing (auth.spec)'."},
+		}, "result"),
 	},
 	{
 		Name:        toolWait,

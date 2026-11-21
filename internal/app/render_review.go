@@ -241,8 +241,11 @@ func (m Model) renderReviewStatus() string {
 	// cuts.
 	if m.review.agentEdits != "" && !m.review.agentEditsTrace {
 		hint := agentEditDecisionHint
-		if m.agentEdits.stillEditing[m.review.agentEdits] {
+		switch {
+		case m.agentEdits.stillEditing[m.review.agentEdits]:
 			hint = agentEditStillEditingHint
+		case m.agentEdits.checking[m.review.agentEdits]:
+			hint = agentEditCheckingHint
 		}
 		line += statusTextStyle.Render("   ") + agentEditDecisionStyle.Render(hint)
 	}
@@ -289,6 +292,10 @@ const agentEditDecisionHint = " a apply all to disk · x discard all · Esc deci
 // agentEditStillEditingHint replaces it while agents still edit the
 // session: applying waits for them.
 const agentEditStillEditingHint = " agents still editing · x discard all · Esc leave "
+
+// agentEditCheckingHint is the hint while the session's agents check it:
+// the user may apply without waiting for them.
+const agentEditCheckingHint = " agents checking · a apply anyway · x discard all · Esc decide "
 
 // reviewSessionBadge is the live review's mark in the status bar: how many
 // files arrived, whether the view follows new ones (or how many are

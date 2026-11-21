@@ -24,6 +24,7 @@ func serveAgentTools(editorRoot string) int {
 		Version:        app.Version,
 		RequestTimeout: editRequestTimeout,
 		EndTimeout:     editEndTimeout,
+		SandboxTimeout: editSandboxTimeout,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ntee --mcp:", err)

@@ -31,6 +31,9 @@ type Config struct {
 	RequestTimeout time.Duration
 	// EndTimeout bounds end, which may write every staged file; zero means 45s.
 	EndTimeout time.Duration
+	// SandboxTimeout bounds a sandbox, which may copy whole repos; zero
+	// means 60s.
+	SandboxTimeout time.Duration
 }
 
 const (
@@ -88,6 +91,9 @@ func Serve(ctx context.Context, input io.Reader, output io.Writer, config Config
 	}
 	if config.RequestTimeout == 0 {
 		config.RequestTimeout = 10 * time.Second
+	}
+	if config.SandboxTimeout == 0 {
+		config.SandboxTimeout = 60 * time.Second
 	}
 	if config.EndTimeout == 0 {
 		config.EndTimeout = 45 * time.Second

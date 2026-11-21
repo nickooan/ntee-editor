@@ -27,6 +27,7 @@ type Message struct {
 	SessionKind SessionKind   // which session option named it; SessionNone without one
 	WaitBudget  time.Duration // wait only: how long the sender waits for the reply, 0 = not given
 	Agent       string        // edit session only: the sending agent's id, "" = unnamed
+	Expect      string        // write and replace only: the file version the edit was made on, "" = unchecked
 	// Payload is a write's new content or a replace's EncodeReplace JSON:
 	// everything after the separator line, byte for byte. HasPayload tells
 	// an empty payload (an empty file) from none.
@@ -46,6 +47,8 @@ const (
 	CommandShow    = "show"    // a file's staged content (its disk content when not staged)
 	CommandStatus  = "status"  // the session's staged files
 	CommandDiscard = "discard" // drop the session's staged edits
+	CommandSandbox = "sandbox" // a scratch copy of the session's repos with its staged files in place, to build and test
+	CommandCheck   = "check"   // an agent's report on its finalising session: pass, fail or skip, with a note
 
 	// Reads through the editor, for any agent; an edit session is optional.
 	CommandRead   = "read"   // a file's latest content: staged by some session, else the disk
@@ -77,6 +80,10 @@ const (
 	// end or status, so several agents can share one session; without it
 	// the agent is unnamed.
 	AgentOption = "--agent="
+	// ExpectOption on a write or replace names the version of the file the
+	// agent read (from read or an earlier edit's reply), so an edit made on
+	// a stale read is caught.
+	ExpectOption = "--expect="
 )
 
 // Option is the first-line option naming a session of this kind.
@@ -100,6 +107,8 @@ var sessionKinds = []SessionKind{SessionNote, SessionDiff, SessionReview, Sessio
 const sessionOptionsText = SessionOption + "<id>, " + DiffSessionOption + "<id>, " + ReviewSessionOption + "<id> or " + EditSessionOption + "<id>"
 
 var sessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+
+var versionPattern = regexp.MustCompile(`^[0-9a-f]{12}$`)
 
 const (
 	// MaxMessageBytes caps one request; anything longer is refused unread.
@@ -171,6 +180,11 @@ func Parse(text string) (Message, error) {
 					if !sessionIDPattern.MatchString(message.Agent) {
 						return Message{}, errors.New("bad agent id " + message.Agent + " — use 1–64 letters, digits, '.', '_' or '-'")
 					}
+				case strings.HasPrefix(field, ExpectOption):
+					message.Expect = strings.TrimPrefix(field, ExpectOption)
+					if !versionPattern.MatchString(message.Expect) {
+						return Message{}, errors.New("bad " + field + " — give the version a read or an edit reply named")
+					}
 				case strings.HasPrefix(field, WaitOption):
 					budget, err := time.ParseDuration(strings.TrimPrefix(field, WaitOption))
 					if err != nil || budget <= 0 {
@@ -191,8 +205,11 @@ func Parse(text string) (Message, error) {
 	if !commandSeen {
 		return Message{}, errors.New("empty message — the first line must be a command (open, review)")
 	}
-	if message.Agent != "" && (message.SessionKind != SessionEdit || !slices.Contains([]string{CommandWrite, CommandReplace, CommandEnd, CommandStatus}, message.Command)) {
-		return Message{}, errors.New(AgentOption + " goes with an edit session's write, replace, end or status")
+	if message.Agent != "" && (message.SessionKind != SessionEdit || !slices.Contains([]string{CommandWrite, CommandReplace, CommandEnd, CommandStatus, CommandCheck}, message.Command)) {
+		return Message{}, errors.New(AgentOption + " goes with an edit session's write, replace, end, status or check")
+	}
+	if message.Expect != "" && (message.SessionKind != SessionEdit || message.Command != CommandWrite && message.Command != CommandReplace) {
+		return Message{}, errors.New(ExpectOption + " goes with an edit session's write or replace")
 	}
 	if message.WaitBudget > 0 && message.Command != CommandWait {
 		return Message{}, errors.New(WaitOption + " goes with wait only")
@@ -280,6 +297,28 @@ func Parse(text string) (Message, error) {
 		case len(message.Paths) != 1:
 			return Message{}, fmt.Errorf("%s needs exactly one path, got %d", message.Command, len(message.Paths))
 		}
+	case CommandCheck:
+		switch {
+		case message.SessionKind != SessionEdit:
+			return Message{}, errors.New("check needs " + EditSessionOption + "<id>")
+		case len(message.Args) != 1 || !slices.Contains([]string{CheckPass, CheckFail, CheckSkip}, message.Args[0]):
+			return Message{}, errors.New("check takes one result: " + CheckPass + ", " + CheckFail + " or " + CheckSkip + " (then an optional note after a " + LineNoteSeparator + " line)")
+		case len(message.Paths) > 0:
+			return Message{}, errors.New("check takes no paths — say what you ran in its note")
+		case len(message.LineNote) > MaxLineNoteBytes:
+			return Message{}, fmt.Errorf("note is too long (max %d KiB)", MaxLineNoteBytes>>10)
+		}
+	case CommandSandbox:
+		switch {
+		case message.SessionKind != SessionEdit:
+			return Message{}, errors.New("sandbox needs " + EditSessionOption + "<id>")
+		case noteSeen || message.HasPayload:
+			return Message{}, errors.New("sandbox takes no note")
+		case len(message.Args) > 1 || len(message.Args) == 1 && message.Args[0] != SandboxFresh && message.Args[0] != SandboxDrop:
+			return Message{}, errors.New("sandbox takes " + SandboxFresh + " or " + SandboxDrop + " at most, then the folders to include, one per line")
+		case len(message.Args) == 1 && message.Args[0] == SandboxDrop && len(message.Paths) > 0:
+			return Message{}, errors.New("sandbox drop takes no folders")
+		}
 	case CommandStatus, CommandDiscard:
 		if err := checkEditSessionCommand(message, noteSeen); err != nil {
 			return Message{}, err
@@ -288,10 +327,24 @@ func Parse(text string) (Message, error) {
 			return Message{}, errors.New(message.Command + " takes only the session option")
 		}
 	default:
-		return Message{}, fmt.Errorf("unknown command %q — use open, review, read, staged, end or wait (an edit session also takes write, replace, show, status and discard)", message.Command)
+		return Message{}, fmt.Errorf("unknown command %q — use open, review, read, staged, end or wait (an edit session also takes write, replace, show, status, discard, sandbox and check)", message.Command)
 	}
 	return message, nil
 }
+
+// The arguments a sandbox request may carry: rebuild it from the disk, or
+// delete it.
+const (
+	SandboxFresh = "fresh"
+	SandboxDrop  = "drop"
+)
+
+// A check's result argument.
+const (
+	CheckPass = "pass"
+	CheckFail = "fail"
+	CheckSkip = "skip"
+)
 
 // carriesPayload reports whether a command's text after the separator line
 // is a payload rather than a note.

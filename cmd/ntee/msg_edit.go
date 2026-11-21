@@ -17,6 +17,10 @@ import (
 // applies the staged files at once, the reply comes after they are written.
 const editEndTimeout = 45 * time.Second
 
+// editSandboxTimeout is how long a sandbox request waits: the editor may be
+// copying whole repos.
+const editSandboxTimeout = 60 * time.Second
+
 // editRequestTimeout is how long a staging request (write, replace, show,
 // status, discard) waits for its reply.
 const editRequestTimeout = 10 * time.Second
@@ -32,12 +36,20 @@ func checkEditCommand(command string, paths []string, session msgSession, base s
 		if len(paths) != 1 {
 			return fmt.Errorf("%s needs exactly one file, got %d", command, len(paths))
 		}
+	case extmsg.CommandSandbox:
+		if len(paths) > 0 && paths[0] == extmsg.SandboxDrop && len(paths) > 1 {
+			return errors.New("sandbox drop takes no folders")
+		}
+	case extmsg.CommandCheck:
+		if len(paths) != 1 || paths[0] != extmsg.CheckPass && paths[0] != extmsg.CheckFail && paths[0] != extmsg.CheckSkip {
+			return errors.New("check takes one result: pass, fail or skip (say what you ran with --msg-note)")
+		}
 	case extmsg.CommandStatus, extmsg.CommandDiscard, extmsg.CommandEnd, extmsg.CommandWait:
 		if len(paths) > 0 {
 			return fmt.Errorf("%s takes no paths: ntee --msg %s %s %s", command, session.flag(), session.id, command)
 		}
 	default:
-		return errors.New("--msg-edit-session goes with write, replace, show, read, staged, status, discard, end and wait")
+		return errors.New("--msg-edit-session goes with write, replace, show, read, staged, status, discard, sandbox, check, end and wait")
 	}
 	return nil
 }
@@ -50,6 +62,13 @@ func sendEditCommand(command string, paths []string, session msgSession, options
 	if options.replaceAll && command != extmsg.CommandReplace {
 		fmt.Fprintln(os.Stderr, "--msg-replace-all goes with replace")
 		return 1
+	}
+	mode := ""
+	switch {
+	case command == extmsg.CommandSandbox && len(paths) > 0 && (paths[0] == extmsg.SandboxFresh || paths[0] == extmsg.SandboxDrop):
+		mode, paths = paths[0], paths[1:]
+	case command == extmsg.CommandCheck:
+		mode, paths = paths[0], nil // the result, not a path
 	}
 	for index, path := range paths {
 		absolute, err := filepath.Abs(path)
@@ -85,6 +104,20 @@ func sendEditCommand(command string, paths []string, session msgSession, options
 		payload = extmsg.EncodeReplace(extmsg.ReplacePayload{Old: oldText, New: newText, All: options.replaceAll})
 	}
 	request, err := extmsg.EditRequest(command, session.id, options.agent, path, payload)
+	if options.expect != "" && command != extmsg.CommandWrite && command != extmsg.CommandReplace {
+		fmt.Fprintln(os.Stderr, "--msg-expect goes with write or replace")
+		return 1
+	}
+	if command == extmsg.CommandWrite || command == extmsg.CommandReplace {
+		request = extmsg.WithExpect(request, options.expect)
+	}
+	timeout := editRequestTimeout
+	switch command {
+	case extmsg.CommandSandbox:
+		request, timeout = extmsg.SandboxRequest(session.id, mode, paths), editSandboxTimeout
+	case extmsg.CommandCheck:
+		request = extmsg.CheckRequest(session.id, options.agent, mode, options.note)
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -94,7 +127,7 @@ func sendEditCommand(command string, paths []string, session msgSession, options
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	line, body, hasBody, err := extmsg.SendEdit(context.Background(), socketPath, command, request, editRequestTimeout)
+	line, body, hasBody, err := extmsg.SendEdit(context.Background(), socketPath, command, request, timeout)
 	switch {
 	case err != nil:
 		fmt.Fprintln(os.Stderr, "cannot reach the editor: "+err.Error())

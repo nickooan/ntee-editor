@@ -40,6 +40,10 @@ type Replacement struct {
 	Old, New string
 	All      bool
 	HintLine int
+	// Expect is the version (Version) of the content the agent read before
+	// this edit, "" for no check: when the file changed since, a replace
+	// overlapping the change is refused, else applied with a note.
+	Expect string
 }
 
 // EditResult is what an edit did, for the agent's reply.
@@ -49,14 +53,18 @@ type EditResult struct {
 	LineTo       int
 	Added        int
 	Removed      int
-	Replaced     int      // replace: how many matches were replaced
-	NewFile      bool     // the file does not exist on disk
-	EditCount    int      // edits staged for this file so far
-	StagedFiles  int      // files staged in the session
-	SessionStart bool     // this edit started the session
-	BaseSession  string   // the pending session whose staged copy the file was built on; "" = the disk
-	Joined       bool     // this edit added its agent to a session other agents started
-	OtherAgents  []string // the session's other agents still editing
+	Replaced     int            // replace: how many matches were replaced
+	NewFile      bool           // the file does not exist on disk
+	EditCount    int            // edits staged for this file so far
+	StagedFiles  int            // files staged in the session
+	SessionStart bool           // this edit started the session
+	BaseSession  string         // the pending session whose staged copy the file was built on; "" = the disk
+	Joined       bool           // this edit added its agent to a session other agents started
+	Reopened     bool           // this edit took a finalising session back to editing
+	Version      string         // the file's staged content after the edit (Version)
+	Notes        []string       // what the agent should know: the file changed since its read, another agent's lines
+	Rebased      []RebaseResult // sessions built on this one's older copy of the file, replayed onto the new one
+	OtherAgents  []string       // the session's other agents still editing
 }
 
 // FileResult is what applying did with one file.
@@ -81,6 +89,17 @@ type Registry struct {
 	// build on the same layer. Taken after a set's saveMu, never before.
 	layerMu sync.Mutex
 
+	// sandboxDir holds the sessions' sandboxes (sandbox.go); "" = none.
+	// sandboxMu guards sandboxes, the per-session build states; repoMu
+	// guards repoCache, each staged file's sandbox unit.
+	sandboxDir string
+	sandboxMu  sync.Mutex
+	sandboxes  map[string]*sandboxState
+	repoMu     sync.Mutex
+	repoCache  map[string]string
+	// versions keeps recent file contents by version (versions.go).
+	versions *versionCache
+
 	mu       sync.Mutex
 	pending  map[string]*stagedSet
 	finished map[string]store.AgentEditSession // finished this run, file contents dropped
@@ -102,6 +121,9 @@ func NewRegistry(workspaceRoot string, log store.AgentEditLogStore) *Registry {
 		now:           time.Now,
 		pending:       map[string]*stagedSet{},
 		finished:      map[string]store.AgentEditSession{},
+		sandboxes:     map[string]*sandboxState{},
+		versions:      newVersionCache(),
+		repoCache:     map[string]string{},
 	}
 }
 
@@ -115,14 +137,16 @@ func (r *Registry) WithClock(now func() time.Time) *Registry {
 // from it).
 func (r *Registry) Log() store.AgentEditLogStore { return r.log }
 
-// Load picks up the sessions still pending from an earlier run.
+// Load picks up the sessions still pending from an earlier run, and sweeps
+// the sandboxes it left that no pending session owns.
 func (r *Registry) Load() error {
 	sessions, err := r.log.LoadPendingAgentEdits()
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	for _, session := range sessions {
 		r.pending[session.Session] = &stagedSet{record: session}
 	}
+	r.mu.Unlock()
+	r.sweepSandboxes()
 	return err
 }
 
@@ -140,10 +164,17 @@ func (set *stagedSet) publish(record store.AgentEditSession) {
 
 // Write stages content as the whole new content of rel.
 func (r *Registry) Write(session, agent, rel, content string) (EditResult, error) {
+	return r.WriteExpecting(session, agent, rel, content, "")
+}
+
+// WriteExpecting is Write checked against the version the agent read
+// (expect, "" for none): a whole-file write over a file that changed since
+// is refused, since it would undo that change.
+func (r *Registry) WriteExpecting(session, agent, rel, content, expect string) (EditResult, error) {
 	if len(content) > MaxFileBytes {
 		return EditResult{}, fmt.Errorf("content is larger than %d MB", MaxFileBytes>>20)
 	}
-	return r.edit(session, agent, rel, func(current string) (string, store.AgentEdit, EditResult, error) {
+	return r.editThenRebase(session, agent, rel, expect, func(current string) (string, store.AgentEdit, EditResult, error) {
 		edit := store.AgentEdit{Op: OpWrite}
 		edit.LineFrom, edit.LineTo, edit.Added, edit.Removed = LineChanges(current, content)
 		return content, edit, EditResult{}, nil
@@ -161,7 +192,7 @@ func (r *Registry) Replace(session, agent, rel string, replacement Replacement) 
 	case replacement.All && replacement.HintLine > 0:
 		return EditResult{}, errors.New("a line hint picks one match — leave it off with replace-all")
 	}
-	return r.edit(session, agent, rel, func(current string) (string, store.AgentEdit, EditResult, error) {
+	return r.editThenRebase(session, agent, rel, replacement.Expect, func(current string) (string, store.AgentEdit, EditResult, error) {
 		next, edit, replaced, err := replaceText(current, rel, replacement)
 		if err != nil {
 			return "", edit, EditResult{}, err
@@ -173,25 +204,49 @@ func (r *Registry) Replace(session, agent, rel string, replacement Replacement) 
 	})
 }
 
+// editThenRebase is edit, then the replay of the sessions built on this
+// session's older copy of rel — outside this session's saveMu, so locks are
+// only ever taken from a lower layer to an upper one.
+func (r *Registry) editThenRebase(session, agent, rel, expect string, apply func(current string) (string, store.AgentEdit, EditResult, error)) (EditResult, error) {
+	result, err := r.edit(session, agent, rel, expect, apply)
+	if err == nil {
+		result.Rebased = r.rebaseDependents(session, rel)
+	}
+	return result, err
+}
+
 // edit runs one edit by agent on rel's staged content, saves the session,
 // and only then publishes it — a failed save leaves the session as it was.
 // An agent's first edit adds it to the session's agents; an agent that
 // already ended takes its part up again.
-func (r *Registry) edit(session, agent, rel string, apply func(current string) (string, store.AgentEdit, EditResult, error)) (EditResult, error) {
+func (r *Registry) edit(session, agent, rel, expect string, apply func(current string) (string, store.AgentEdit, EditResult, error)) (EditResult, error) {
 	set, created, err := r.lockedSetFor(session)
 	if err != nil {
 		return EditResult{}, err
 	}
 	defer set.saveMu.Unlock()
 	record := set.snapshot()
-	if !record.AgentEndedAt.IsZero() {
+	agents := slices.Clone(record.Agents)
+	at := slices.IndexFunc(agents, func(participant store.AgentEditParticipant) bool { return participant.Agent == agent })
+	reopened := false
+	switch record.Phase() {
+	case store.PhaseReady:
 		if stoppedAgents(record) {
 			return EditResult{}, fmt.Errorf("the user stopped waiting for agents in edit session %s — start a new session for more edits", session)
 		}
-		return EditResult{}, fmt.Errorf("edit session %s already got end from every agent — start a new session for more edits", session)
+		return EditResult{}, fmt.Errorf("edit session %s is ready for the user's review — start a new session for more edits", session)
+	case store.PhaseFinalising:
+		if at < 0 {
+			return EditResult{}, fmt.Errorf("edit session %s is finalising (its agents are checking it) — it is no longer open to join; edit in your own session, which builds on its staged edits", session)
+		}
+		// One of its agents fixes something: back to editing, and every
+		// check is due again once it ends.
+		reopened = true
+		record.AgentEndedAt = time.Time{}
+		for index := range agents {
+			agents[index].Check, agents[index].CheckNote, agents[index].CheckedAt = "", "", time.Time{}
+		}
 	}
-	agents := slices.Clone(record.Agents)
-	at := slices.IndexFunc(agents, func(participant store.AgentEditParticipant) bool { return participant.Agent == agent })
 	joined := false
 	switch {
 	case at < 0:
@@ -217,13 +272,33 @@ func (r *Registry) edit(session, agent, rel string, apply func(current string) (
 	if file.Result != "" {
 		return EditResult{}, fmt.Errorf("%s was already written (%s) — start a new edit session to change it again", rel, file.ResultNote)
 	}
-	next, edit, result, err := apply(file.Content)
+	before := file.Content
+	next, edit, result, err := apply(before)
 	if err != nil {
 		r.dropIfEmpty(session, set)
 		return EditResult{}, err
 	}
+	span := editSpan(edit)
+	if expect != "" && expect != Version(before) {
+		// The file changed since the agent read it: a whole-file write would
+		// undo that, and a replace on the changed lines was made blind to it.
+		stale := r.staleReadOf(file, expect, before)
+		if edit.Op == OpWrite || stale.overlaps(span) {
+			r.dropIfEmpty(session, set)
+			what := "your replace of " + span.String() + " overlaps that"
+			if edit.Op == OpWrite {
+				what = "a whole-file write would undo that"
+			}
+			return EditResult{}, fmt.Errorf("%s changed since you read it: %s%s — %s; read it again (read_file) and stage your change on the current content", rel, stale.by, stale.where(), what)
+		}
+		result.Notes = append(result.Notes, rel+" changed since you read it ("+stale.by+stale.where()+") — your edit does not touch those lines; check it still fits")
+	}
+	if touched := othersOnLines(file.Edits, agent, span); len(touched) > 0 {
+		result.Notes = append(result.Notes, "other agents changed these lines in this session too: "+strings.Join(touched, "; ")+" — make sure your change fits theirs")
+	}
 	edit.At = r.now()
 	edit.Agent = agent
+	edit.Version = r.Remember(next)
 	file.Content = next
 	file.Edits = append(slices.Clip(file.Edits), edit)
 	files[index] = file
@@ -234,6 +309,11 @@ func (r *Registry) edit(session, agent, rel string, apply func(current string) (
 		return EditResult{}, fmt.Errorf("cannot save the staged edit: %w", err)
 	}
 	set.publish(record)
+	if reopened {
+		r.DropSandbox(session) // built from edits that are changing again
+	}
+	result.Reopened = reopened
+	result.Version = edit.Version
 	result.Rel = rel
 	result.LineFrom, result.LineTo = edit.LineFrom, edit.LineTo
 	result.Added, result.Removed = edit.Added, edit.Removed
@@ -263,7 +343,7 @@ func (r *Registry) setFor(session string) (*stagedSet, bool, error) {
 	if finished, ok := r.finished[session]; ok {
 		return nil, false, fmt.Errorf("edit session %s already finished (%s) — start a new session id", session, finished.Status)
 	}
-	set := &stagedSet{record: store.AgentEditSession{Session: session, Status: store.AgentEditPending, StartedAt: r.now(), Files: []store.AgentEditFile{}}}
+	set := &stagedSet{record: store.AgentEditSession{Session: session, Status: store.AgentEditPending, StartedAt: r.now(), Files: []store.AgentEditFile{}, Checks: true}}
 	r.pending[session] = set
 	return set, true, nil
 }
@@ -415,9 +495,10 @@ func (r *Registry) MarkAgentEnded(session, agent string) (record store.AgentEdit
 }
 
 // ForceEnd is the user no longer waiting for a session's agents: those
-// still editing are marked stopped (their further edits are refused) and
-// the session is ready to review. stopped lists them.
-func (r *Registry) ForceEnd(session string) (record store.AgentEditSession, stopped []string, err error) {
+// still editing are marked stopped (their further edits are refused), the
+// checks still to come are marked skipped, and the session is ready to
+// review. waitedFor lists the agents it stopped waiting for.
+func (r *Registry) ForceEnd(session string) (record store.AgentEditSession, waitedFor []string, err error) {
 	set, ok := r.pendingSet(session)
 	if !ok {
 		return store.AgentEditSession{}, nil, r.noSession(session)
@@ -425,23 +506,67 @@ func (r *Registry) ForceEnd(session string) (record store.AgentEditSession, stop
 	set.saveMu.Lock()
 	defer set.saveMu.Unlock()
 	record = set.snapshot().WithAgents()
-	if !record.AgentEndedAt.IsZero() {
+	if record.Phase() == store.PhaseReady {
 		return record, nil, nil
 	}
 	now := r.now()
 	agents := slices.Clone(record.Agents)
 	for index := range agents {
-		if agents[index].Editing() {
+		switch {
+		case agents[index].Editing():
 			agents[index].EndedAt, agents[index].Stopped = now, true
-			stopped = append(stopped, agents[index].Agent)
+		case agents[index].Check == "" && !agents[index].Stopped:
+			agents[index].Check, agents[index].CheckNote, agents[index].CheckedAt = store.CheckSkipped, "the user stopped waiting", now
+		default:
+			continue
 		}
+		waitedFor = append(waitedFor, agents[index].Agent)
 	}
-	record.Agents, record.AgentEndedAt = agents, now
+	record.Agents, record.ReadyAt = agents, now
+	if record.AgentEndedAt.IsZero() {
+		record.AgentEndedAt = now
+	}
 	if err := r.log.SavePendingAgentEdit(record); err != nil {
 		return store.AgentEditSession{}, nil, fmt.Errorf("cannot save the session: %w", err)
 	}
 	set.publish(record)
-	return record, stopped, nil
+	return record, waitedFor, nil
+}
+
+// RecordCheck is an agent's report on its finalising session: what its
+// build and tests in the sandbox found. Once every agent has reported, the
+// session is ready for the user (allChecked).
+func (r *Registry) RecordCheck(session, agent string, result store.AgentEditCheckResult, note string) (record store.AgentEditSession, allChecked bool, err error) {
+	set, ok := r.pendingSet(session)
+	if !ok {
+		return store.AgentEditSession{}, false, r.noSession(session)
+	}
+	set.saveMu.Lock()
+	defer set.saveMu.Unlock()
+	record = set.snapshot().WithAgents()
+	switch record.Phase() {
+	case store.PhaseEditing:
+		return record, false, fmt.Errorf("edit session %s is still being edited (by %s) — check it once every agent has sent end", session, AgentNames(record.EditingAgents()))
+	case store.PhaseReady:
+		return record, false, fmt.Errorf("edit session %s is already the user's to review — no check is waiting", session)
+	}
+	agents := slices.Clone(record.Agents)
+	at := slices.IndexFunc(agents, func(participant store.AgentEditParticipant) bool { return participant.Agent == agent })
+	if at < 0 {
+		return record, false, fmt.Errorf("%s is not in edit session %s — only its agents check it (agents in it: %s)", AgentLabel(agent), session, agentList(record.Agents))
+	}
+	now := r.now()
+	agents[at].Check, agents[at].CheckNote, agents[at].CheckedAt = result, note, now
+	record.Agents = agents
+	allChecked = len(record.CheckingAgents()) == 0
+	if allChecked {
+		record.ReadyAt = now
+	}
+	if err := r.log.SavePendingAgentEdit(record); err != nil {
+		return store.AgentEditSession{}, false, fmt.Errorf("cannot save the session: %w", err)
+	}
+	set.publish(record)
+	return record, allChecked, nil
 }
 
 func stoppedAgents(record store.AgentEditSession) bool {
@@ -555,6 +680,7 @@ func (r *Registry) finish(session string, keep int, update func(store.AgentEditS
 	}
 	r.finished[session] = summary
 	r.mu.Unlock()
+	r.DropSandbox(session) // applied or discarded: nothing left to build
 	return record, nil
 }
 

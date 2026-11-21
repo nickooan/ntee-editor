@@ -49,6 +49,53 @@ type AgentEditSession struct {
 	// A record from before agents were tracked loads with one anonymous
 	// agent (WithAgents).
 	Agents []AgentEditParticipant `json:"agents"`
+	// Checks: once every agent has ended, the session finalises — its
+	// agents build and test it in a sandbox and report — before the user is
+	// asked (ReadyAt). Older records (false) are ready once their agents end.
+	Checks  bool      `json:"checks"`
+	ReadyAt time.Time `json:"readyAt"` // every check is in (or the user stopped waiting); zero until then
+}
+
+// AgentEditPhase is where a pending session stands.
+type AgentEditPhase string
+
+const (
+	PhaseEditing    AgentEditPhase = "editing"    // agents stage edits; others may join
+	PhaseFinalising AgentEditPhase = "finalising" // every agent ended: they check the edits; no one may join
+	PhaseReady      AgentEditPhase = "ready"      // the user's to review
+)
+
+// Phase is the pending session's stage.
+func (session AgentEditSession) Phase() AgentEditPhase {
+	switch {
+	case session.AgentEndedAt.IsZero():
+		return PhaseEditing
+	case !session.Checks || !session.ReadyAt.IsZero():
+		return PhaseReady
+	}
+	return PhaseFinalising
+}
+
+// AgentEditCheckResult is what an agent's check of the finalising session
+// found.
+type AgentEditCheckResult string
+
+const (
+	CheckPassed  AgentEditCheckResult = "passed"
+	CheckFailed  AgentEditCheckResult = "failed"
+	CheckSkipped AgentEditCheckResult = "skipped"
+)
+
+// CheckingAgents lists the agents whose check of a finalising session is
+// still to come.
+func (session AgentEditSession) CheckingAgents() []string {
+	var checking []string
+	for _, participant := range session.Agents {
+		if !participant.Stopped && participant.Check == "" {
+			checking = append(checking, participant.Agent)
+		}
+	}
+	return checking
 }
 
 // AgentEditParticipant is one agent's part in a session: "" is an agent
@@ -59,6 +106,11 @@ type AgentEditParticipant struct {
 	JoinedAt time.Time `json:"joinedAt"`
 	EndedAt  time.Time `json:"endedAt"` // zero while the agent is editing
 	Stopped  bool      `json:"stopped"`
+	// Check is the agent's report on the finalising session, "" until it
+	// sends one; the note says what it ran and found.
+	Check     AgentEditCheckResult `json:"check"`
+	CheckNote string               `json:"checkNote"`
+	CheckedAt time.Time            `json:"checkedAt"`
 }
 
 // Editing reports whether the agent has not sent end yet.
@@ -116,7 +168,8 @@ type AgentEdit struct {
 	Added    int       `json:"added"`
 	Removed  int       `json:"removed"`
 	At       time.Time `json:"at"`
-	Agent    string    `json:"agent"` // the agent that sent it; "" = unnamed
+	Agent    string    `json:"agent"`   // the agent that sent it; "" = unnamed
+	Version  string    `json:"version"` // the file's content after it (staging.Version)
 }
 
 // Finished reports whether the session is over (applied or discarded).

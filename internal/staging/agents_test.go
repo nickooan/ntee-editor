@@ -52,8 +52,56 @@ func TestAgentsShareASessionAndAllMustEnd(t *testing.T) {
 	if pending, _ := log.LoadPendingAgentEdits(); len(pending) != 1 || len(pending[0].Agents) != 2 || pending[0].Agents[1].EndedAt.IsZero() {
 		t.Fatalf("the agents are saved: %+v", pending)
 	}
-	if _, err := registry.Write("S", "agent-b", "a.go", "late\n"); err == nil || !strings.Contains(err.Error(), "already got end from every agent") {
-		t.Fatalf("edits after the last end are refused: %v", err)
+	if record.Phase() != store.PhaseFinalising {
+		t.Fatalf("every agent ended: the session finalises (%s)", record.Phase())
+	}
+	if _, err := registry.Write("S", "agent-c", "a.go", "late\n"); err == nil || !strings.Contains(err.Error(), "edit session S is finalising (its agents are checking it) — it is no longer open to join") {
+		t.Fatalf("a newcomer is turned away while it finalises: %v", err)
+	}
+}
+
+func TestAgentsCheckAFinalisingSessionBeforeTheUserIsAsked(t *testing.T) {
+	registry, _, _ := newTestRegistry(t)
+	_, err := registry.Write("S", "agent-a", "a.go", "a\n")
+	must(t, err)
+	_, err = registry.Write("S", "agent-b", "b.go", "b\n")
+	must(t, err)
+	if _, _, err := registry.RecordCheck("S", "agent-a", store.CheckPassed, ""); err == nil || !strings.Contains(err.Error(), "still being edited") {
+		t.Fatalf("no check while agents edit: %v", err)
+	}
+	_, _, err = registry.MarkAgentEnded("S", "agent-a")
+	must(t, err)
+	_, _, err = registry.MarkAgentEnded("S", "agent-b")
+	must(t, err)
+
+	record, allChecked, err := registry.RecordCheck("S", "agent-a", store.CheckPassed, "go test ./... ok")
+	must(t, err)
+	if allChecked || record.Phase() != store.PhaseFinalising || strings.Join(record.CheckingAgents(), ",") != "agent-b" {
+		t.Fatalf("one check of two: %v %+v", allChecked, record.Agents)
+	}
+	if _, _, err := registry.RecordCheck("S", "agent-c", store.CheckPassed, ""); err == nil || !strings.Contains(err.Error(), "not in edit session S") {
+		t.Fatalf("only the session's agents check it: %v", err)
+	}
+
+	// agent-b's check fails and it fixes the code: the session reopens and
+	// every check is due again.
+	fix, err := registry.Write("S", "agent-b", "b.go", "fixed\n")
+	must(t, err)
+	record, _ = registry.Snapshot("S")
+	if !fix.Reopened || record.Phase() != store.PhaseEditing || record.Agents[0].Check != "" || record.Agents[0].Editing() {
+		t.Fatalf("the fix reopens the session, clears the checks, and leaves agent-a ended: %+v", record.Agents)
+	}
+	_, _, err = registry.MarkAgentEnded("S", "agent-b")
+	must(t, err)
+	_, _, err = registry.RecordCheck("S", "agent-a", store.CheckPassed, "")
+	must(t, err)
+	record, allChecked, err = registry.RecordCheck("S", "agent-b", store.CheckFailed, "npm test: 1 failing")
+	must(t, err)
+	if !allChecked || record.Phase() != store.PhaseReady || record.ReadyAt.IsZero() || record.Agents[1].CheckNote != "npm test: 1 failing" {
+		t.Fatalf("the last check readies it for the user: %+v", record)
+	}
+	if _, err := registry.Write("S", "agent-a", "a.go", "late\n"); err == nil || !strings.Contains(err.Error(), "ready for the user's review") {
+		t.Fatalf("no edits once it is the user's: %v", err)
 	}
 }
 
@@ -65,10 +113,10 @@ func TestForceEndStopsTheAgentsStillEditing(t *testing.T) {
 	must(t, err)
 	_, _, err = registry.MarkAgentEnded("S", "agent-a")
 	must(t, err)
-	record, stopped, err := registry.ForceEnd("S")
+	record, waitedFor, err := registry.ForceEnd("S")
 	must(t, err)
-	if strings.Join(stopped, ",") != "agent-b" || record.AgentEndedAt.IsZero() || !record.Agents[1].Stopped || record.Agents[0].Stopped {
-		t.Fatalf("only the agent still editing is stopped: %v %+v", stopped, record.Agents)
+	if strings.Join(waitedFor, ",") != "agent-a,agent-b" || record.Phase() != store.PhaseReady || !record.Agents[1].Stopped || record.Agents[0].Stopped || record.Agents[0].Check != store.CheckSkipped {
+		t.Fatalf("the agent still editing is stopped, the pending check skipped: %v %+v", waitedFor, record.Agents)
 	}
 	if _, err := registry.Write("S", "agent-b", "b.go", "more\n"); err == nil || !strings.Contains(err.Error(), "the user stopped waiting for agents in edit session S") {
 		t.Fatalf("a stopped agent's next edit is refused: %v", err)

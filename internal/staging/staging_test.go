@@ -218,7 +218,7 @@ func TestApplyWritesAndSkipsConflicts(t *testing.T) {
 	}
 }
 
-func TestEditsAfterEndAreRefused(t *testing.T) {
+func TestEditsAfterEndReopenUntilTheUserReviews(t *testing.T) {
 	registry, _, _ := newTestRegistry(t)
 	_, err := registry.Write("s1", "", "a.go", "x\n")
 	must(t, err)
@@ -227,8 +227,15 @@ func TestEditsAfterEndAreRefused(t *testing.T) {
 	if !allEnded || record.AgentEndedAt.IsZero() {
 		t.Fatal("end is recorded")
 	}
-	if _, err := registry.Write("s1", "", "a.go", "y\n"); err == nil || !strings.Contains(err.Error(), "already got end") {
-		t.Fatalf("edits after end are refused: %v", err)
+	if result, err := registry.Write("s1", "", "a.go", "y\n"); err != nil || !result.Reopened {
+		t.Fatalf("its agent may still fix something while it finalises, which reopens it: %+v %v", result, err)
+	}
+	_, _, err = registry.MarkAgentEnded("s1", "")
+	must(t, err)
+	_, _, err = registry.RecordCheck("s1", "", store.CheckPassed, "")
+	must(t, err)
+	if _, err := registry.Write("s1", "", "a.go", "z\n"); err == nil || !strings.Contains(err.Error(), "ready for the user's review") {
+		t.Fatalf("edits once it is the user's are refused: %v", err)
 	}
 	if _, _, err := registry.MarkAgentEnded("nothing", ""); err == nil {
 		t.Fatal("ending a session that staged nothing is an error")

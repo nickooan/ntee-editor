@@ -97,3 +97,46 @@ func TestStagedFilesAreMarkedInTheTreeAndOnOpen(t *testing.T) {
 		t.Fatalf("an unstaged file gets no notice: %q", m.notice)
 	}
 }
+
+func TestTheReceiverCatchesEditsOnAStaleRead(t *testing.T) {
+	_, _, receiver, _, _ := agentEditsModel(t, store.AgentEditPolicyReview)
+	line, _, _ := extmsg.SplitBodyReply(receiver.Handle("read\nmain.go\n"))
+	version := strings.TrimPrefix(extmsg.BodyDetail(line), "disk · version ")
+	receiver.Handle(agentReplace("S", "agent-a", "main.go", extmsg.ReplacePayload{Old: "func main() {\n}", New: "func main() {\n\tprintln(1)\n}"}))
+	// A replace of the lines agent-a changed no longer matches: refused.
+	request := extmsg.WithExpect(agentReplace("S", "agent-b", "main.go", extmsg.ReplacePayload{Old: "func main() {\n}", New: "func main() {}"}), version)
+	if reply := receiver.Handle(request); !strings.HasPrefix(reply, "error the old text is not in main.go") {
+		t.Fatalf("a replace of changed lines is refused: %q", reply)
+	}
+	// A whole-file write made on the stale read would undo agent-a's change.
+	write := extmsg.WithExpect("write --edit-session=S --agent=agent-b\nmain.go\n---\npackage main\n", version)
+	if reply := receiver.Handle(write); !strings.HasPrefix(reply, "error main.go changed since you read it: agent agent-a's replace") || !strings.Contains(reply, "a whole-file write would undo that") {
+		t.Fatalf("a stale whole-file write is refused: %q", reply)
+	}
+	request = extmsg.WithExpect(agentReplace("S", "agent-b", "main.go", extmsg.ReplacePayload{Old: "package main", New: "package app"}), version)
+	if reply := receiver.Handle(request); !strings.HasPrefix(reply, "ok replaced main.go L1") || !strings.Contains(reply, "· note: main.go changed since you read it") {
+		t.Fatalf("one elsewhere goes through with a note: %q", reply)
+	}
+}
+
+func TestAWaitingAgentHearsItsBaseChanged(t *testing.T) {
+	m, _, receiver, _, _ := agentEditsModel(t, store.AgentEditPolicyReview)
+	receiver.Handle(replaceRequest("A", "main.go", extmsg.ReplacePayload{Old: "func main() {\n}", New: "func main() {\n\tprintln(1)\n}"}))
+	receiver.Handle(replaceRequest("B", "main.go", extmsg.ReplacePayload{Old: "\tprintln(1)\n", New: "\tprintln(1)\n\tprintln(2)\n"}))
+	waitReply := make(chan string, 1)
+	m, _ = deliver(m, externalMessageMsg{record: sessionRecord(extmsg.CommandWait, "B", "", ""), sessionKind: extmsg.SessionEdit, reply: waitReply})
+
+	reply := receiver.Handle(replaceRequest("A", "main.go", extmsg.ReplacePayload{Old: "println(1)", New: "println(10)"}))
+	if !strings.Contains(reply, "edit session B built on your older copy of main.go and can no longer be applied as it is") {
+		t.Fatalf("A hears it broke B's layer: %q", reply)
+	}
+	next, _ := m.Update(agentEditsLayerChangedMsg{session: "B", below: "A", rel: "main.go", reason: "edit 1 no longer applies"})
+	m = next.(Model)
+	if outcome := gotReply(t, waitReply); !strings.HasPrefix(outcome, "waiting — edit session A changed main.go after edit session B built on it: your copy can no longer be applied") {
+		t.Fatalf("B's waiting agent hears it at once: %q", outcome)
+	}
+	line, _, _ := extmsg.SplitBodyReply(receiver.Handle("read --edit-session=B\nmain.go\n"))
+	if !strings.Contains(extmsg.BodyDetail(line), "· stale: edit session A changed it after this session built on it") {
+		t.Fatalf("B's read of its own copy says it is stale: %q", line)
+	}
+}

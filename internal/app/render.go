@@ -1228,14 +1228,17 @@ func (m Model) renderHeader() string {
 // headerAgentEditingLabel says agents are still staging edits — the user
 // cannot apply those sessions yet. "" when none is.
 func (m Model) headerAgentEditingLabel() string {
-	switch count := len(m.agentEdits.stillEditing); count {
-	case 0:
-		return ""
-	case 1:
+	switch editing, checking := len(m.agentEdits.stillEditing), len(m.agentEdits.checking); {
+	case editing == 1:
 		return "✎ agent editing…"
-	default:
-		return fmt.Sprintf("✎ agents editing (%d)…", count)
+	case editing > 1:
+		return fmt.Sprintf("✎ agents editing (%d)…", editing)
+	case checking == 1:
+		return "⚙ agents checking…"
+	case checking > 1:
+		return fmt.Sprintf("⚙ agents checking (%d)…", checking)
 	}
+	return ""
 }
 
 func (m Model) headerSessionBadge() string {

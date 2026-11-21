@@ -208,6 +208,8 @@ Edit sessions — stage your file edits in the editor instead of writing them:
   ntee --msg staged <file>
   ntee --msg --msg-edit-session <id> [--msg-agent <name>] status
   ntee --msg --msg-edit-session <id> discard
+  ntee --msg --msg-edit-session <id> sandbox [fresh|drop] [<folder>…]
+  ntee --msg --msg-edit-session <id> [--msg-agent <name>] [--msg-note "<what you ran>"] check pass|fail|skip
   ntee --msg --msg-edit-session <id> end
   ntee --msg --msg-edit-session <id> --msg-wait 1h wait
       Each edit is kept in the editor, not written to the file: the files on
@@ -233,6 +235,27 @@ Edit sessions — stage your file edits in the editor instead of writing them:
       session staged builds on its staged edits; applying yours then writes
       theirs to that file too, once the user agrees. status lists the
       staged files.
+      Once every agent in the session sent end, it finalises: newcomers are
+      refused, and its agents check it before the user is asked. sandbox
+      prints a scratch folder built once from all of its edits: a copy
+      of every repo the session's staged files are in, laid out like the
+      project, with the staged contents in place — build, test and grep
+      there, in any language. Run sandbox again after more edits to refresh
+      it; fresh rebuilds it from the disk as it is now; extra folders (a
+      sibling repo the build needs) are copied in too; drop deletes it.
+      Never edit files in the sandbox: they are not staged. It is deleted
+      when the session is applied or discarded. Report what you found with
+      check pass, fail or skip (the note says what you ran); the user is
+      asked to review once every agent reported, and sees the notes. To fix
+      a failure, stage the fix — the session goes back to editing, its
+      sandbox goes, and every agent checks again after the next end.
+      Several agents may edit one file; edits apply in the order they
+      arrive. read prints the file's version on stderr ("· version <v>")
+      and every edit reply ends with the new one: pass it back with
+      --msg-expect <v> on your next write or replace, and an edit made on
+      a stale read is caught — a whole-file write over a file another
+      agent changed since is refused, a replace elsewhere goes through with
+      a note. A note also says when another agent changed the same lines.
       Several agents may share one session: name yourself with --msg-agent
       <name> and use the other agent's session id (read and staged print
       it) for your write, replace and end. The user reviews it once, after
@@ -264,9 +287,15 @@ Edit sessions — stage your file edits in the editor instead of writing them:
         read    the content, byte for byte; on stderr "ntee: disk" or
                 "ntee: staged · edit session <id> · not written"
         status  one line per staged file
-        end     review first:   ok edit session … ended — the user is
-                                reviewing N staged files     exit 0
-                agent applies:  as wait below, once the files are written
+        end     ok your part of edit session … is done — waiting for
+                      N other agents                             exit 0
+                the last end:   ok edit session … is finalising — build
+                      and test in its sandbox, then check        exit 0
+        sandbox ok sandbox <folder> · holds <repos> · …          exit 0
+        check   ok check recorded — waiting for N other agents   exit 0
+                the last check: review first — ok … the user is
+                      reviewing N staged files; agent applies — as
+                      wait below, once the files are written
         wait    ok finished — edit session … applied N files     exit 0
                 error edit session … applied N of M files; not applied:
                       <file> (<why>), …                          exit 1
@@ -275,6 +304,8 @@ Edit sessions — stage your file edits in the editor instead of writing them:
                 ok waiting — the user set edit session … aside for
                       later: still staged, nothing written       exit 4
                       (carry on; wait again for their decision)
+                ok waiting — edit session … is finalising (check it)
+                      or back to editing (check again later)     exit 4
       On the wire: "write --edit-session=<id>" (or replace), one path, then
       the content after a "---" line — a replace's as {"old","new","all"}
       JSON, which this command builds for you.
@@ -369,6 +400,7 @@ type msgOptions struct {
 	reviewSession string        // --msg-review-session: a live review session's id
 	editSession   string        // --msg-edit-session: an edit session's id
 	agent         string        // --msg-agent: this agent's id in a shared edit session, "" = unnamed
+	expect        string        // --msg-expect: the file version a write or replace was made on
 	replaceAll    bool          // --msg-replace-all: a replace takes every match
 	separator     string        // --msg-separator: the line between a replace's old and new text
 	wait          time.Duration // --msg-wait: how long a session request waits for the user
@@ -468,6 +500,7 @@ func sendMessage(args []string, options msgOptions) int {
 	}
 	if session.kind == extmsg.SessionEdit && command != extmsg.CommandEnd && command != extmsg.CommandWait ||
 		command == extmsg.CommandRead || command == extmsg.CommandStaged {
+		options.note = note // a check's note, read from stdin for "-"
 		return sendEditCommand(command, paths, session, options)
 	}
 	if command == extmsg.CommandReview && len(paths) == 0 {
@@ -631,7 +664,7 @@ func checkLineNote(command string, paths []string, note string, session msgSessi
 	if strings.TrimSpace(note) == "" {
 		return nil
 	}
-	if command == extmsg.CommandReview && session.kind == extmsg.SessionReview {
+	if command == extmsg.CommandReview && session.kind == extmsg.SessionReview || command == extmsg.CommandCheck && session.kind == extmsg.SessionEdit {
 		return nil
 	}
 	if command != extmsg.CommandOpen {

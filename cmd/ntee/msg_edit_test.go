@@ -53,6 +53,12 @@ func TestCheckEditSessionCommands(t *testing.T) {
 		{command: "read", paths: []string{"a.go"}},
 		{command: "staged", paths: []string{"a.go"}},
 		{command: "status"},
+		{command: "sandbox"},
+		{command: "sandbox", paths: []string{"fresh", "../libs/core"}},
+		{command: "sandbox", paths: []string{"drop", "x"}, wantErr: "sandbox drop takes no folders"},
+		{command: "check", paths: []string{"pass"}},
+		{command: "check", paths: []string{"maybe"}, wantErr: "check takes one result"},
+		{command: "check", wantErr: "check takes one result"},
 		{command: "discard"},
 		{command: "end"},
 		{command: "wait"},
@@ -102,6 +108,10 @@ func TestMsgHelpExplainsEditSessions(t *testing.T) {
 		"read_file, edit_replace",
 		"\"ntee --hook\" is a Claude Code PreToolUse hook",
 		"Several agents may share one session: name yourself with --msg-agent",
+		"ntee --msg --msg-edit-session <id> sandbox [fresh|drop] [<folder>…]",
+		"check pass|fail|skip",
+		"--msg-expect <v> on your next write or replace",
+		"Once every agent in the session sent end, it finalises",
 	} {
 		if !strings.Contains(msgHelp, want) {
 			t.Fatalf("msg help is missing %q", want)

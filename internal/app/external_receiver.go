@@ -7,10 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nickooan/ntee-editor/internal/extmsg"
 	"github.com/nickooan/ntee-editor/internal/filetree"
+	"github.com/nickooan/ntee-editor/internal/staging"
 	"github.com/nickooan/ntee-editor/internal/store"
 )
 
@@ -25,6 +27,12 @@ type externalMessageMsg struct {
 	// a replay is never a session.
 	sessionKind extmsg.SessionKind
 	reply       chan<- string
+	// agentEdits is an edit session's end: the settings that decide what
+	// happens to its staged edits, read when the end arrived.
+	agentEdits agentEditSettings
+	// sessionAutoStart is the user's choice, read when the message arrived:
+	// a new session starts without asking.
+	sessionAutoStart bool
 }
 
 // externalReplyWait bounds how long a sender waits for the UI's outcome
@@ -50,7 +58,16 @@ type ExternalReceiver struct {
 	queue         chan externalMessageMsg
 	replyWait     time.Duration // how long a request waits for the UI's outcome
 	sessionWait   time.Duration // how long a session's wait waits for the user
+	agentEdits    *staging.Registry
+
+	sinkMu sync.Mutex
+	sink   func(msg any)
 }
+
+// agentEditEndWait bounds how long an edit session's end waits for the UI:
+// when the editor applies the staged files at once, the reply comes after
+// they are written.
+const agentEditEndWait = 40 * time.Second
 
 // waitReplyMargin is how much earlier than the sender's --wait= budget a
 // wait is answered, so the reply lands before the sender gives up and no
@@ -72,6 +89,9 @@ func NewExternalReceiver(workspaceRoot string, settings store.ExternalSettingsSt
 // dispatcher goroutine keeps them in arrival order; requests that arrived
 // before the sink was set wait in the queue.
 func (r *ExternalReceiver) SetSink(sink func(msg any)) {
+	r.sinkMu.Lock()
+	r.sink = sink
+	r.sinkMu.Unlock()
 	go func() {
 		for message := range r.queue {
 			sink(message)
@@ -92,6 +112,50 @@ func (r *ExternalReceiver) Handle(text string) string {
 	if err != nil {
 		return extmsg.ErrorReply(err.Error())
 	}
+	// The request that makes an edit session the user's — the last check,
+	// or an older session's last end — goes on to the UI.
+	isEditEnd := message.SessionKind == extmsg.SessionEdit && (message.Command == extmsg.CommandEnd || message.Command == extmsg.CommandCheck)
+	isRead := message.Command == extmsg.CommandRead || message.Command == extmsg.CommandStaged
+	if message.SessionKind == extmsg.SessionEdit || isRead {
+		if r.agentEdits == nil {
+			return extmsg.ErrorReply("this editor takes no agent edits — open a folder to use them")
+		}
+		switch message.Command {
+		case extmsg.CommandEnd:
+			record, allEnded, err := r.agentEdits.MarkAgentEnded(message.Session, message.Agent)
+			if err != nil {
+				return extmsg.ErrorReply(err.Error())
+			}
+			if !allEnded {
+				// Other agents still edit: this one's part is done, and the
+				// user is not asked until the last one ends.
+				r.notify(agentEditsChangedMsg{session: message.Session})
+				return extmsg.OkReply(agentEditPartEndedText(record))
+			}
+			if record.Phase() == store.PhaseFinalising {
+				// Every agent's edits are in: one sandbox is built from them
+				// for all, and the user is asked once every agent checked.
+				go r.agentEdits.Sandbox(message.Session, false, nil)
+				r.notify(agentEditsFinalisingMsg{session: message.Session})
+				return extmsg.OkReply(agentEditFinalisingText(message.Session))
+			}
+		case extmsg.CommandCheck:
+			result := map[string]store.AgentEditCheckResult{extmsg.CheckPass: store.CheckPassed, extmsg.CheckFail: store.CheckFailed, extmsg.CheckSkip: store.CheckSkipped}[message.Args[0]]
+			record, allChecked, err := r.agentEdits.RecordCheck(message.Session, message.Agent, result, message.LineNote)
+			if err != nil {
+				return extmsg.ErrorReply(err.Error())
+			}
+			if !allChecked {
+				r.notify(agentEditsChangedMsg{session: message.Session})
+				checking := record.CheckingAgents()
+				return extmsg.OkReply("check recorded — waiting for " + countText(len(checking), "other agent") + "'s check (" + staging.AgentNames(checking) +
+					") before the user reviews edit session " + message.Session + "; to hear the outcome run: ntee --msg --msg-edit-session " + message.Session + " wait")
+			}
+		case extmsg.CommandWait:
+		default:
+			return r.handleAgentEdit(message, settings)
+		}
+	}
 	paths := make([]string, len(message.Paths))
 	for i, raw := range message.Paths {
 		rel, err := r.resolvePath(raw, message.Command == extmsg.CommandOpen)
@@ -102,7 +166,7 @@ func (r *ExternalReceiver) Handle(text string) string {
 	}
 	// A review session's note may go without a line: it then sits at the
 	// file's first change.
-	if message.LineNote != "" && message.SessionKind != extmsg.SessionReview {
+	if message.LineNote != "" && message.SessionKind != extmsg.SessionReview && message.SessionKind != extmsg.SessionEdit {
 		if _, line := splitLineAnchor(paths[0]); line == 0 {
 			return extmsg.ErrorReply("a note needs a line: " + message.Paths[0] + "#L<n>")
 		}
@@ -137,8 +201,12 @@ func (r *ExternalReceiver) Handle(text string) string {
 	}
 
 	reply := make(chan string, 1)
+	queued := externalMessageMsg{record: record, sessionKind: message.SessionKind, reply: reply, sessionAutoStart: settings.SessionAutoStart}
+	if isEditEnd {
+		queued.agentEdits = agentEditSettings{policy: settings.AgentEditPolicy, keep: settings.AgentEditKeep}
+	}
 	select {
-	case r.queue <- externalMessageMsg{record: record, sessionKind: message.SessionKind, reply: reply}:
+	case r.queue <- queued:
 	default:
 		return extmsg.ErrorReply("the editor is busy — try again shortly")
 	}
@@ -147,8 +215,11 @@ func (r *ExternalReceiver) Handle(text string) string {
 	// immediate outcome.
 	isWait := message.Command == extmsg.CommandWait
 	wait := r.replyWait
-	if isWait {
+	switch {
+	case isWait:
 		wait = r.waitFor(message.WaitBudget)
+	case isEditEnd:
+		wait = max(wait, agentEditEndWait)
 	}
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
@@ -189,6 +260,8 @@ func sessionFlag(kind extmsg.SessionKind) string {
 		return "--msg-diff-session"
 	case extmsg.SessionReview:
 		return "--msg-review-session"
+	case extmsg.SessionEdit:
+		return "--msg-edit-session"
 	}
 	return "--msg-session"
 }

@@ -84,7 +84,7 @@ Guided sessions — walk the user through code, one note at a time:
       Keep each note to a few short lines (see "Keep notes short" above).
       Send the steps one after another without waiting: each returns at once
       and the editor queues them in order. The first step asks the user to
-      start the session; from then on they walk the queue at their own pace —
+      start the session (or starts it at once, if they chose that); from then on they walk the queue at their own pace —
       Enter shows the next step instantly, Backspace goes back, Esc ends the
       session — and each step jumps straight to its file, other files and
       nested repos included, without asking. The file is read-only while a
@@ -166,8 +166,8 @@ Review sessions — a live review the user follows while you write code:
       Don't scatter notes on lines close to each other: when notes point at
       the same change or the same function, merge them into one note on its
       first changed line. Add another note only for a separate change.
-      The first send asks the user to start the session; files sent before
-      they answer queue. The view follows each new file until the user moves
+      The first send asks the user to start the session (or starts it at
+      once, if they chose that); files sent before they answer queue. The view follows each new file until the user moves
       to another one; after that new files are marked • for them to visit.
       The user quits with Esc (they confirm first); you are then told to
       stop. Send end when you are done changing files — the review stays
@@ -191,7 +191,132 @@ Review sessions — a live review the user follows while you write code:
   The editor runs one session at a time, of any kind: while one is running
   or waiting to start, a request of another id — or of the same id as
   another kind of session — is refused with an error. While a review
-  session is open, plain open/review requests are refused too.
+  session is open, plain open/review requests are refused too. Edit
+  sessions (below) are separate: they run alongside any of these.
+
+Edit sessions — stage your file edits in the editor instead of writing them:
+
+  ntee --msg --msg-edit-session <id> write <file> < new-content
+  ntee --msg --msg-edit-session <id> replace <file>[#L<line>] <<'EOF'
+  <old text, exactly as in the file>
+  <<< :new
+  <new text>
+  EOF
+  ntee --msg --msg-edit-session <id> --msg-replace-all replace <file> <<'EOF' … EOF
+  ntee --msg --msg-edit-session <id> show <file>
+  ntee --msg [--msg-edit-session <id>] read <file>
+  ntee --msg staged <file>
+  ntee --msg --msg-edit-session <id> [--msg-agent <name>] status
+  ntee --msg --msg-edit-session <id> discard
+  ntee --msg --msg-edit-session <id> sandbox [fresh|drop] [<folder>…]
+  ntee --msg --msg-edit-session <id> [--msg-agent <name>] [--msg-note "<what you ran>"] check pass|fail|skip
+  ntee --msg --msg-edit-session <id> end
+  ntee --msg --msg-edit-session <id> --msg-wait 1h wait
+      Each edit is kept in the editor, not written to the file: the files on
+      disk stay untouched until the session is applied, all at once. Edits
+      to the same file stack: a replace works on the content your earlier
+      edits staged. write sets a file's whole content from stdin (a new file
+      is created when applied). replace swaps old text for new text: stdin
+      is the old text, then a line that is exactly "<<< :new", then the new
+      text — the newlines right around that line, and one final newline,
+      belong to neither text. The old text must match the staged content
+      exactly once (whitespace included); with several matches add
+      surrounding lines, add #L<line> to the path to take the match on (or
+      nearest to) that line, or replace them all with --msg-replace-all. If
+      a file holds a "<<< :new" line itself, pick another separator line
+      with --msg-separator "<line>". The reply names the lines that changed
+      in the staged content ("ok replaced a.go L12–L14 · edit 2").
+      Your own file reads see the disk, not staged edits — yours or another
+      agent's. read prints a file's latest content: your session's staged
+      copy, else the newest edits any session staged, else the disk (stderr
+      says which); any agent may read, with no session. show is read for
+      your session. staged says whether a file has staged edits ("ok staged
+      · edit session <id>" or "ok not staged"). Editing a file another
+      session staged builds on its staged edits; applying yours then writes
+      theirs to that file too, once the user agrees. status lists the
+      staged files.
+      Once every agent in the session sent end, it finalises: newcomers are
+      refused, and its agents check it before the user is asked. sandbox
+      prints a scratch folder built once from all of its edits: a copy
+      of every repo the session's staged files are in, laid out like the
+      project, with the staged contents in place — build, test and grep
+      there, in any language. Run sandbox again after more edits to refresh
+      it; fresh rebuilds it from the disk as it is now; extra folders (a
+      sibling repo the build needs) are copied in too; drop deletes it.
+      Never edit files in the sandbox: they are not staged. It is deleted
+      when the session is applied or discarded. Report what you found with
+      check pass, fail or skip (the note says what you ran); the user is
+      asked to review once every agent reported, and sees the notes. To fix
+      a failure, stage the fix — the session goes back to editing, its
+      sandbox goes, and every agent checks again after the next end.
+      Several agents may edit one file; edits apply in the order they
+      arrive. read prints the file's version on stderr ("· version <v>")
+      and every edit reply ends with the new one: pass it back with
+      --msg-expect <v> on your next write or replace, and an edit made on
+      a stale read is caught — a whole-file write over a file another
+      agent changed since is refused, a replace elsewhere goes through with
+      a note. A note also says when another agent changed the same lines.
+      Several agents may share one session: name yourself with --msg-agent
+      <name> and use the other agent's session id (read and staged print
+      it) for your write, replace and end. The user reviews it once, after
+      every agent in it sent end: an end that leaves others editing prints
+      "ok your part of edit session … is done — waiting for N other
+      agents"; wait then tells you the outcome. The user may stop waiting
+      for an agent that never ends: its later edits are then refused.
+      Send end when every edit is staged. What happens then is the user's
+      setting (Ctrl+T › agent edits):
+        review first (the default)  the user reviews the staged files and
+                                    applies or discards them all; wait
+                                    tells you which.
+        agent applies               end writes every file at once and
+                                    prints what it wrote.
+      A file that changed on disk after you staged it is never overwritten:
+      it is reported as not applied, and so is a file the user has unsaved
+      edits in (when the editor applies without asking). Builds and tests
+      see staged edits only once they are applied: after end, wait for the
+      user (review first), then run your checks.
+      discard drops the session's staged edits yourself. Every session is
+      kept in the editor as one record — each file before and after, and
+      each edit — so the user can trace it back later.
+      What each command prints:
+        write   ok staged <file> (+A −R) · edit N · M files staged
+        replace ok replaced <file> L<a>–L<b> · edit N · M files staged
+                error …               exit 1  the old text is missing,
+                                              matches several times, …
+        show    the content, byte for byte (nothing else)
+        read    the content, byte for byte; on stderr "ntee: disk" or
+                "ntee: staged · edit session <id> · not written"
+        status  one line per staged file
+        end     ok your part of edit session … is done — waiting for
+                      N other agents                             exit 0
+                the last end:   ok edit session … is finalising — build
+                      and test in its sandbox, then check        exit 0
+        sandbox ok sandbox <folder> · holds <repos> · …          exit 0
+        check   ok check recorded — waiting for N other agents   exit 0
+                the last check: review first — ok … the user is
+                      reviewing N staged files; agent applies — as
+                      wait below, once the files are written
+        wait    ok finished — edit session … applied N files     exit 0
+                error edit session … applied N of M files; not applied:
+                      <file> (<why>), …                          exit 1
+                ended edit session … was discarded by the user — nothing
+                      was written                                exit 3
+                ok waiting — the user set edit session … aside for
+                      later: still staged, nothing written       exit 4
+                      (carry on; wait again for their decision)
+                ok waiting — edit session … is finalising (check it)
+                      or back to editing (check again later)     exit 4
+      On the wire: "write --edit-session=<id>" (or replace), one path, then
+      the content after a "---" line — a replace's as {"old","new","all"}
+      JSON, which this command builds for you.
+      As MCP tools: "ntee --mcp" serves these commands on stdio as
+      read_file, edit_replace, edit_write, edit_status, edit_discard,
+      edit_end and edit_wait, with automatic session ids — set it up once
+      with: claude mcp add ntee -- ntee --mcp
+      "ntee --hook" is a Claude Code PreToolUse hook: it stops the built-in
+      Read, Edit, MultiEdit and Write on a file with staged edits and points
+      the agent at read_file / edit_replace (matcher "Read|Edit|MultiEdit|
+      Write", command "ntee --hook"); with no editor running it allows all.
 
 A base revision (a commit hash, tag, branch, HEAD~2, …) is always compared
 with the current files on disk, uncommitted changes included. It travels on
@@ -214,6 +339,7 @@ The --msg-* flags go before the command:
   ntee --msg --msg-session tour1 --msg-note "…" open <file>#L<line>
   ntee --msg --msg-diff-session tour2 --msg-base main --msg-note "…" open <file>#L<line>
   ntee --msg --msg-review-session impl1 --msg-note "…" review <file>
+  ntee --msg --msg-edit-session edit1 replace <file> <<'EOF' … EOF
 
 External messages are off by default: the user turns them on in ntee under
 Ctrl+T › external. The editor keeps the latest messages (10 by default) and
@@ -272,8 +398,17 @@ type msgOptions struct {
 	session       string        // --msg-session: a guided note session's id
 	diffSession   string        // --msg-diff-session: a guided diff session's id
 	reviewSession string        // --msg-review-session: a live review session's id
+	editSession   string        // --msg-edit-session: an edit session's id
+	agent         string        // --msg-agent: this agent's id in a shared edit session, "" = unnamed
+	expect        string        // --msg-expect: the file version a write or replace was made on
+	replaceAll    bool          // --msg-replace-all: a replace takes every match
+	separator     string        // --msg-separator: the line between a replace's old and new text
 	wait          time.Duration // --msg-wait: how long a session request waits for the user
 }
+
+// defaultReplaceSeparator is the line between a replace's old and new text
+// on stdin.
+const defaultReplaceSeparator = "<<< :new"
 
 // msgSession is the session a request belongs to: its id and kind.
 type msgSession struct {
@@ -288,6 +423,7 @@ func sessionFromOptions(options msgOptions) (msgSession, error) {
 		{id: options.session, kind: extmsg.SessionNote},
 		{id: options.diffSession, kind: extmsg.SessionDiff},
 		{id: options.reviewSession, kind: extmsg.SessionReview},
+		{id: options.editSession, kind: extmsg.SessionEdit},
 	} {
 		if candidate.id != "" {
 			picked = append(picked, candidate)
@@ -299,7 +435,7 @@ func sessionFromOptions(options msgOptions) (msgSession, error) {
 	case 1:
 		return picked[0], nil
 	}
-	return msgSession{}, errors.New("use one of --msg-session, --msg-diff-session or --msg-review-session")
+	return msgSession{}, errors.New("use one of --msg-session, --msg-diff-session, --msg-review-session or --msg-edit-session")
 }
 
 // sessionFlag is the CLI flag naming a session of kind.
@@ -309,6 +445,8 @@ func sessionFlag(kind extmsg.SessionKind) string {
 		return "--msg-diff-session"
 	case extmsg.SessionReview:
 		return "--msg-review-session"
+	case extmsg.SessionEdit:
+		return "--msg-edit-session"
 	}
 	return "--msg-session"
 }
@@ -342,6 +480,9 @@ func sendMessage(args []string, options msgOptions) int {
 	if err == nil {
 		err = checkSessionCommand(command, paths, session, options.base)
 	}
+	if err == nil && options.agent != "" && session.kind != extmsg.SessionEdit {
+		err = errors.New("--msg-agent goes with --msg-edit-session <id>")
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -356,6 +497,11 @@ func sendMessage(args []string, options msgOptions) int {
 	if err := checkLineNote(command, paths, note, session); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
+	}
+	if session.kind == extmsg.SessionEdit && command != extmsg.CommandEnd && command != extmsg.CommandWait ||
+		command == extmsg.CommandRead || command == extmsg.CommandStaged {
+		options.note = note // a check's note, read from stdin for "-"
+		return sendEditCommand(command, paths, session, options)
 	}
 	if command == extmsg.CommandReview && len(paths) == 0 {
 		var err error
@@ -384,7 +530,15 @@ func sendMessage(args []string, options msgOptions) int {
 	if command == extmsg.CommandWait {
 		output, code = deliverWait(socketPath, session, options.wait)
 	} else {
-		output, code = deliverRequest(socketPath, buildRequest(command, options.base, session.option(), paths, note), session, 10*time.Second)
+		timeout := 10 * time.Second
+		if session.kind == extmsg.SessionEdit {
+			timeout = editEndTimeout // the editor may be writing every staged file
+		}
+		option := session.option()
+		if options.agent != "" && command == extmsg.CommandEnd {
+			option += " " + extmsg.AgentOption + options.agent
+		}
+		output, code = deliverRequest(socketPath, buildRequest(command, options.base, option, paths, note), session, timeout)
 	}
 	if code == 1 && !extmsg.IsErrorReply(output) {
 		fmt.Fprintln(os.Stderr, output)
@@ -403,6 +557,8 @@ func deliverRequest(socketPath, request string, session msgSession, timeout time
 	switch {
 	case err != nil && session.id != "" && os.IsTimeout(err):
 		return "ok waiting — the user hasn't answered yet; run: ntee --msg " + session.flag() + " " + session.id + " wait", exitSessionWaiting
+	case err != nil && session.id != "" && errors.Is(err, extmsg.ErrNoReply):
+		return "cannot reach the editor: " + err.Error() + "; to wait again run: ntee --msg " + session.flag() + " " + session.id + " wait", 1
 	case err != nil:
 		return "cannot reach the editor: " + err.Error(), 1
 	}
@@ -440,13 +596,25 @@ func exitCodeForReply(reply string) int {
 // one file; note and diff sessions step through opens; a note session's
 // open takes no base revision.
 func checkSessionCommand(command string, paths []string, session msgSession, base string) error {
+	if session.kind == extmsg.SessionEdit {
+		return checkEditCommand(command, paths, session, base)
+	}
 	switch command {
 	case extmsg.CommandEnd, extmsg.CommandWait:
 		if session.id == "" {
-			return fmt.Errorf("%s needs --msg-session, --msg-diff-session or --msg-review-session <id>", command)
+			return fmt.Errorf("%s needs --msg-session, --msg-diff-session, --msg-review-session or --msg-edit-session <id>", command)
 		}
 		if len(paths) > 0 {
 			return fmt.Errorf("%s takes no paths: ntee --msg %s %s %s", command, session.flag(), session.id, command)
+		}
+	case extmsg.CommandWrite, extmsg.CommandReplace, extmsg.CommandShow, extmsg.CommandStatus, extmsg.CommandDiscard:
+		return fmt.Errorf("%s goes with an edit session: ntee --msg --msg-edit-session <id> %s …", command, command)
+	case extmsg.CommandRead, extmsg.CommandStaged:
+		if session.id != "" {
+			return fmt.Errorf("%s takes no %s — only an optional --msg-edit-session <id>", command, session.flag())
+		}
+		if len(paths) != 1 {
+			return fmt.Errorf("%s needs exactly one file, got %d", command, len(paths))
 		}
 	case extmsg.CommandReview:
 		switch {
@@ -496,7 +664,7 @@ func checkLineNote(command string, paths []string, note string, session msgSessi
 	if strings.TrimSpace(note) == "" {
 		return nil
 	}
-	if command == extmsg.CommandReview && session.kind == extmsg.SessionReview {
+	if command == extmsg.CommandReview && session.kind == extmsg.SessionReview || command == extmsg.CommandCheck && session.kind == extmsg.SessionEdit {
 		return nil
 	}
 	if command != extmsg.CommandOpen {

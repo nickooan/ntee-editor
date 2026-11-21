@@ -43,14 +43,15 @@ func startedReviewSession(t *testing.T) (Model, string, *store.MemoryExternalHis
 	t.Helper()
 	m, root, history := reviewSessionWorkspace(t)
 	m, outcome := sendReviewFile(t, m, "r1", "apps/web/main.go#L3", "# Why\nmain now runs")
-	if !strings.Contains(outcome, "file 1 queued") || !m.choice.open() || m.choice.title != "Agent review session · r1" {
+	if !strings.Contains(outcome, "file 1 queued") || !m.choice.open() || m.choice.title != "REVIEW · agent review session r1" ||
+		!strings.Contains(m.choice.body[0].text, "already changed these files on disk") || m.choice.choices[0] != "Start review" {
 		t.Fatalf("the first file asks to start: reply=%q choice=%+v", outcome, m.choice)
 	}
 	m, outcome = sendReviewFile(t, m, "r1", "apps/web/new.go", "")
 	if outcome != "file 2 queued" {
 		t.Fatalf("a file before the start queues: %q", outcome)
 	}
-	m = keySettled(m, keyPress(tea.KeyEnter)) // Start session
+	m = keySettled(m, keyPress(tea.KeyEnter)) // Start review
 	if m.mode != modeReview || m.review.session != "r1" || !m.reviewSessionRunning() || len(m.review.files) != 2 {
 		t.Fatalf("started: mode=%v review session=%q files=%d", m.mode, m.review.session, len(m.review.files))
 	}

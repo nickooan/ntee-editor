@@ -111,10 +111,15 @@ func (m Model) handleSessionMessage(msg externalMessageMsg) (tea.Model, tea.Cmd)
 		m.notice = "rm cancelled"
 	}
 	m.session = externalSession{id: id, kind: msg.sessionKind, steps: []pendingExternal{pending}, base: pending.base}
+	if m.session.kind == extmsg.SessionReview {
+		m.session.reviews = []reviewRequest{pending.reviews[0]}
+	}
+	if msg.sessionAutoStart {
+		return m.autoStartSession(pending, msg.reply, cmds)
+	}
 	m.external.pending = &pending
 	m.choice = m.sessionChoice(pending)
 	if m.session.kind == extmsg.SessionReview {
-		m.session.reviews = []reviewRequest{pending.reviews[0]}
 		sendExternalReply(msg.reply, "file 1 queued — waiting for the user to start the review session")
 		return m, tea.Batch(cmds...)
 	}
@@ -122,32 +127,42 @@ func (m Model) handleSessionMessage(msg externalMessageMsg) (tea.Model, tea.Cmd)
 	return m, tea.Batch(cmds...)
 }
 
-// sessionChoice is the confirm overlay that starts a session: who asks, the
-// first step, and what agreeing allows.
+// autoStartSession starts a new session without asking, as the user chose
+// in Ctrl+T › external: the notice names its kind, like the prompt would.
+func (m Model) autoStartSession(pending pendingExternal, reply chan<- string, cmds []tea.Cmd) (Model, tea.Cmd) {
+	m, start := m.resolveSessionStart(pending, true)
+	banner, _ := sessionKindBanner(pending.sessionKind, cmp.Or(pending.base, store.ExternalDefaultBase))
+	if pending.sessionKind == extmsg.SessionReview {
+		m.notice = "▶ " + banner + " " + pending.session + " started — Esc quits"
+		sendExternalReply(reply, "file 1 queued — the review session started at once (the user lets sessions start without asking)")
+	} else {
+		m.notice = "▶ " + banner + " " + pending.session + " started — Enter next · Esc ends"
+		sendExternalReply(reply, "step 1 queued — the session started at once (the user lets sessions start without asking)")
+	}
+	return m, tea.Batch(append(cmds, start)...)
+}
+
+// sessionChoice is the confirm overlay that starts a session: what kind it
+// is and what that means for the files, who asks, the first step, and what
+// agreeing allows.
 func (m Model) sessionChoice(pending pendingExternal) choiceOverlay {
-	choice := choiceOverlay{kind: choiceExternalRequest, title: "Agent " + externalSession{kind: pending.sessionKind}.kindName() + " · " + pending.session}
+	base := cmp.Or(pending.base, store.ExternalDefaultBase)
+	banner, meaning := sessionKindBanner(pending.sessionKind, base)
+	choice := choiceOverlay{kind: choiceExternalRequest, title: banner + " " + pending.session}
+	choice.body = append(choice.body, overlayLine{text: meaning, style: overlayLineHighlight})
 	firstLine, _, _ := strings.Cut(strings.TrimSpace(pending.lineNote), "\n")
 	if firstLine != "" {
 		choice.body = append(choice.body, overlayLine{text: truncateRunes(strings.TrimLeft(strings.TrimSpace(firstLine), "# "), 56), style: overlayLineStrong})
 	}
-	base := cmp.Or(pending.base, store.ExternalDefaultBase)
-	switch pending.sessionKind {
-	case extmsg.SessionReview:
+	if pending.sessionKind == extmsg.SessionReview {
 		choice.body = append(choice.body,
 			overlayLine{text: "first file: " + pending.record.Paths[0]},
-			overlayLine{text: "a live review: files keep arriving as the agent works, diffed against " + base, style: overlayLineHighlight},
+			overlayLine{text: "files keep arriving as the agent works, diffed against " + base, style: overlayLineDim},
 			overlayLine{text: "Esc in the review asks first, then tells the agent to stop", style: overlayLineDim},
 		)
-	case extmsg.SessionDiff:
+	} else {
 		choice.body = append(choice.body,
 			overlayLine{text: "first step: " + pending.record.Paths[0]},
-			overlayLine{text: "each step shows the diff, first against " + base, style: overlayLineHighlight},
-		)
-	default:
-		choice.body = append(choice.body, overlayLine{text: "first step: " + pending.record.Paths[0]})
-	}
-	if pending.sessionKind != extmsg.SessionReview {
-		choice.body = append(choice.body,
 			overlayLine{text: "steps jump files and repos without asking", style: overlayLineHighlight},
 			overlayLine{text: "on each step: Enter next · Backspace back · Esc end", style: overlayLineDim},
 		)
@@ -155,8 +170,26 @@ func (m Model) sessionChoice(pending pendingExternal) choiceOverlay {
 	if m.openFile != nil && m.edit.dirty {
 		choice.body = append(choice.body, overlayLine{text: "unsaved edits in " + m.openRel + " are kept as a draft", style: overlayLineDim})
 	}
-	choice.choices = []string{"Start session", "Decline"}
+	choice.choices = []string{"Start tour", "Decline"}
+	if pending.sessionKind == extmsg.SessionReview {
+		choice.choices = []string{"Start review", "Decline"}
+	}
 	return choice
+}
+
+// sessionKindBanner is how an agent's session announces itself — in its
+// start prompt and in the notice when it starts without asking: its kind,
+// and what it means for the user's files.
+func sessionKindBanner(kind extmsg.SessionKind, base string) (banner, meaning string) {
+	switch kind {
+	case extmsg.SessionReview:
+		return "REVIEW · agent review session", "the agent already changed these files on disk — you review them, nothing to apply"
+	case extmsg.SessionDiff:
+		return "TOUR · agent diff session", "the agent walks you through diffs against " + base + " — nothing changes on disk"
+	case extmsg.SessionEdit:
+		return "EDITS · agent edit session", "the agent staged edits — NOT written yet; you apply or discard them"
+	}
+	return "TOUR · agent note session", "the agent walks you through files with notes — nothing changes on disk"
 }
 
 // resolveSessionStart applies the user's answer to a session's confirm.

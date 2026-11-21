@@ -194,7 +194,20 @@ type AgentEditLogStore interface {
 	LoadFinishedAgentEdits() ([]AgentEditSession, error)
 	// TrimAgentEdits deletes the oldest finished sessions beyond keep.
 	TrimAgentEdits(keep int) error
+	// Tidy reclaims the space dead records take, when that is worth it.
+	Tidy() (TidyResult, error)
 }
+
+// TidyResult is what a Tidy did: whether the main log was compacted and
+// the blobs relieved, and the store's size before and after.
+type TidyResult struct {
+	Compacted, Relieved bool
+	Before, After       int64
+}
+
+// tidyMinBytes is the size below which a log is never rewritten: too small
+// to be worth it. A variable, so tests can lower it.
+var tidyMinBytes int64 = 1 << 20
 
 const (
 	agentEditPendingPrefix = "agentedit:pending:"
@@ -252,7 +265,13 @@ func (log *AgentEditLog) FinishAgentEdit(session AgentEditSession, keep int) err
 		if err := db.Delete(agentEditPendingKey(session)); err != nil {
 			return err
 		}
-		return trimAgentEditKeys(db, keep)
+		if err := trimAgentEditKeys(db, keep); err != nil {
+			return err
+		}
+		// Housekeeping: a failed tidy leaves the dead data for the next one,
+		// it does not fail the finish.
+		_, _ = tidyAgentEditDB(db)
+		return nil
 	})
 }
 
@@ -291,7 +310,58 @@ func (log *AgentEditLog) load(prefix string) ([]AgentEditSession, error) {
 }
 
 func (log *AgentEditLog) TrimAgentEdits(keep int) error {
-	return log.withDB(func(db *nteedb.DB) error { return trimAgentEditKeys(db, keep) })
+	return log.withDB(func(db *nteedb.DB) error {
+		if err := trimAgentEditKeys(db, keep); err != nil {
+			return err
+		}
+		_, _ = tidyAgentEditDB(db)
+		return nil
+	})
+}
+
+// Tidy reclaims the edit log's dead space when that is worth it — every
+// staged edit rewrites its session's whole record, and ntee-db only
+// appends. Run at editor start, in the background.
+func (log *AgentEditLog) Tidy() (TidyResult, error) {
+	var result TidyResult
+	err := log.withDB(func(db *nteedb.DB) error {
+		var err error
+		result, err = tidyAgentEditDB(db)
+		return err
+	})
+	return result, err
+}
+
+// tidyAgentEditDB compacts the main log once it is past tidyMinBytes and
+// less than half live, and relieves the blobs once they are past it and at
+// least half orphaned (which compacts the main log in the same pass). The
+// checks read sizes ntee-db keeps in memory, plus one pass over the live
+// records' lines for the blobs; a small or healthy log is left alone.
+func tidyAgentEditDB(db *nteedb.DB) (TidyResult, error) {
+	stats := db.Stats()
+	result := TidyResult{Before: stats.MainBytes + stats.BlobBytes}
+	result.After = result.Before
+	if stats.BlobBytes >= tidyMinBytes {
+		usage, err := db.BlobUsage()
+		if err != nil {
+			return result, err
+		}
+		if usage.OrphanedBytes*2 >= usage.TotalBytes {
+			if err := db.BlobsRelieve(); err != nil {
+				return result, err
+			}
+			result.Relieved = true
+		}
+	}
+	if !result.Relieved && stats.MainBytes >= tidyMinBytes && db.LiveBytes()*2 < stats.MainBytes {
+		if err := db.Compact(); err != nil {
+			return result, err
+		}
+		result.Compacted = true
+	}
+	after := db.Stats()
+	result.After = after.MainBytes + after.BlobBytes
+	return result, nil
 }
 
 func trimAgentEditKeys(db *nteedb.DB, keep int) error {
@@ -354,6 +424,9 @@ func (m *MemoryAgentEditLog) LoadFinishedAgentEdits() ([]AgentEditSession, error
 	reverseAgentEdits(sessions)
 	return sessions, nil
 }
+
+// Tidy has nothing to reclaim in memory.
+func (m *MemoryAgentEditLog) Tidy() (TidyResult, error) { return TidyResult{}, nil }
 
 func (m *MemoryAgentEditLog) TrimAgentEdits(keep int) error {
 	m.mu.Lock()

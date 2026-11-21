@@ -80,7 +80,7 @@ The persistence behind agent edit sessions (see [staging.md](staging.md)).
   - Finishing moves it to `agentedit:done:<end nanos>:<id>` (`FinishAgentEdit`), then trims the finished keys to the newest `keep`.
   - Keys sort by time, so trimming is a key-order cut over the finished prefix only, and a pending session is never evicted.
   - `TrimAgentEdits` trims at once when the user lowers the keep setting.
-  - Rewrites leave dead space that the Ctrl+T `db relieve` reclaims.
+  - Every rewrite leaves the previous copy behind (ntee-db only appends), and a record of 64 KiB or more lands in `blobs.dat`, which only a relieve reclaims. `Tidy` (`tidyAgentEditDB`) reclaims it when that is worth it: it compacts the main log once it is past `tidyMinBytes` (1 MiB) and under half live, and relieves the blobs once they are past it and at least half orphaned. The check reads sizes ntee-db keeps in memory (plus one pass over the live lines for the blobs), so a small or healthy log is never rewritten. It runs at editor start in the background (cmd/ntee), after each finish, and after `TrimAgentEdits`; the memory log's `Tidy` does nothing.
 
 *Plus: `AgentEditSession.Finished`, `MemoryAgentEditLog` (tests and the fallback), `ClampAgentEditKeep` (external.go), the key helpers and `reverseAgentEdits`.*
 

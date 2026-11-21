@@ -178,6 +178,7 @@ func runEditor(absRoot, startFile string, startLine int) int {
 		if err := agentEdits.Load(); err != nil {
 			warnings = append(warnings, "agent edits: "+firstLine(err.Error()))
 		}
+		go agentEditLog.Tidy() // reclaim the edit log's dead records, never delaying the start
 		if pending := len(agentEdits.Pending()); pending > 0 {
 			warnings = append(warnings, fmt.Sprintf("%d agent edit sessions staged — Ctrl+T › agent edits", pending))
 		}

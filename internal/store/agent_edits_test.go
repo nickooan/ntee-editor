@@ -1,8 +1,11 @@
 package store
 
 import (
+	"strings"
 	"testing"
 	"time"
+
+	nteedb "github.com/nickooan/ntee-db/nteedb-core"
 )
 
 func agentEditSession(id string, started time.Time) AgentEditSession {
@@ -95,5 +98,137 @@ func TestAgentEditAgentsRoundTripAndOlderRecordsGetOne(t *testing.T) {
 	}
 	if editing := pending[1].EditingAgents(); len(editing) != 1 || editing[0] != "agent-b" {
 		t.Fatalf("editing = %v", editing)
+	}
+}
+
+// bulkySession is a pending session whose one file holds size bytes.
+func bulkySession(id string, started time.Time, size int) AgentEditSession {
+	session := agentEditSession(id, started)
+	session.Files[0].Content = strings.Repeat("x", size)
+	return session
+}
+
+func logSizes(t *testing.T, log *AgentEditLog) (main, blobs int64) {
+	t.Helper()
+	if err := log.withDB(func(db *nteedb.DB) error {
+		stats := db.Stats()
+		main, blobs = stats.MainBytes, stats.BlobBytes
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return main, blobs
+}
+
+func lowerTidyFloor(t *testing.T, floor int64) {
+	t.Helper()
+	previous := tidyMinBytes
+	tidyMinBytes = floor
+	t.Cleanup(func() { tidyMinBytes = previous })
+}
+
+func TestFinishingCompactsALogThatIsMostlyDead(t *testing.T) {
+	lowerTidyFloor(t, 64<<10)
+	log := &AgentEditLog{dir: t.TempDir()}
+	started := time.Unix(1_800_000_000, 0)
+	// Twenty rewrites of one pending session, the way staged edits save it.
+	for edit := range 20 {
+		session := bulkySession("s1", started, 8<<10)
+		session.Files[0].Content += strings.Repeat("y", edit)
+		if err := log.SavePendingAgentEdit(session); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, _ := logSizes(t, log)
+	finished := bulkySession("s1", started, 8<<10)
+	finished.Status, finished.EndedAt = AgentEditApplied, started.Add(time.Minute)
+	if err := log.FinishAgentEdit(finished, 20); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := logSizes(t, log)
+	if after*4 > before {
+		t.Fatalf("the finish compacted the log: %d → %d bytes", before, after)
+	}
+	if sessions, err := log.LoadFinishedAgentEdits(); err != nil || len(sessions) != 1 || len(sessions[0].Files[0].Content) != 8<<10 {
+		t.Fatalf("the live record survives: %v %d", err, len(sessions))
+	}
+}
+
+func TestTidyLeavesASmallOrHealthyLogAlone(t *testing.T) {
+	log := &AgentEditLog{dir: t.TempDir()}
+	started := time.Unix(1_800_000_000, 0)
+	for edit := range 5 {
+		if err := log.SavePendingAgentEdit(bulkySession("s1", started, 1<<10+edit)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if result, err := log.Tidy(); err != nil || result.Compacted || result.Relieved || result.After != result.Before {
+		t.Fatalf("under the floor nothing is rewritten: %+v %v", result, err)
+	}
+	lowerTidyFloor(t, 1)
+	healthy := &AgentEditLog{dir: t.TempDir()}
+	for index := range 5 {
+		if err := healthy.SavePendingAgentEdit(bulkySession("s"+string(rune('a'+index)), started.Add(time.Duration(index)*time.Second), 1<<10)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if result, err := healthy.Tidy(); err != nil || result.Compacted || result.Relieved {
+		t.Fatalf("an all-live log is left alone: %+v %v", result, err)
+	}
+}
+
+func TestTidyRelievesOrphanedBlobs(t *testing.T) {
+	lowerTidyFloor(t, 64<<10)
+	log := &AgentEditLog{dir: t.TempDir()}
+	started := time.Unix(1_800_000_000, 0)
+	// Records past ntee-db's 64 KiB blob threshold land in blobs.dat, which
+	// only a relieve reclaims.
+	for edit := range 6 {
+		session := bulkySession("big", started, 80<<10)
+		session.Files[0].Content += strings.Repeat("y", edit)
+		if err := log.SavePendingAgentEdit(session); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, blobsBefore := logSizes(t, log)
+	result, err := log.Tidy()
+	if err != nil || !result.Relieved || result.After >= result.Before {
+		t.Fatalf("orphaned blobs are relieved: %+v %v", result, err)
+	}
+	if _, blobsAfter := logSizes(t, log); blobsAfter*3 > blobsBefore {
+		t.Fatalf("blobs.dat shrinks: %d → %d", blobsBefore, blobsAfter)
+	}
+	if sessions, err := log.LoadPendingAgentEdits(); err != nil || len(sessions) != 1 || len(sessions[0].Files[0].Content) != 80<<10+5 {
+		t.Fatalf("the live record survives: %v %d", err, len(sessions))
+	}
+}
+
+func TestLoweringTheKeepLimitTidiesToo(t *testing.T) {
+	lowerTidyFloor(t, 32<<10)
+	log := &AgentEditLog{dir: t.TempDir()}
+	started := time.Unix(1_800_000_000, 0)
+	for index := range 10 {
+		session := bulkySession("s"+string(rune('a'+index)), started.Add(time.Duration(index)*time.Minute), 8<<10)
+		session.Status, session.EndedAt = AgentEditApplied, started.Add(time.Hour+time.Duration(index)*time.Minute)
+		if err := log.FinishAgentEdit(session, 20); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, _ := logSizes(t, log)
+	if err := log.TrimAgentEdits(1); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := logSizes(t, log)
+	if after*3 > before {
+		t.Fatalf("trimming to 1 compacts the log: %d → %d", before, after)
+	}
+	if sessions, _ := log.LoadFinishedAgentEdits(); len(sessions) != 1 {
+		t.Fatalf("one finished session is kept: %d", len(sessions))
+	}
+}
+
+func TestTheMemoryLogHasNothingToTidy(t *testing.T) {
+	if result, err := NewMemoryAgentEditLog().Tidy(); err != nil || result != (TidyResult{}) {
+		t.Fatalf("%+v %v", result, err)
 	}
 }

@@ -119,11 +119,7 @@ func (r *Registry) Sandbox(session string, fresh bool, include []string) (Sandbo
 		if file.Result != "" {
 			continue // already written with a stacked session: the copy has it
 		}
-		target := filepath.Join(box, filepath.FromSlash(file.Rel))
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-			return SandboxResult{}, fmt.Errorf("cannot place %s in the sandbox: %w", file.Rel, err)
-		}
-		if err := os.WriteFile(target, []byte(file.Content), 0o644); err != nil {
+		if err := placeFile(filepath.Join(box, filepath.FromSlash(file.Rel)), file.Content); err != nil {
 			return SandboxResult{}, fmt.Errorf("cannot place %s in the sandbox: %w", file.Rel, err)
 		}
 		placed++
@@ -134,6 +130,41 @@ func (r *Registry) Sandbox(session string, fresh bool, include []string) (Sandbo
 	}
 	slices.Sort(all)
 	return SandboxResult{Path: box, Units: all, Placed: placed, BuiltAt: state.builtAt}, nil
+}
+
+// placeFile puts a staged file's content in the box. Agents may be building
+// or testing there while another refreshes it, so a file already holding
+// the content is left alone (its mtime too, so builds see nothing to redo),
+// and a changed one is swapped in whole: written beside it, then renamed.
+func placeFile(target, content string) error {
+	if existing, err := os.ReadFile(target); err == nil && string(existing) == content {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(target), "."+filepath.Base(target)+".placing-*")
+	if err != nil {
+		return err
+	}
+	if _, err := temporary.WriteString(content); err != nil {
+		temporary.Close()
+		os.Remove(temporary.Name())
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		os.Remove(temporary.Name())
+		return err
+	}
+	if err := os.Chmod(temporary.Name(), 0o644); err != nil {
+		os.Remove(temporary.Name())
+		return err
+	}
+	if err := os.Rename(temporary.Name(), target); err != nil {
+		os.Remove(temporary.Name())
+		return err
+	}
+	return nil
 }
 
 // DropSandbox deletes the session's sandbox, if it has one.

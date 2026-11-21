@@ -254,3 +254,62 @@ func TestSessionsInRepoNamesTheOpenSessionsToJoin(t *testing.T) {
 		t.Fatal("a session every agent ended takes no more edits")
 	}
 }
+
+func TestARefreshNeverShowsAHalfWrittenFile(t *testing.T) {
+	registry, _, _, _ := sandboxWorkspace(t)
+	staged := strings.Repeat("package a // staged\n", 4000)
+	_, err := registry.Write("S", "", "repoA/a.go", staged)
+	must(t, err)
+	endAll(t, registry, "S", "")
+	result, err := registry.Sandbox("S", false, nil)
+	must(t, err)
+	target := filepath.Join(result.Path, "repoA", "a.go")
+	info, err := os.Stat(target)
+	must(t, err)
+
+	// Another agent's refresh while this one reads the box.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 50 {
+			if _, err := registry.Sandbox("S", false, nil); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}()
+	for {
+		select {
+		case <-done:
+			after, err := os.Stat(target)
+			must(t, err)
+			if !after.ModTime().Equal(info.ModTime()) {
+				t.Fatal("a file already in place is not rewritten")
+			}
+			return
+		default:
+			if content := readFile(t, result.Path, "repoA/a.go"); content != staged {
+				t.Fatalf("a reader saw a partial file: %d of %d bytes", len(content), len(staged))
+			}
+		}
+	}
+}
+
+func TestAChangedStagedFileIsSwappedInWhole(t *testing.T) {
+	registry, _, _, _ := sandboxWorkspace(t)
+	_, err := registry.Write("S", "", "repoA/a.go", "one\n")
+	must(t, err)
+	endAll(t, registry, "S", "")
+	result, err := registry.Sandbox("S", false, nil)
+	must(t, err)
+	must(t, placeFile(filepath.Join(result.Path, "repoA", "a.go"), "two\n"))
+	if readFile(t, result.Path, "repoA/a.go") != "two\n" {
+		t.Fatal("the new content is in place")
+	}
+	entries, _ := os.ReadDir(filepath.Join(result.Path, "repoA"))
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), ".placing-") {
+			t.Fatalf("no temporary file is left behind: %s", entry.Name())
+		}
+	}
+}

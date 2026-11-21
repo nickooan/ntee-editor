@@ -197,9 +197,6 @@ func (m Model) renderDiffStatus() string {
 		base = "HEAD"
 	}
 	line := promptStyle.Render("@diff") + statusTextStyle.Render(" "+name+"   base "+base)
-	if m.session.id != "" {
-		line += statusTextStyle.Render("   ") + sessionBadgeStyle.Render(m.sessionBadge())
-	}
 	if m.diffDocument.newFile {
 		line += statusTextStyle.Render("   ") + noticeStyle.Render("new file")
 	}

@@ -52,6 +52,10 @@ type reviewFile struct {
 	// contentHash identifies the loaded content (0 = none): notes shown with
 	// another one are earlier notes.
 	contentHash uint64
+	// staged is an agent edit session's file (agent_edit_review.go): it is
+	// diffed from its content before the agent's edits to the staged
+	// content, with no git involved. nil for a git review.
+	staged *stagedReviewSource
 }
 
 // reviewRequest is one file asked for review: its workspace path, the line
@@ -98,6 +102,12 @@ type reviewState struct {
 	follow     bool
 	newestPath string
 	unseen     map[string]bool
+
+	// An agent edit session's review (agent_edit_review.go): its id ("" =
+	// none), and whether it is a finished session's read-only trace rather
+	// than staged edits waiting to be applied or discarded.
+	agentEdits      string
+	agentEditsTrace bool
 }
 
 const (
@@ -417,6 +427,10 @@ func (m Model) reviewLoadCmd(start, end, nextStart int) tea.Cmd {
 		revisions := resolveReviewRevisions(base, pending)
 		forEachParallel(len(pending), func(i int) {
 			withReviewLoadSlot(func() {
+				if pending[i].staged != nil {
+					pending[i] = loadStagedReviewFile(pending[i], highlightLimit, tabWidths[i])
+					return
+				}
 				pending[i] = loadReviewFile(workspaceRoot, revisions[pending[i].repoRoot], pending[i], highlightLimit, tabWidths[i])
 			})
 		})
@@ -492,8 +506,15 @@ func loadReviewFile(workspaceRoot string, revision diffRevision, file reviewFile
 			return file
 		}
 	}
-	if exists && (highlightLimit <= 0 || len(data) <= highlightLimit) {
-		document.highlights = syntax.HighlightLines(path.Base(file.workspaceRel), string(data))
+	return finishReviewDocument(file, document, string(data), exists, highlightLimit, tabWidth)
+}
+
+// finishReviewDocument completes a loaded file from its diff: highlights
+// (when content exists and is small enough), status, tab-expanded rows, and
+// the search corpus.
+func finishReviewDocument(file reviewFile, document diffDocument, content string, exists bool, highlightLimit, tabWidth int) reviewFile {
+	if exists && (highlightLimit <= 0 || len(content) <= highlightLimit) {
+		document.highlights = syntax.HighlightLines(path.Base(file.workspaceRel), content)
 	}
 	switch {
 	case document.deletedFile:

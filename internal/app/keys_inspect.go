@@ -18,7 +18,7 @@ import (
 
 // inspectMenuItems are the left-pane rows of the inspection dashboard, in
 // display order. inspectMenu indexes into this list.
-var inspectMenuItems = []string{"ntee-db", "lsp", "system", "op-commands", "keybinds", "code style", "external"}
+var inspectMenuItems = []string{"ntee-db", "lsp", "system", "op-commands", "keybinds", "code style", "external", "agent edits"}
 
 const (
 	inspectMenuDB = iota
@@ -28,6 +28,7 @@ const (
 	inspectMenuKeybinds
 	inspectMenuCodeStyle
 	inspectMenuExternal
+	inspectMenuAgentEdits
 )
 
 // syntaxStyles is the curated set of chroma styles offered by `syscolor`.
@@ -83,9 +84,11 @@ func (m Model) enterInspect() (tea.Model, tea.Cmd) {
 	m.keybindPicker = keybindPickerState{}
 	m.codeStylePicker = codeStylePickerState{}
 	m.externalPicker = externalPickerState{}
+	m.agentEditsPicker = agentEditsPickerState{}
+	m = m.refreshAgentEditsPending()
 	m, loadOpCommands := m.loadOpCommandsCmd()
 	m, loadHistory := m.loadExternalHistoryCmd()
-	return m, tea.Batch(m.fetchDBInfoCmd(), loadOpCommands, m.loadExternalSettingsCmd(), loadHistory)
+	return m, tea.Batch(m.fetchDBInfoCmd(), loadOpCommands, m.loadExternalSettingsCmd(), loadHistory, m.loadAgentEditsFinishedCmd())
 }
 
 // handleInspectKey drives the inspection dashboard: Shift+↑/↓ move the left
@@ -111,6 +114,9 @@ func (m Model) handleInspectKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.externalPicker.focused {
 		return m.handleExternalPickerKey(msg)
+	}
+	if m.agentEditsPicker.focused {
+		return m.handleAgentEditsPickerKey(msg)
 	}
 	switch msg.String() {
 	case "esc":
@@ -150,6 +156,11 @@ func (m Model) handleInspectKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.externalPicker.focused = true
 			break
 		}
+		if m.inspectMenu == inspectMenuAgentEdits && atInputEnd {
+			m.agentEditsPicker.focused = true
+			m.agentEditsPicker.index = input.Clamp(m.agentEditsPicker.index, 0, m.agentEditsPickerRowCount()-1)
+			break
+		}
 		m.inspectCursor = input.MoveCursor(m.inspectInput, m.inspectCursor, 1)
 	case "backspace":
 		m.inspectInput, m.inspectCursor, _ = input.RemoveBeforeCursor(m.inspectInput, m.inspectCursor)
@@ -166,7 +177,7 @@ func (m Model) handleInspectKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // renderInspectInput draws the @inspection bar input; it drops its cursor while
 // the op-commands table has focus, so only the table shows where typing goes.
 func (m Model) renderInspectInput() string {
-	if m.opTable.focused || m.stylePicker.focused || m.lspPicker.focused || m.keybindPicker.focused || m.codeStylePicker.focused || m.externalPicker.focused {
+	if m.opTable.focused || m.stylePicker.focused || m.lspPicker.focused || m.keybindPicker.focused || m.codeStylePicker.focused || m.externalPicker.focused || m.agentEditsPicker.focused {
 		return execTextStyle.Render(m.inspectInput)
 	}
 	return renderInputLineStyled(m.inspectInput, m.inspectCursor, execTextStyle)
@@ -218,6 +229,12 @@ func (m Model) inspectHint() string {
 		return "↑/↓ setting · Enter change · ← back"
 	case m.inspectMenu == inspectMenuExternal:
 		return "→ change settings · ext on|off · ext limit <n> · ext history · Shift+↑/↓ pane · Esc back"
+	case m.agentEditsPicker.editingKeep:
+		return "type a number · Enter save · Esc cancel"
+	case m.agentEditsPicker.focused:
+		return "↑/↓ row · Enter change / open · a apply · x discard · ← back"
+	case m.inspectMenu == inspectMenuAgentEdits:
+		return "→ settings and sessions · edits review|apply · edits keep <n> · edits discard <session> · Shift+↑/↓ pane · Esc back"
 	}
 	return "db compact|relieve · lsp start|stop|enable|disable <lang|all> · syscolor <style> · keybind <action> <key> · tab <size> · Shift+↑/↓ pane · Esc back"
 }
@@ -243,6 +260,8 @@ func (m Model) runInspectCommand(cmd string) (tea.Model, tea.Cmd) {
 		return m.inspectTabCommand(rest)
 	case "ext":
 		return m.inspectExternalCommand(rest)
+	case "edits":
+		return m.inspectAgentEditsCommand(rest)
 	default:
 		m.errText = "unknown command: " + ns
 		return m, nil

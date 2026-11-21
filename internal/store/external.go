@@ -18,23 +18,60 @@ import (
 type ExternalSettings struct {
 	Enabled      bool `json:"enabled"`
 	HistoryLimit int  `json:"historyLimit"`
+	// AgentEditPolicy is what happens when an agent ends an edit session:
+	// AgentEditPolicyReview opens the staged edits for the user to apply or
+	// discard; AgentEditPolicyApply writes them all at once.
+	AgentEditPolicy string `json:"agentEditPolicy"`
+	// AgentEditKeep is how many finished agent edit sessions each project
+	// keeps for tracing back.
+	AgentEditKeep int `json:"agentEditKeep"`
+	// SessionAutoStart starts an agent's session (review, note or diff
+	// session, or staged edits to review) at once with a notice, instead of
+	// asking the user first.
+	SessionAutoStart bool `json:"sessionAutoStart"`
 }
 
 const (
 	DefaultExternalHistoryLimit = 10
 	MinExternalHistoryLimit     = 1
 	MaxExternalHistoryLimit     = 100
+
+	AgentEditPolicyReview = "review"
+	AgentEditPolicyApply  = "apply"
+
+	DefaultAgentEditKeep = 20
+	MinAgentEditKeep     = 1
+	MaxAgentEditKeep     = 100
 )
 
-// DefaultExternalSettings: off until the user turns it on.
-var DefaultExternalSettings = ExternalSettings{Enabled: false, HistoryLimit: DefaultExternalHistoryLimit}
+// DefaultExternalSettings: off until the user turns it on; agent edits wait
+// for the user's review; an agent's session asks before it starts.
+var DefaultExternalSettings = ExternalSettings{
+	Enabled:          false,
+	HistoryLimit:     DefaultExternalHistoryLimit,
+	AgentEditPolicy:  AgentEditPolicyReview,
+	AgentEditKeep:    DefaultAgentEditKeep,
+	SessionAutoStart: false,
+}
 
 func (settings ExternalSettings) withDefaults() ExternalSettings {
 	if settings.HistoryLimit == 0 {
 		settings.HistoryLimit = DefaultExternalHistoryLimit
 	}
 	settings.HistoryLimit = ClampExternalHistoryLimit(settings.HistoryLimit)
+	if settings.AgentEditPolicy != AgentEditPolicyApply {
+		settings.AgentEditPolicy = AgentEditPolicyReview
+	}
+	if settings.AgentEditKeep == 0 {
+		settings.AgentEditKeep = DefaultAgentEditKeep
+	}
+	settings.AgentEditKeep = ClampAgentEditKeep(settings.AgentEditKeep)
 	return settings
+}
+
+// ClampAgentEditKeep bounds the finished agent edit sessions kept.
+func ClampAgentEditKeep(keep int) int {
+	return min(max(keep, MinAgentEditKeep), MaxAgentEditKeep)
 }
 
 // ClampExternalHistoryLimit bounds a history limit to the allowed range.

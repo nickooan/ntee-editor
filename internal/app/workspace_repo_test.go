@@ -1,6 +1,8 @@
 package app
 
 import (
+	"github.com/nickooan/ntee-editor/internal/extmsg"
+
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -461,5 +463,25 @@ func TestHeaderFitsWidthAndKeepsRepo(t *testing.T) {
 	m.width = 30
 	if line := headerLine(m); !strings.Contains(line, "working repo: libs/core") {
 		t.Fatalf("repo label lost in a narrow header: %q", line)
+	}
+}
+
+func TestHeaderNamesTheAgentSessionNextToTheRepo(t *testing.T) {
+	m, _ := workspaceModel(t, nil)
+	m = enterRepo(t, m, "core")
+	m.width = 240
+	m.session = externalSession{id: "walk1", kind: extmsg.SessionNote, started: true, steps: []pendingExternal{{}, {}}}
+	line := headerLine(m)
+	repo, badge := strings.Index(line, "working repo: libs/core"), strings.Index(line, "● session walk1 · step 1/2")
+	if repo < 0 || badge < repo {
+		t.Fatalf("the session badge follows the working repo: %q", line)
+	}
+	if status := ansi.Strip(m.renderStatusLine()); strings.Contains(status, "● session walk1") {
+		t.Fatalf("the status line no longer carries the badge: %q", status)
+	}
+
+	m.width = 30
+	if line := headerLine(m); len([]rune(line)) != 30 || !strings.HasPrefix(line, "working repo: libs/core") {
+		t.Fatalf("a narrow header drops the title first and still fills the row: %q", line)
 	}
 }

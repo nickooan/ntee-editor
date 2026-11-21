@@ -208,6 +208,9 @@ func (m Model) withReviewNote(file reviewFile, body string, width, height int) s
 }
 
 func (m Model) reviewBaseLabel() string {
+	if m.review.agentEdits != "" {
+		return "the file before the agent's edits"
+	}
 	if m.review.base == "" {
 		return "HEAD"
 	}
@@ -229,9 +232,22 @@ func (m Model) renderReviewStatus() string {
 	if m.review.search.active {
 		return m.renderDocumentSearchStatus("review", m.review.search, len(m.reviewMatchesFor(m.review.search.query)))
 	}
-	line := promptStyle.Render("@review")
-	if m.review.session != "" {
-		line += statusTextStyle.Render("   ") + sessionBadgeStyle.Render(m.reviewSessionBadge())
+	// Notices and errors come right after the prompt: a review's status line
+	// is long, and its end is what a narrow window cuts.
+	line := withNotice(m, promptStyle.Render("@review"))
+	// The session itself is named in the header (headerSessionBadge). A
+	// staged review's decision leads here: it is what the user is here for,
+	// and the end of a long status line is the first thing a narrow window
+	// cuts.
+	if m.review.agentEdits != "" && !m.review.agentEditsTrace {
+		hint := agentEditDecisionHint
+		switch {
+		case m.agentEdits.stillEditing[m.review.agentEdits]:
+			hint = agentEditStillEditingHint
+		case m.agentEdits.checking[m.review.agentEdits]:
+			hint = agentEditCheckingHint
+		}
+		line += statusTextStyle.Render("   ") + agentEditDecisionStyle.Render(hint)
 	}
 	if !m.review.preparing && len(m.review.files) > 0 {
 		loaded := 0
@@ -240,10 +256,13 @@ func (m Model) renderReviewStatus() string {
 				loaded++
 			}
 		}
-		if m.review.session != "" {
+		if m.review.session != "" || m.review.agentEdits != "" {
 			line += statusTextStyle.Render("  ")
 		}
-		line += statusTextStyle.Render(fmt.Sprintf(" file %d/%d   base %s", m.review.selection.index+1, len(m.review.files), m.reviewBaseLabel()))
+		line += statusTextStyle.Render(fmt.Sprintf(" file %d/%d", m.review.selection.index+1, len(m.review.files)))
+		if m.review.agentEdits == "" {
+			line += statusTextStyle.Render("   base " + m.reviewBaseLabel())
+		}
 		if loaded < len(m.review.files) {
 			line += statusTextStyle.Render("   ") + editingStyle.Render(fmt.Sprintf("loading %d/%d…", loaded, len(m.review.files)))
 		}
@@ -255,14 +274,28 @@ func (m Model) renderReviewStatus() string {
 	if file, ok := m.selectedReviewFile(); ok && len(file.notes) > 1 {
 		noteHint = "[/] note · "
 	}
+	navigationHints := "↑/↓ move · Shift+↑/↓ file · n/p change · " + noteHint + m.actionHints(
+		hintFor("find", keymap.Find), hintFor("files", keymap.GotoFile), hintFor("grep", keymap.Grep))
+	if m.review.agentEdits != "" && !m.review.agentEditsTrace {
+		return line + statusTextStyle.Render("   ") + hintStyle.Render(navigationHints)
+	}
 	exitHint := "Esc exit"
 	if m.review.session != "" {
 		exitHint = "Esc quit session"
 	}
-	return withNotice(m, line) + statusTextStyle.Render("   ") +
-		hintStyle.Render("↑/↓ move · Shift+↑/↓ file · n/p change · "+noteHint+m.actionHints(
-			hintFor("find", keymap.Find), hintFor("files", keymap.GotoFile), hintFor("grep", keymap.Grep))+" · "+exitHint)
+	return line + statusTextStyle.Render("   ") + hintStyle.Render(navigationHints+" · "+exitHint)
 }
+
+// agentEditDecisionHint is a staged review's choice, shown first.
+const agentEditDecisionHint = " a apply all to disk · x discard all · Esc decide "
+
+// agentEditStillEditingHint replaces it while agents still edit the
+// session: applying waits for them.
+const agentEditStillEditingHint = " agents still editing · x discard all · Esc leave "
+
+// agentEditCheckingHint is the hint while the session's agents check it:
+// the user may apply without waiting for them.
+const agentEditCheckingHint = " agents checking · a apply anyway · x discard all · Esc decide "
 
 // reviewSessionBadge is the live review's mark in the status bar: how many
 // files arrived, whether the view follows new ones (or how many are

@@ -158,12 +158,28 @@ func (m Model) fileTreeSidebarList(width int) sidebarList {
 	}
 	rows := make([]sidebarRow, len(entries))
 	for index, entry := range entries {
-		rows[index] = sidebarRow{segments: []sidebarSegment{{
-			text:  filetree.FormatFileTreeEntryLabel(entry, width),
-			style: m.fileTreeEntryStyle(entry),
-		}}}
+		label, style := filetree.FormatFileTreeEntryLabel(entry, width), m.fileTreeEntryStyle(entry)
+		rows[index] = sidebarRow{segments: []sidebarSegment{{text: label, style: style}}}
+		if _, staged := m.agentEdits.stagedFiles[entry.RelativePath]; staged && entry.Type != "directory" {
+			rows[index] = stagedFileTreeRow(label, entry.Depth, style)
+		}
 	}
 	return sidebarList{rows: rows, selectedIndex: m.highlightedEntryIndex(entries)}
+}
+
+// stagedFileTreeRow puts the staged mark in a file row's marker column
+// (two spaces for a file, after the indent).
+func stagedFileTreeRow(label string, depth int, style lipgloss.Style) sidebarRow {
+	runes := []rune(label)
+	markAt := 2 * depth
+	if len(runes) < markAt+2 {
+		return sidebarRow{segments: []sidebarSegment{{text: label, style: style}}}
+	}
+	return sidebarRow{segments: []sidebarSegment{
+		{text: string(runes[:markAt]), style: style},
+		{text: "✎ ", style: stagedFileMarkStyle},
+		{text: string(runes[markAt+2:]), style: style},
+	}}
 }
 
 func (m Model) fileTreeEntryStyle(entry filetree.FileTreeEntry) lipgloss.Style {

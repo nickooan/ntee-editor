@@ -28,6 +28,8 @@ func (m Model) renderInspectMain(width, height int) string {
 		return m.renderInspectCodeStyle(width, height)
 	case inspectMenuExternal:
 		return m.renderInspectExternal(width, height)
+	case inspectMenuAgentEdits:
+		return m.renderInspectAgentEdits(width, height)
 	default:
 		return m.renderInspectDB(width, height)
 	}

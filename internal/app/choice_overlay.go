@@ -14,10 +14,15 @@ import (
 type choiceOverlayKind uint8
 
 const (
-	choiceNone              choiceOverlayKind = iota
-	choiceRemovePath                          // :rm confirmation — payload in confirmRm/confirmRmDir
-	choiceExternalRequest                     // an external open/review request — payload in external.pending
-	choiceQuitReviewSession                   // leaving a live review session — the agent is told to stop
+	choiceNone                 choiceOverlayKind = iota
+	choiceRemovePath                             // :rm confirmation — payload in confirmRm/confirmRmDir
+	choiceExternalRequest                        // an external open/review request — payload in external.pending
+	choiceQuitReviewSession                      // leaving a live review session — the agent is told to stop
+	choiceAgentEditsReady                        // an agent ended an edit session — review it now? payload in agentEdits.choiceSession
+	choiceApplyAgentEdits                        // write a staged edit session to disk — same payload
+	choiceDiscardAgentEdits                      // drop a staged edit session — same payload
+	choiceLeaveAgentEditReview                   // Esc on a staged review: apply, discard or keep for later — same payload
+	choiceForceEndAgentEdits                     // stop waiting for a session's agents still editing — same payload
 )
 
 // overlayLineStyle is how one body line of a choice overlay is drawn.
@@ -136,7 +141,7 @@ func removePathChoice(rel string, isDirectory bool) choiceOverlay {
 // handleChoiceKey routes a key to the open choice overlay and, once a choice
 // is made, closes it and acts on what it was asking.
 func (m Model) handleChoiceKey(key string) (tea.Model, tea.Cmd) {
-	kind := m.choice.kind
+	kind, choiceCount := m.choice.kind, len(m.choice.choices)
 	next, chosen, done := m.choice.handleKey(key)
 	if !done {
 		m.choice = next
@@ -157,6 +162,8 @@ func (m Model) handleChoiceKey(key string) (tea.Model, tea.Cmd) {
 		if chosen == 0 {
 			return m.quitReviewSession()
 		}
+	case choiceAgentEditsReady, choiceApplyAgentEdits, choiceDiscardAgentEdits, choiceLeaveAgentEditReview, choiceForceEndAgentEdits:
+		return m.resolveAgentEditsChoice(kind, chosen, choiceCount)
 	}
 	return m, nil
 }

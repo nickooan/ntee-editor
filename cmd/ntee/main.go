@@ -7,6 +7,8 @@
 // doesn't exist yet opens empty and is created on the first save)
 //
 //	ntee --msg [--msg-note <text|->] [--msg-session <id> | --msg-diff-session <id> | --msg-review-session <id>] <open|review|end|wait|help> [paths…]   send a request to a running editor
+//	ntee --mcp [--msg-root <dir>]   serve the agent edit tools over MCP on stdio (claude mcp add ntee -- ntee --mcp)
+//	ntee --hook [--msg-root <dir>]  Claude Code PreToolUse hook: deny Read/Edit/Write on files with staged edits
 package main
 
 import (
@@ -27,6 +29,7 @@ import (
 	"github.com/nickooan/ntee-editor/internal/extmsg"
 	"github.com/nickooan/ntee-editor/internal/lsp"
 	"github.com/nickooan/ntee-editor/internal/lspsetup"
+	"github.com/nickooan/ntee-editor/internal/staging"
 	"github.com/nickooan/ntee-editor/internal/store"
 )
 
@@ -43,14 +46,27 @@ func main() {
 	msgSession := flag.String("msg-session", "", "with --msg open: queue the request as a step of guided note session <id> — the user confirms once, then walks the steps with Enter/Backspace, Esc ends it (also: --msg --msg-session <id> end|wait); takes no --msg-base")
 	msgDiffSession := flag.String("msg-diff-session", "", "with --msg open: like --msg-session, but every step shows the diff against --msg-base (default HEAD) with the note on its line")
 	msgReviewSession := flag.String("msg-review-session", "", "with --msg review: add one file (and an optional --msg-note) to live review session <id> — the review keeps growing as files arrive, until the user quits it (exit 3: stop sending) or you send end (also: --msg --msg-review-session <id> end|wait)")
+	msgEditSession := flag.String("msg-edit-session", "", "with --msg write|replace|show|status|discard|end|wait: stage file edits in edit session <id> instead of writing the files; at end they are applied, or reviewed by the user first (Ctrl+T › agent edits) — see --msg help")
+	msgAgent := flag.String("msg-agent", "", "with --msg --msg-edit-session <id> write|replace|end|status: this agent's id, so several agents can share one edit session — the user reviews it once every agent in it sent end")
+	msgExpect := flag.String("msg-expect", "", "with --msg --msg-edit-session <id> write|replace: the file version you read (read prints it on stderr, every edit reply ends with it) — an edit made on a stale read is caught")
+	msgReplaceAll := flag.Bool("msg-replace-all", false, "with --msg --msg-edit-session <id> replace: replace every match of the old text, not exactly one")
+	msgSeparator := flag.String("msg-separator", defaultReplaceSeparator, "with --msg --msg-edit-session <id> replace: the stdin line between the old and the new text")
+	serveMCP := flag.Bool("mcp", false, "serve the agent edit tools (edit_replace, edit_write, edit_end, …) over MCP on stdio, for a coding agent: claude mcp add ntee -- ntee --mcp; each call reaches the running editor like --msg (--msg-root picks one)")
+	runAsHook := flag.Bool("hook", false, "run as a Claude Code PreToolUse hook (matcher Read|Edit|MultiEdit|Write): deny the built-in file tools on a file with edits staged in the running editor, pointing the agent at the ntee MCP tools; allows everything when no editor runs")
 	msgWait := flag.Duration("msg-wait", 10*time.Minute, "with --msg --msg-session|--msg-diff-session|--msg-review-session <id> wait: how long to wait for the session to end before printing \"ok waiting\" (exit 4); the editor answers within 1h — run wait as a background task for long tours")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println("ntee-editor " + app.Version)
 		return
 	}
+	if *serveMCP {
+		os.Exit(serveAgentTools(*msgRoot))
+	}
+	if *runAsHook {
+		os.Exit(runHookFromStdin(*msgRoot))
+	}
 	if *sendMsg {
-		os.Exit(sendMessage(flag.Args(), msgOptions{root: *msgRoot, base: *msgBase, note: *msgNote, session: *msgSession, diffSession: *msgDiffSession, reviewSession: *msgReviewSession, wait: *msgWait}))
+		os.Exit(sendMessage(flag.Args(), msgOptions{root: *msgRoot, base: *msgBase, note: *msgNote, session: *msgSession, diffSession: *msgDiffSession, reviewSession: *msgReviewSession, editSession: *msgEditSession, agent: *msgAgent, expect: *msgExpect, replaceAll: *msgReplaceAll, separator: *msgSeparator, wait: *msgWait}))
 	}
 	if *disableLSP || *enableLSP {
 		if *disableLSP && *enableLSP {
@@ -147,6 +163,26 @@ func runEditor(absRoot, startFile string, startLine int) int {
 		db = s
 	}
 	defer db.Close()
+	// Agent edit sessions belong to a folder window; single-file mode never
+	// listens on the socket.
+	var agentEdits *staging.Registry
+	if startFile == "" {
+		var agentEditLog store.AgentEditLogStore = store.NewMemoryAgentEditLog()
+		if log, err := store.NewAgentEditLog(absRoot); err == nil {
+			agentEditLog = log
+		}
+		agentEdits = staging.NewRegistry(absRoot, agentEditLog)
+		if dir, err := store.ExternalDir(absRoot); err == nil {
+			agentEdits.WithSandboxDir(filepath.Join(dir, "sandboxes"))
+		}
+		if err := agentEdits.Load(); err != nil {
+			warnings = append(warnings, "agent edits: "+firstLine(err.Error()))
+		}
+		go agentEditLog.Tidy() // reclaim the edit log's dead records, never delaying the start
+		if pending := len(agentEdits.Pending()); pending > 0 {
+			warnings = append(warnings, fmt.Sprintf("%d agent edit sessions staged — Ctrl+T › agent edits", pending))
+		}
+	}
 	notice := strings.Join(warnings, " · ")
 
 	var reg lsp.Registry = lsp.NewNoopRegistry()
@@ -169,7 +205,8 @@ func runEditor(absRoot, startFile string, startLine int) int {
 		if history, err := store.NewExternalHistory(absRoot); err == nil {
 			historyStore = history
 		}
-		receiver = app.NewExternalReceiver(absRoot, settingsStore, historyStore)
+		receiver = app.NewExternalReceiver(absRoot, settingsStore, historyStore).WithAgentEdits(agentEdits)
+		model = model.WithAgentEdits(agentEdits)
 	}
 	server, socketPath, socketProblem := listenForExternalMessages(absRoot, receiver)
 	if server != nil {

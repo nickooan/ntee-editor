@@ -156,6 +156,11 @@ type Model struct {
 	externalHistoryGen int
 	externalPicker     externalPickerState
 
+	// Agent edit sessions (agent_edits.go): edits an agent staged over the
+	// socket, applied or reviewed when it ends; Ctrl+T › agent edits.
+	agentEdits       agentEditsState
+	agentEditsPicker agentEditsPickerState
+
 	// Review mode (an external "review" request): read-only diffs of a file
 	// set that may span nested repos.
 	review reviewState
@@ -1102,6 +1107,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case externalSettingsMsg:
 		return m.handleExternalSettings(msg)
 
+	case agentEditsChangedMsg:
+		return m.handleAgentEditsChanged(msg)
+
+	case agentEditsFinishedMsg:
+		return m.handleAgentEditsFinished(msg)
+
+	case agentEditsForceEndedMsg:
+		return m.handleAgentEditsForceEnded(msg)
+
+	case agentEditsFinalisingMsg:
+		return m.handleAgentEditsFinalising(msg)
+
+	case agentEditsReopenedMsg:
+		return m.handleAgentEditsReopened(msg)
+
+	case agentEditsLayerChangedMsg:
+		return m.handleAgentEditsLayerChanged(msg)
+
+	case agentEditsFinishedListMsg:
+		return m.handleAgentEditsFinishedList(msg)
+
+	case agentEditReviewPreparedMsg:
+		return m.handleAgentEditReviewPrepared(msg)
+
 	case grepBatchMsg:
 		return m.handleGrepBatch(msg)
 
@@ -1644,6 +1673,9 @@ func (m Model) showOpenedFile(rel string, f filetree.OpenViewFile) Model {
 		m = m.anchorCursorLine()
 	}
 	m.mode = modeEdit
+	if notice := m.stagedFileNotice(); notice != "" || m.notice == m.agentEdits.openNotice {
+		m.notice, m.agentEdits.openNotice = notice, notice
+	}
 	return m
 }
 

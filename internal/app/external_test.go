@@ -234,6 +234,7 @@ func TestExternalPanelTogglesAndLimits(t *testing.T) {
 		t.Fatal("Enter on accept turns messages on")
 	}
 
+	m = key(m, keyPress(tea.KeyDown)) // agent sessions
 	m = key(m, keyPress(tea.KeyDown))
 	m = key(m, keyPress(tea.KeyEnter)) // edit the limit
 	m = key(m, keyPress(tea.KeyBackspace))

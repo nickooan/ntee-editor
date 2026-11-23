@@ -130,6 +130,9 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			if mo.Button == tea.MouseRight && !ctrl {
 				return m, nil
 			}
+			if mo.Y == 0 && mo.Button == tea.MouseLeft && m.headerAgentLabelHit(mo.X) {
+				return m.openWorkingAgentEditReview()
+			}
 			if next, handled := m.handleTabStripClick(mo.X, mo.Y); handled {
 				return next, nil
 			}

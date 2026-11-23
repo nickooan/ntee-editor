@@ -267,9 +267,10 @@ func sessionFlag(kind extmsg.SessionKind) string {
 }
 
 // replyFromOutcome turns the UI's outcome into the sender's reply line: an
-// outcome starting with "error " or "ended " is already a reply.
+// outcome starting with "error " or "ended ", or a change request, is
+// already a reply.
 func replyFromOutcome(outcome string) string {
-	if extmsg.IsErrorReply(outcome) || extmsg.IsEndedReply(outcome) {
+	if extmsg.IsErrorReply(outcome) || extmsg.IsEndedReply(outcome) || extmsg.IsChangesRequestedReply(outcome) {
 		return outcome
 	}
 	return extmsg.OkReply(outcome)

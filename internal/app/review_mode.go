@@ -108,6 +108,10 @@ type reviewState struct {
 	// than staged edits waiting to be applied or discarded.
 	agentEdits      string
 	agentEditsTrace bool
+	// agentEditsLive: a pending session's review follows its agents' edits
+	// (refreshAgentEditReview); refreshGen drops all but the newest refresh.
+	agentEditsLive       bool
+	agentEditsRefreshGen int
 }
 
 const (
@@ -634,7 +638,7 @@ func (m Model) selectReviewFile(index int) (Model, tea.Cmd) {
 	file := m.review.files[m.review.selection.index]
 	m = m.unfoldReviewAncestors(file.workspaceRel)
 	m.review.position = rowCursor{}.anchoredAt(file.landingRow(), m.reviewSpanFor(file))
-	if m.review.session != "" {
+	if m.review.session != "" || m.review.agentEditsLive {
 		m = m.reviewSessionSelected(file.workspaceRel)
 	}
 	return m, m.reviewLoadSelectedCmd()

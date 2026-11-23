@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"github.com/nickooan/ntee-editor/internal/staging"
 	"path/filepath"
 	"strings"
 
@@ -240,14 +241,7 @@ func (m Model) renderReviewStatus() string {
 	// and the end of a long status line is the first thing a narrow window
 	// cuts.
 	if m.review.agentEdits != "" && !m.review.agentEditsTrace {
-		hint := agentEditDecisionHint
-		switch {
-		case m.agentEdits.stillEditing[m.review.agentEdits]:
-			hint = agentEditStillEditingHint
-		case m.agentEdits.checking[m.review.agentEdits]:
-			hint = agentEditCheckingHint
-		}
-		line += statusTextStyle.Render("   ") + agentEditDecisionStyle.Render(hint)
+		line += statusTextStyle.Render("   ") + agentEditDecisionStyle.Render(m.agentEditReviewHint())
 	}
 	if !m.review.preparing && len(m.review.files) > 0 {
 		loaded := 0
@@ -286,16 +280,27 @@ func (m Model) renderReviewStatus() string {
 	return line + statusTextStyle.Render("   ") + hintStyle.Render(navigationHints+" · "+exitHint)
 }
 
-// agentEditDecisionHint is a staged review's choice, shown first.
-const agentEditDecisionHint = " a apply all to disk · x discard all · Esc decide "
+// agentEditDecisionHint is a staged review's choice, shown first once its
+// agents finished.
+const agentEditDecisionHint = " a apply all to disk · x discard all · r request changes · Esc decide "
 
-// agentEditStillEditingHint replaces it while agents still edit the
-// session: applying waits for them.
-const agentEditStillEditingHint = " agents still editing · x discard all · Esc leave "
-
-// agentEditCheckingHint is the hint while the session's agents check it:
-// the user may apply without waiting for them.
-const agentEditCheckingHint = " agents checking · a apply anyway · x discard all · Esc decide "
+// agentEditReviewHint is the staged review's lead hint: the decision, or —
+// while the agents still edit or check the session, and the decision keys
+// are locked — that they are working, animated with the header's label.
+func (m Model) agentEditReviewHint() string {
+	id := m.review.agentEdits
+	spinner := splashSpinner[m.agentEdits.frame%len(splashSpinner)]
+	record, ok := m.agentEditsPendingRecord(id)
+	switch {
+	case !ok:
+		return agentEditDecisionHint
+	case m.agentEdits.stillEditing[id]:
+		return " " + spinner + " agents are working… (editing · " + staging.AgentNames(record.WithAgents().EditingAgents()) + ") · Esc back to the editor "
+	case m.agentEdits.checking[id]:
+		return " " + spinner + " agents are working… (checking · " + staging.AgentNames(record.CheckingAgents()) + ") · Esc back to the editor "
+	}
+	return agentEditDecisionHint
+}
 
 // reviewSessionBadge is the live review's mark in the status bar: how many
 // files arrived, whether the view follows new ones (or how many are

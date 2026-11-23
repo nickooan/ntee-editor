@@ -25,6 +25,7 @@ func (m Model) renderInspectAgentEdits(width, height int) string {
 			{"Enter on a session", panelCommandStyle, "review a pending one · trace a finished one"},
 			{"a · x on a pending session", panelCommandStyle, "apply · discard it (apply waits for every agent in it to end)"},
 			{"f on a session agents still edit", panelCommandStyle, "stop waiting for them: review and apply what is staged"},
+			{"r on a ready session", panelCommandStyle, "request changes: its agents ask you in their terminal, then edit it again"},
 			{"edits review|apply · edits keep <n>", panelCommandStyle, "the same switches from the @inspection > bar"},
 		},
 	}
@@ -96,6 +97,9 @@ func agentEditSessionRow(record store.AgentEditSession, pending bool) panelRow {
 			state = fmt.Sprintf("checking: %d of %d in", len(agents)-len(record.CheckingAgents()), len(agents))
 		case store.PhaseReady:
 			state = "ready to review"
+		}
+		if _, open := record.OpenChangeRequest(); open {
+			state = "changes requested — " + state
 		}
 		detail := "  " + files
 		if len(agents) > 1 || record.Phase() != store.PhaseEditing {

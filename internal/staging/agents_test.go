@@ -1,6 +1,9 @@
 package staging
 
 import (
+	"encoding/json"
+	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -135,5 +138,136 @@ func TestARecordFromBeforeAgentsLoadsWithOneUnnamedAgent(t *testing.T) {
 	open := store.AgentEditSession{Session: "open", StartedAt: started, Files: []store.AgentEditFile{{Rel: "a.go"}}}.WithAgents()
 	if strings.Join(open.EditingAgents(), ",") != "" || len(open.EditingAgents()) != 1 {
 		t.Fatalf("a legacy session not ended yet has its unnamed agent editing: %+v", open.Agents)
+	}
+}
+
+// readySession stages a.go and b.go (or the given files) by two agents and
+// walks the session through end and check to ready.
+func readySession(t *testing.T, registry *Registry, files ...string) {
+	t.Helper()
+	files = append(files, "a.go", "b.go")
+	_, err := registry.Write("S", "agent-a", files[0], "a\n")
+	must(t, err)
+	_, err = registry.Write("S", "agent-b", files[1], "b\n")
+	must(t, err)
+	for _, agent := range []string{"agent-a", "agent-b"} {
+		_, _, err = registry.MarkAgentEnded("S", agent)
+		must(t, err)
+	}
+	for _, agent := range []string{"agent-a", "agent-b"} {
+		_, _, err = registry.RecordCheck("S", agent, store.CheckPassed, "ok")
+		must(t, err)
+	}
+}
+
+func TestRequestChangesReopensAReadySessionForItsAgents(t *testing.T) {
+	registry, _, log := newTestRegistry(t)
+	if _, _, err := registry.RequestChanges("S"); err == nil || !strings.Contains(err.Error(), "no edit session S") {
+		t.Fatalf("an unknown session is refused: %v", err)
+	}
+	_, err := registry.Write("S", "agent-a", "a.go", "a\n")
+	must(t, err)
+	if _, _, err := registry.RequestChanges("S"); err == nil || !strings.Contains(err.Error(), "edit session S is still editing") {
+		t.Fatalf("a session still being edited is refused: %v", err)
+	}
+	_, _, err = registry.MarkAgentEnded("S", "agent-a")
+	must(t, err)
+	if _, _, err := registry.RequestChanges("S"); err == nil || !strings.Contains(err.Error(), "still finalising") {
+		t.Fatalf("a finalising session is refused: %v", err)
+	}
+	_, err = registry.Write("S", "agent-b", "b.go", "b\n")
+	if err == nil {
+		t.Fatal("a newcomer cannot join a finalising session")
+	}
+	registry, _, log = newTestRegistry(t)
+	readySession(t, registry)
+
+	record, reopened, err := registry.RequestChanges("S")
+	must(t, err)
+	if strings.Join(reopened, ",") != "agent-a,agent-b" || record.Phase() != store.PhaseEditing || !record.ReadyAt.IsZero() || len(record.EditingAgents()) != 2 {
+		t.Fatalf("every agent is editing again: %v %+v", reopened, record)
+	}
+	if record.Agents[0].Check != "" || record.Agents[1].CheckNote != "" {
+		t.Fatalf("the checks are cleared: %+v", record.Agents)
+	}
+	if request, open := record.OpenChangeRequest(); !open || request.At.IsZero() || len(record.ChangeRequests) != 1 {
+		t.Fatalf("the request is logged and open: %+v", record.ChangeRequests)
+	}
+	if pending, _ := log.LoadPendingAgentEdits(); len(pending) != 1 || len(pending[0].ChangeRequests) != 1 {
+		t.Fatalf("the request is saved: %+v", pending)
+	}
+
+	if _, err := registry.Replace("S", "agent-b", "b.go", Replacement{Old: "b", New: "B"}); err != nil {
+		t.Fatalf("an agent's follow-up edit goes into the same session: %v", err)
+	}
+	record, _ = registry.Snapshot("S")
+	if request, open := record.OpenChangeRequest(); open || request.AnsweredBy != "agent-b" || request.AnsweredAt.IsZero() {
+		t.Fatalf("the edit answers the request: %+v", record.ChangeRequests)
+	}
+	if stagedContent(t, registry, "S", "b.go") != "B\n" {
+		t.Fatalf("the follow-up stacks on the staged copy")
+	}
+}
+
+func TestAnEndAnswersAChangeRequest(t *testing.T) {
+	registry, _, _ := newTestRegistry(t)
+	readySession(t, registry)
+	_, _, err := registry.RequestChanges("S")
+	must(t, err)
+	record, allEnded, err := registry.MarkAgentEnded("S", "agent-a")
+	must(t, err)
+	if allEnded {
+		t.Fatal("agent-b is still editing after the request")
+	}
+	if request, open := record.OpenChangeRequest(); open || request.AnsweredBy != "agent-a" {
+		t.Fatalf("an end answers the request too: %+v", record.ChangeRequests)
+	}
+}
+
+func TestRequestChangesNeedsAnAgentTheUserDidNotStop(t *testing.T) {
+	registry, _, _ := newTestRegistry(t)
+	_, err := registry.Write("S", "agent-a", "a.go", "a\n")
+	must(t, err)
+	_, _, err = registry.ForceEnd("S")
+	must(t, err)
+	if _, _, err := registry.RequestChanges("S"); err == nil || !strings.Contains(err.Error(), "no agent left in edit session S to ask") {
+		t.Fatalf("with every agent stopped there is no one to ask: %v", err)
+	}
+	record, _ := registry.Snapshot("S")
+	if record.Phase() != store.PhaseReady || len(record.ChangeRequests) != 0 {
+		t.Fatalf("the refused request changes nothing: %+v", record)
+	}
+}
+
+func TestRequestChangesDropsTheSandbox(t *testing.T) {
+	registry, _, boxes, _ := sandboxWorkspace(t)
+	readySession(t, registry, "repoA/a.go", "repoB/b.go")
+	if _, err := registry.Sandbox("S", false, nil); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := registry.RequestChanges("S")
+	must(t, err)
+	if entries, _ := os.ReadDir(boxes); slices.ContainsFunc(entries, func(entry os.DirEntry) bool { return entry.Name() == "S" }) {
+		t.Fatalf("the sandbox is dropped: %v", entries)
+	}
+}
+
+func TestChangeRequestsAreStoredExplicitly(t *testing.T) {
+	registry, _, log := newTestRegistry(t)
+	_, err := registry.Write("S", "agent-a", "a.go", "a\n")
+	must(t, err)
+	pending, _ := log.LoadPendingAgentEdits()
+	data, err := json.Marshal(pending[0])
+	must(t, err)
+	if !strings.Contains(string(data), `"changeRequests":[]`) {
+		t.Fatalf("a new session stores an empty log, not null: %s", data)
+	}
+	var legacy store.AgentEditSession
+	must(t, json.Unmarshal([]byte(`{"session":"old","status":"pending","files":[]}`), &legacy))
+	if legacy = legacy.WithChangeRequests(); legacy.ChangeRequests == nil {
+		t.Fatal("a legacy record loads with an empty log")
+	}
+	if _, open := legacy.OpenChangeRequest(); open {
+		t.Fatal("and nothing open")
 	}
 }

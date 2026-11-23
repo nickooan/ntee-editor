@@ -455,6 +455,21 @@ func EndedReply(reason string) string {
 	return "ended " + oneLine(reason)
 }
 
+// changesRequestedPrefix starts the reply an edit session's wait gets when
+// the user asks its agents for changes.
+const changesRequestedPrefix = "ok changes requested"
+
+// ChangesRequestedReply tells an edit session's waiting agent the user has
+// questions or changes for it: it should ask them, not wait again.
+func ChangesRequestedReply(detail string) string {
+	return changesRequestedPrefix + " — " + oneLine(detail)
+}
+
+// IsChangesRequestedReply reports whether a reply line is a change request.
+func IsChangesRequestedReply(reply string) bool {
+	return strings.HasPrefix(reply, changesRequestedPrefix)
+}
+
 // BodyReply is an ok reply carrying content: "ok <bytes>", a newline, then
 // the content byte for byte. Only a reply read with SendForBody has a body.
 func BodyReply(body string) string {

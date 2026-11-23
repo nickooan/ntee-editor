@@ -96,23 +96,24 @@ func TestASharedSessionWaitsForEveryAgent(t *testing.T) {
 		t.Fatalf("a check before the last is answered at once: %q", reply)
 	}
 	m, checkReply := lastCheck(t, m, receiver, "agent-b", store.CheckFailed, "npm test: 1 failing", store.AgentEditPolicyReview)
-	if !strings.Contains(gotReply(t, checkReply), "the user is reviewing 2 staged files") || m.choice.kind != choiceAgentEditsReady {
-		t.Fatalf("the last check offers the review: %v", m.choice.kind)
+	if !strings.Contains(gotReply(t, checkReply), "the user is reviewing 2 staged files") || m.mode != modeReview || m.review.agentEdits != "S" {
+		t.Fatalf("the last check opens the review: mode=%v %q", m.mode, m.review.agentEdits)
 	}
-	if plain := ansi.Strip(m.View().Content); !strings.Contains(plain, "✓ agent-a passed — go test ./... ok") || !strings.Contains(plain, "✗ agent-b failed — npm test: 1 failing") {
-		t.Fatalf("the prompt shows each check:\n%s", plain)
+	if !strings.Contains(m.notice, "✓ agent-a passed") || !strings.Contains(m.notice, "✗ agent-b failed") {
+		t.Fatalf("the notice sums up each check: %q", m.notice)
 	}
 	if header := headerLine(m); strings.Contains(header, "agent editing") || strings.Contains(header, "checking") {
 		t.Fatalf("the label goes once the session is the user's: %q", header)
 	}
-	next, cmd := m.Update(keyPress(tea.KeyEnter)) // Review edits
-	m = settleAgentEdits(next.(Model), cmd)
 	file, _ := m.selectedReviewFile()
 	if len(file.notes) != 1 || !strings.Contains(file.notes[0].overlay.text, "· agent-") {
 		t.Fatalf("a shared session's edit log names the agents: %+v", file.notes)
 	}
 	m = key(m, typeRune('a'))
-	next, cmd = m.Update(keyPress(tea.KeyEnter))
+	if plain := ansi.Strip(m.View().Content); !strings.Contains(plain, "✓ agent-a passed — go test ./... ok") || !strings.Contains(plain, "✗ agent-b failed — npm test: 1 failing") {
+		t.Fatalf("the apply prompt shows each check:\n%s", plain)
+	}
+	next, cmd := m.Update(keyPress(tea.KeyEnter))
 	m = settleAgentEdits(next.(Model), cmd)
 	if diskContent(t, root, "main.go") != "package main\n\nfunc main() {\n\tprintln(1)\n}\n" || diskContent(t, root, "lib/util.ts") != "export const héllo = 2\n" {
 		t.Fatal("both agents' edits are written")
@@ -124,8 +125,17 @@ func TestTheReviewOfASessionStillEditedSaysApplyingWaits(t *testing.T) {
 	record, _ := m.agentEdits.registry.Snapshot("S")
 	m, cmd := m.enterAgentEditReview(record, false)
 	m = settleAgentEdits(m, cmd)
-	if status := ansi.Strip(m.renderStatusLine()); !strings.Contains(status, "agents still editing · x discard all") || strings.Contains(status, "a apply all") {
-		t.Fatalf("the hint waits for the agents: %q", status)
+	if status := ansi.Strip(m.renderStatusLine()); !strings.Contains(status, "agents are working… (editing · agent-a, agent-b) · Esc back to the editor") || strings.Contains(status, "a apply all") {
+		t.Fatalf("the hint says the agents work: %q", status)
+	}
+	for _, press := range []rune{'a', 'x', 'r'} {
+		locked := key(m, typeRune(press))
+		if locked.choice.open() || !strings.Contains(locked.errText, "agents are still working on edit session S") {
+			t.Fatalf("%q is locked while agents work: choice=%v err=%q", press, locked.choice.open(), locked.errText)
+		}
+	}
+	if left := key(m, keyPress(tea.KeyEscape)); left.mode == modeReview || left.choice.open() {
+		t.Fatal("Esc leaves at once while the agents work")
 	}
 }
 

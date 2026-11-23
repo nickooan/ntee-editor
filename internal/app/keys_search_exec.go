@@ -129,6 +129,9 @@ func (m Model) searchReplace(all bool, repl string) Model {
 		m.errText = "replace needs an edit session"
 		return m
 	}
+	if session, locked := m.stagedReadOnly(); locked {
+		return m.refuseStagedEdit(session)
+	}
 	matches := m.searchMatches()
 	if len(matches) == 0 {
 		m.errText = "no matches"

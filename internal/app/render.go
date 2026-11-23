@@ -246,6 +246,9 @@ func (m Model) renderEditStatus() string {
 	if m.edit.dirty {
 		state = editingStyle.Render("editing")
 	}
+	if _, locked := m.stagedReadOnly(); locked {
+		state = headerAgentEditingStyle.Render("read-only · staged agent edits")
+	}
 	pos := fmt.Sprintf("Ln %d, Col %d", m.edit.cy+1, m.edit.cx+1)
 	line := promptStyle.Render("@edit") + statusTextStyle.Render(" "+name+"   ") + state
 	// Transient feedback sits right after the saved/editing indicator — near the
@@ -1174,28 +1177,12 @@ func truncateRunes(s string, width int) string {
 // the labels survive.
 func (m Model) renderHeader() string {
 	const sep = "  ·  "
-	title := "ntee-editor " + versionTag() + sep + m.workspaceRoot
-	var labels []string
-	var styles []lipgloss.Style
-	if m.activeRepo != "" {
-		labels, styles = append(labels, "working repo: "+m.activeRepo), append(styles, headerRepoStyle)
-	}
-	if label := m.headerAgentEditingLabel(); label != "" {
-		labels, styles = append(labels, label), append(styles, headerAgentEditingStyle)
-	}
-	if badge := m.headerSessionBadge(); badge != "" {
-		labels, styles = append(labels, badge), append(styles, headerSessionStyle)
-	}
+	title, labels := m.headerLayout()
 	if len(labels) == 0 {
 		return headerStyle.Width(m.width).Render(truncateRunes(title, m.width))
 	}
-	labelsWidth := 0
-	for _, label := range labels {
-		labelsWidth += len([]rune(sep)) + len([]rune(label))
-	}
-	titleBudget := m.width - labelsWidth
 	line := ""
-	if titleBudget < 0 {
+	if titleBudget := m.width - headerLabelsWidth(labels); titleBudget < 0 {
 		// Not even the labels fit: drop the title and cut the labels from the end.
 		budget := max(0, m.width)
 		for index, label := range labels {
@@ -1206,14 +1193,14 @@ func (m Model) renderHeader() string {
 				line += headerStyle.Render(sep)
 				budget -= len([]rune(sep))
 			}
-			cut := truncateRunes(label, budget)
-			line += styles[index].Render(cut)
+			cut := truncateRunes(label.text, budget)
+			line += label.style.Render(cut)
 			budget -= len([]rune(cut))
 		}
 	} else {
 		line = headerStyle.Render(truncateRunes(title, titleBudget))
-		for index, label := range labels {
-			line += headerStyle.Render(sep) + styles[index].Render(label)
+		for _, label := range labels {
+			line += headerStyle.Render(sep) + label.style.Render(label.text)
 		}
 	}
 	if pad := m.width - lipgloss.Width(line); pad > 0 {
@@ -1222,21 +1209,77 @@ func (m Model) renderHeader() string {
 	return line
 }
 
+// headerLabel is one of the header's labels after the title.
+type headerLabel struct {
+	text       string
+	style      lipgloss.Style
+	agentEdits bool // the agent editing label: a click opens its review
+}
+
+const headerSeparator = "  ·  "
+
+// headerLayout is the header's title and labels, shared by renderHeader and
+// the click test (headerAgentLabelHit) so both agree on where labels sit.
+func (m Model) headerLayout() (string, []headerLabel) {
+	title := "ntee-editor " + versionTag() + headerSeparator + m.workspaceRoot
+	var labels []headerLabel
+	if m.activeRepo != "" {
+		labels = append(labels, headerLabel{text: "working repo: " + m.activeRepo, style: headerRepoStyle})
+	}
+	if label := m.headerAgentEditingLabel(); label != "" {
+		labels = append(labels, headerLabel{text: label, style: headerAgentEditingStyle, agentEdits: true})
+	}
+	if badge := m.headerSessionBadge(); badge != "" {
+		labels = append(labels, headerLabel{text: badge, style: headerSessionStyle})
+	}
+	return title, labels
+}
+
+func headerLabelsWidth(labels []headerLabel) int {
+	width := 0
+	for _, label := range labels {
+		width += len([]rune(headerSeparator)) + len([]rune(label.text))
+	}
+	return width
+}
+
+// headerAgentLabelHit reports whether a click at column x of the header row
+// lands on the agent editing label. Only the layout where every label fits
+// is hit-tested: a cut label is too narrow to aim at.
+func (m Model) headerAgentLabelHit(x int) bool {
+	title, labels := m.headerLayout()
+	titleBudget := m.width - headerLabelsWidth(labels)
+	if titleBudget < 0 {
+		return false
+	}
+	column := len([]rune(truncateRunes(title, titleBudget)))
+	for _, label := range labels {
+		column += len([]rune(headerSeparator))
+		width := len([]rune(label.text))
+		if label.agentEdits && x >= column && x < column+width {
+			return true
+		}
+		column += width
+	}
+	return false
+}
+
 // headerSessionBadge is the agent session the user is in, for the header: a
 // live review session or an agent edit review in review mode, else a note,
 // diff or review session that runs or waits to start. "" when none.
 // headerAgentEditingLabel says agents are still staging edits — the user
 // cannot apply those sessions yet. "" when none is.
 func (m Model) headerAgentEditingLabel() string {
+	spinner := splashSpinner[m.agentEdits.frame%len(splashSpinner)]
 	switch editing, checking := len(m.agentEdits.stillEditing), len(m.agentEdits.checking); {
 	case editing == 1:
-		return "✎ agent editing…"
+		return spinner + " ✎ agent editing…"
 	case editing > 1:
-		return fmt.Sprintf("✎ agents editing (%d)…", editing)
+		return fmt.Sprintf("%s ✎ agents editing (%d)…", spinner, editing)
 	case checking == 1:
-		return "⚙ agents checking…"
+		return spinner + " ⚙ agents checking…"
 	case checking > 1:
-		return fmt.Sprintf("⚙ agents checking (%d)…", checking)
+		return fmt.Sprintf("%s ⚙ agents checking (%d)…", spinner, checking)
 	}
 	return ""
 }

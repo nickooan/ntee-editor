@@ -22,6 +22,10 @@ type agentEditSettings struct {
 // side: an edit was staged, or the agent discarded the session.
 type agentEditsChangedMsg struct {
 	session string
+	// started: this edit started the session; policy is the user's setting
+	// when it arrived (the live review opens only to review first).
+	started bool
+	policy  string
 }
 
 // WithAgentEdits attaches the edit session registry: edit sessions are
@@ -119,7 +123,7 @@ func (r *ExternalReceiver) handleAgentEdit(message extmsg.Message, settings stor
 	if err != nil {
 		return extmsg.ErrorReply(err.Error())
 	}
-	r.notify(agentEditsChangedMsg{session: id})
+	r.notify(agentEditsChangedMsg{session: id, started: result.SessionStart, policy: settings.AgentEditPolicy})
 	if result.Reopened {
 		r.notify(agentEditsReopenedMsg{session: id, agent: message.Agent})
 	}
@@ -253,6 +257,9 @@ func agentEditStatusText(record store.AgentEditSession) string {
 		state = "finalising — its agents check it in the sandbox"
 	case store.PhaseReady:
 		state = "ended — waiting for the user to apply or discard"
+	}
+	if request, open := record.OpenChangeRequest(); open {
+		state += " · the user requested changes at " + request.At.Local().Format("15:04:05") + " — ask them in your terminal"
 	}
 	fmt.Fprintf(&builder, "edit session %s · %s staged · %s\n", record.Session, countText(len(record.Files), "file"), state)
 	if agents := record.WithAgents().Agents; len(agents) > 1 || len(agents) == 1 && agents[0].Agent != "" {

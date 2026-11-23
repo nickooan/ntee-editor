@@ -304,6 +304,7 @@ func (r *Registry) edit(session, agent, rel, expect string, apply func(current s
 	files[index] = file
 	record.Files = files
 	record.Agents = agents
+	record.ChangeRequests = answerChangeRequest(record.ChangeRequests, agent, edit.At)
 	if err := r.log.SavePendingAgentEdit(record); err != nil {
 		r.dropIfEmpty(session, set)
 		return EditResult{}, fmt.Errorf("cannot save the staged edit: %w", err)
@@ -343,7 +344,7 @@ func (r *Registry) setFor(session string) (*stagedSet, bool, error) {
 	if finished, ok := r.finished[session]; ok {
 		return nil, false, fmt.Errorf("edit session %s already finished (%s) — start a new session id", session, finished.Status)
 	}
-	set := &stagedSet{record: store.AgentEditSession{Session: session, Status: store.AgentEditPending, StartedAt: r.now(), Files: []store.AgentEditFile{}, Checks: true}}
+	set := &stagedSet{record: store.AgentEditSession{Session: session, Status: store.AgentEditPending, StartedAt: r.now(), Files: []store.AgentEditFile{}, Checks: true, ChangeRequests: []store.AgentEditChangeRequest{}}}
 	r.pending[session] = set
 	return set, true, nil
 }
@@ -483,6 +484,7 @@ func (r *Registry) MarkAgentEnded(session, agent string) (record store.AgentEdit
 		agents[at].EndedAt = now
 	}
 	record.Agents = agents
+	record.ChangeRequests = answerChangeRequest(record.ChangeRequests, agent, now)
 	allEnded = len(record.EditingAgents()) == 0
 	if allEnded {
 		record.AgentEndedAt = now
@@ -531,6 +533,56 @@ func (r *Registry) ForceEnd(session string) (record store.AgentEditSession, wait
 	}
 	set.publish(record)
 	return record, waitedFor, nil
+}
+
+// RequestChanges is the user asking a ready session's agents for changes:
+// the session goes back to editing — every agent the user did not stop is
+// editing again, the checks are cleared and the sandbox dropped — and the
+// request is logged until one of its agents edits or ends. reopened lists
+// the agents asked.
+func (r *Registry) RequestChanges(session string) (record store.AgentEditSession, reopened []string, err error) {
+	set, ok := r.pendingSet(session)
+	if !ok {
+		return store.AgentEditSession{}, nil, r.noSession(session)
+	}
+	set.saveMu.Lock()
+	defer set.saveMu.Unlock()
+	record = set.snapshot().WithAgents()
+	if phase := record.Phase(); phase != store.PhaseReady {
+		return record, nil, fmt.Errorf("edit session %s is still %s — ask for changes once its agents finish", session, phase)
+	}
+	agents := slices.Clone(record.Agents)
+	for index := range agents {
+		if agents[index].Stopped {
+			continue
+		}
+		agents[index].EndedAt = time.Time{}
+		agents[index].Check, agents[index].CheckNote, agents[index].CheckedAt = "", "", time.Time{}
+		reopened = append(reopened, agents[index].Agent)
+	}
+	if len(reopened) == 0 {
+		return record, nil, fmt.Errorf("no agent left in edit session %s to ask — the user stopped waiting for all of them; apply or discard it", session)
+	}
+	record.Agents = agents
+	record.AgentEndedAt, record.ReadyAt = time.Time{}, time.Time{}
+	record.ChangeRequests = append(slices.Clip(record.WithChangeRequests().ChangeRequests), store.AgentEditChangeRequest{At: r.now()})
+	if err := r.log.SavePendingAgentEdit(record); err != nil {
+		return store.AgentEditSession{}, nil, fmt.Errorf("cannot save the session: %w", err)
+	}
+	set.publish(record)
+	r.DropSandbox(session) // built from edits that are changing again
+	return record, reopened, nil
+}
+
+// answerChangeRequest marks the open change request answered by agent's
+// edit or end; requests is returned as is when none is open.
+func answerChangeRequest(requests []store.AgentEditChangeRequest, agent string, at time.Time) []store.AgentEditChangeRequest {
+	if len(requests) == 0 || !requests[len(requests)-1].AnsweredAt.IsZero() {
+		return requests
+	}
+	answered := slices.Clone(requests)
+	answered[len(answered)-1].AnsweredAt, answered[len(answered)-1].AnsweredBy = at, agent
+	return answered
 }
 
 // RecordCheck is an agent's report on its finalising session: what its

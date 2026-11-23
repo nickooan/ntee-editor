@@ -726,3 +726,32 @@ func TestToolTermsReplaceCLIHints(t *testing.T) {
 		}
 	}
 }
+
+func TestAChangeRequestSendsTheNextEditBackToTheSession(t *testing.T) {
+	h := newHarness(t)
+	session := h.sessionTag + "1"
+	h.call(1, toolWrite, map[string]any{"path": "a.go", "content": "x"})
+	h.nextRequest()
+	h.setReply(func(string) string {
+		return "ok edit session " + session + " ended — the user is reviewing 1 staged file; to hear the outcome run: ntee --msg --msg-edit-session " + session + " wait"
+	})
+	h.call(2, toolEnd, nil)
+	h.nextRequest()
+
+	h.setReply(func(string) string {
+		return extmsg.ChangesRequestedReply("the user has questions or changes for edit session " + session + ": stop and tell them to switch to this terminal")
+	})
+	result := h.call(3, toolWait, nil)
+	if got := h.nextRequest(); !strings.HasPrefix(got, "wait --edit-session="+session+" ") {
+		t.Fatalf("the wait is the ended session's: %q", got)
+	}
+	if text := result.Content[0].Text; result.IsError || !strings.Contains(text, "changes requested") || !strings.Contains(text, "do not call edit_wait again yet") {
+		t.Fatalf("the agent is told to ask the user: %+v", result)
+	}
+
+	h.setReply(func(string) string { return "ok replaced a.go L1 · edit 2 · 1 file staged" })
+	h.call(4, toolReplace, map[string]any{"path": "a.go", "old_text": "x", "new_text": "y"})
+	if got := h.nextRequest(); !strings.HasPrefix(got, "replace --edit-session="+session+" ") {
+		t.Fatalf("the follow-up goes to the same session, open for edits again: %q", got)
+	}
+}

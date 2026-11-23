@@ -24,6 +24,7 @@ func agentEditsModel(t *testing.T, policy string) (Model, string, *ExternalRecei
 	registry := staging.NewRegistry(root, store.NewMemoryAgentEditLog())
 	receiver := NewExternalReceiver(root, settings, history).WithAgentEdits(registry)
 	m = m.WithExternal(settings, history, "/tmp/ntee.sock", "").WithAgentEdits(registry)
+	m.agentEdits.typingPause = 0 // tests type and receive at once
 	return m, root, receiver, registry, settings
 }
 
@@ -35,7 +36,7 @@ func settleAgentEdits(m Model, cmd tea.Cmd) Model {
 		msg := queue[0]
 		queue = queue[1:]
 		switch msg.(type) {
-		case agentEditsFinishedMsg, agentEditsForceEndedMsg, agentEditsFinishedListMsg, agentEditReviewPreparedMsg, reviewPreparedMsg, reviewLoadedMsg, externalSettingsMsg, externalHistoryLoadedMsg:
+		case agentEditsFinishedMsg, agentEditsForceEndedMsg, agentEditsFinishedListMsg, agentEditReviewPreparedMsg, agentEditReviewRefreshedMsg, agentEditsChangesRequestedMsg, reviewPreparedMsg, reviewLoadedMsg, externalSettingsMsg, externalHistoryLoadedMsg:
 			var next tea.Cmd
 			m, next = deliver(m, msg)
 			queue = append(queue, execCmds(next)...)
@@ -210,24 +211,20 @@ func TestAgentEditReviewThenApply(t *testing.T) {
 	if outcome := gotReply(t, reply); !strings.HasPrefix(outcome, "edit session e1 ended — the user is reviewing 1 staged file") {
 		t.Fatalf("end reply = %q", outcome)
 	}
-	if m.choice.kind != choiceAgentEditsReady || m.choice.title != "EDITS · agent edit session e1" ||
-		!strings.Contains(m.choice.body[0].text, "NOT written yet") || m.choice.choices[0] != "Review edits" {
-		t.Fatalf("the user is offered the review, told the edits are not written: %+v", m.choice)
+	if m.choice.open() || m.mode != modeReview || m.review.agentEdits != "e1" || len(m.review.files) != 1 {
+		t.Fatalf("from the plain view the review opens at once, no prompt: choice=%+v mode=%v review=%q", m.choice, m.mode, m.review.agentEdits)
+	}
+	if !strings.HasPrefix(m.notice, "✎ agents finished") {
+		t.Fatalf("the notice says the agents finished: %q", m.notice)
 	}
 	m, waitReply := sendAgentEditControl(t, m, receiver, extmsg.CommandWait, "e1", current)
 	noReply(t, waitReply)
-
-	next, cmd := m.Update(keyPress(tea.KeyEnter)) // Review edits
-	m = settleAgentEdits(next.(Model), cmd)
-	if m.mode != modeReview || m.review.agentEdits != "e1" || len(m.review.files) != 1 {
-		t.Fatalf("the staged review is open: mode=%v review=%+v", m.mode, m.review.agentEdits)
-	}
 	file, _ := m.selectedReviewFile()
 	if file.document.adds != 1 || file.document.dels != 0 || len(file.notes) != 1 || !strings.Contains(file.notes[0].overlay.text, "replace L3–L5") {
 		t.Fatalf("diff before → staged with the edit log: +%d −%d notes=%+v", file.document.adds, file.document.dels, file.notes)
 	}
 	plain := ansi.Strip(m.View().Content)
-	decision, navigation := strings.Index(plain, "a apply all to disk · x discard all · Esc decide"), strings.Index(plain, "↑/↓ move")
+	decision, navigation := strings.Index(plain, "a apply all to disk · x discard all · r request changes · Esc decide"), strings.Index(plain, "↑/↓ move")
 	if !strings.Contains(plain, "edit session e1 · staged, not written") || decision < 0 || navigation < decision {
 		t.Fatalf("the decision leads the status bar:\n%s", plain)
 	}
@@ -236,7 +233,7 @@ func TestAgentEditReviewThenApply(t *testing.T) {
 	if m.choice.kind != choiceApplyAgentEdits {
 		t.Fatal("A asks before applying")
 	}
-	next, cmd = m.Update(keyPress(tea.KeyEnter))
+	next, cmd := m.Update(keyPress(tea.KeyEnter))
 	m = settleAgentEdits(next.(Model), cmd)
 	if outcome := gotReply(t, waitReply); outcome != "finished — edit session e1 applied 1 file" {
 		t.Fatalf("the waiting agent hears the outcome: %q", outcome)
@@ -254,15 +251,10 @@ func TestAgentEditReviewDiscard(t *testing.T) {
 	receiver.Handle("write --edit-session=e1\nmain.go\n---\nreplaced\n")
 	current, _ := settings.LoadExternalSettings()
 	m, _ = sendAgentEditControl(t, m, receiver, extmsg.CommandEnd, "e1", current)
-	m = key(m, typeRune('n')) // Later
-	if m.choice.open() || m.mode == modeReview {
-		t.Fatal("Later leaves the session staged")
-	}
 	m, waitReply := sendAgentEditControl(t, m, receiver, extmsg.CommandWait, "e1", current)
-
-	record, _ := registry.Snapshot("e1")
-	m, cmd := m.enterAgentEditReview(record, false)
-	m = settleAgentEdits(m, cmd)
+	if _, pending := registry.Snapshot("e1"); !pending || m.mode != modeReview {
+		t.Fatal("the ended session is staged, its review open")
+	}
 	m = key(m, typeRune('X'))
 	if m.choice.kind != choiceDiscardAgentEdits {
 		t.Fatal("X asks before discarding")
@@ -365,8 +357,6 @@ func stagedReviewWith(t *testing.T, prepare func(Model) Model) (Model, string, c
 	current, _ := settings.LoadExternalSettings()
 	m, _ = sendAgentEditControl(t, m, receiver, extmsg.CommandEnd, "e1", current)
 	m, waitReply := sendAgentEditControl(t, m, receiver, extmsg.CommandWait, "e1", current)
-	next, cmd := m.Update(keyPress(tea.KeyEnter)) // Review edits
-	m = settleAgentEdits(next.(Model), cmd)
 	if m.mode != modeReview || m.review.agentEdits != "e1" {
 		t.Fatal("the staged review is open")
 	}
@@ -384,7 +374,7 @@ func TestAgentEditReviewKeysTakeEitherCase(t *testing.T) {
 			t.Fatalf("%q opened choice %v, want %v", press.key, asked.choice.kind, press.want)
 		}
 	}
-	if asked, _ := m.handleAgentEditReviewKey("shift+a"); asked.choice.kind != choiceApplyAgentEdits {
+	if asked, _, _ := m.handleAgentEditReviewKey("shift+a"); asked.choice.kind != choiceApplyAgentEdits {
 		t.Fatal("shift+a reported without text applies too")
 	}
 }
@@ -392,7 +382,7 @@ func TestAgentEditReviewKeysTakeEitherCase(t *testing.T) {
 func TestAgentEditReviewEscKeepsForLaterAndTellsTheAgent(t *testing.T) {
 	m, root, waitReply := stagedReview(t)
 	m = key(m, keyPress(tea.KeyEscape))
-	if m.choice.kind != choiceLeaveAgentEditReview || strings.Join(m.choice.choices, "|") != "Apply all|Discard all|Keep for later" {
+	if m.choice.kind != choiceLeaveAgentEditReview || strings.Join(m.choice.choices, "|") != "Apply all|Discard all|Request changes|Keep for later" {
 		t.Fatalf("Esc asks what to do: %+v", m.choice)
 	}
 	if m.mode != modeReview {
@@ -458,7 +448,13 @@ func TestAgentEditReadyLaterTellsTheWaitingAgent(t *testing.T) {
 	m, _, receiver, _, settings := agentEditsModel(t, store.AgentEditPolicyReview)
 	receiver.Handle("write --edit-session=e1\nmain.go\n---\nreplaced\n")
 	current, _ := settings.LoadExternalSettings()
+	next, cmd := m.Update(ctrlKey('t')) // busy elsewhere: the end asks instead of moving the user
+	m = settleAgentEdits(next.(Model), cmd)
 	m, _ = sendAgentEditControl(t, m, receiver, extmsg.CommandEnd, "e1", current)
+	if m.choice.kind != choiceAgentEditsReady || m.choice.title != "EDITS · agent edit session e1" ||
+		!strings.Contains(m.choice.body[0].text, "NOT written yet") || m.choice.choices[0] != "Review edits" {
+		t.Fatalf("a busy user is offered the review, told the edits are not written: %+v", m.choice)
+	}
 	m, waitReply := sendAgentEditControl(t, m, receiver, extmsg.CommandWait, "e1", current)
 	m = key(m, typeRune('n')) // Later
 	if outcome := gotReply(t, waitReply); !strings.Contains(outcome, "aside for later") {

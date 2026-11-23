@@ -21,6 +21,7 @@ Rules:
 - Several agents may edit one file. Edits apply in the order they arrive; each of yours is checked against the version you last read or edited (sent for you). "changed since you read it": another agent changed the file under you — read it again with read_file and stage your change on what is there now. A note saying another agent changed the same lines means: make sure your change fits theirs.
 - "not applied … changed on disk since it was staged" (or a session it built on changed or was discarded): re-read it with read_file and stage it again (a new session).
 - "ended" or "discarded": the user stopped this change set — do not re-send it unless asked.
+- "changes requested" (from edit_wait): the user wants to talk about the session before deciding. Stop calling tools and tell the user, in your reply, that you are ready for their questions or changes. Once they answer, re-read with read_file, stage the follow-ups (they go into the same session), then edit_end and edit_wait again.
 - "set aside for later": the edits stay staged and unwritten until the user decides; carry on, and call edit_wait again when you need the outcome.
 - If a tool says no ntee editor is running, nothing was staged: make the edit with your usual file tools.`
 
@@ -141,9 +142,10 @@ var toolDefinitions = []toolDefinition{
 		}, "result"),
 	},
 	{
-		Name:        toolWait,
-		Title:       "Wait for the user's review",
-		Description: "Wait until the user applies or discards the session they are reviewing (default: the session that ended last). If it says still waiting, call it again.",
+		Name:  toolWait,
+		Title: "Wait for the user's review",
+		Description: "Wait until the user applies or discards the session they are reviewing (default: the session that ended last). If it says still waiting, call it again. " +
+			"If it says changes requested, stop and ask the user in your reply what they want; then stage the follow-ups in the same session and end it again.",
 		InputSchema: objectSchema(map[string]any{
 			"timeout_seconds": map[string]any{"type": "integer", "minimum": 1, "maximum": maxWaitSeconds, "description": "How long to wait this call (default 300)."},
 		}),

@@ -42,6 +42,10 @@ func (m Model) handleEditKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	if session, locked := m.stagedReadOnly(); locked && m.editKeyChangesBuffer(k, isText) {
+		return m.refuseStagedEdit(session), nil
+	}
+
 	// The completion popup, when open, consumes its navigation/accept/dismiss
 	// keys; any other key (except typing/backspace, which manage the popup
 	// themselves) closes it and is then processed normally.
@@ -204,6 +208,23 @@ func (m Model) handleEditKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 // handleEditAction runs an edit-mode action reached through its (rebindable)
 // key. handled is false for actions edit mode does not own.
+// editKeyChangesBuffer reports whether an edit-mode key would change the
+// buffer or the file: typing, the editing keys, and save/undo/redo.
+func (m Model) editKeyChangesBuffer(key string, isText bool) bool {
+	switch key {
+	case "enter", "backspace", "delete", "tab", "space":
+		return true
+	}
+	if action, bound := m.keys.ActionFor(key); bound {
+		switch action {
+		case keymap.Save, keymap.Undo, keymap.Redo:
+			return true
+		}
+		return false
+	}
+	return isText
+}
+
 func (m Model) handleEditAction(action keymap.Action) (next tea.Model, cmd tea.Cmd, handled bool) {
 	switch action {
 	case keymap.Save:
@@ -242,6 +263,9 @@ func (m Model) handleEditAction(action keymap.Action) (next tea.Model, cmd tea.C
 func (m Model) editPaste(text string) (tea.Model, tea.Cmd) {
 	if m.openFile == nil {
 		return m, nil
+	}
+	if session, locked := m.stagedReadOnly(); locked {
+		return m.refuseStagedEdit(session), nil
 	}
 	s := strings.ReplaceAll(text, "\r\n", "\n")
 	s = strings.ReplaceAll(s, "\r", "\n")

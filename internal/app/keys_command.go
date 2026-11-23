@@ -83,6 +83,10 @@ func (m Model) executeCommand(cmd string) (tea.Model, tea.Cmd) {
 			m.errText = "no open file"
 			break
 		}
+		if session, locked := m.stagedReadOnly(); locked {
+			m = m.refuseStagedEdit(session)
+			break
+		}
 		snap, ok := m.db.LastSave(m.openRel)
 		if !ok {
 			m.errText = "no saved snapshot to revert to"

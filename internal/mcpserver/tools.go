@@ -182,6 +182,18 @@ func (tools *editTools) sessionOver(session string) {
 	}
 }
 
+// sessionReopened notes that the user asked for changes to a session this
+// agent ended: it is open for edits again, so the next edit without a
+// session goes back to it instead of starting a new one.
+func (tools *editTools) sessionReopened(session string) {
+	tools.mu.Lock()
+	defer tools.mu.Unlock()
+	tools.versions = map[string]string{} // read again before editing
+	if tools.current == "" {
+		tools.lastEnded, tools.lastOver = session, false
+	}
+}
+
 func (tools *editTools) versionOf(path string) string {
 	tools.mu.Lock()
 	defer tools.mu.Unlock()
@@ -306,6 +318,10 @@ func (tools *editTools) call(ctx context.Context, name string, raw json.RawMessa
 	if version := versionIn(line); version != "" && absolutePath != "" && (name == toolRead || name == toolReplace || name == toolWrite) {
 		tools.saw(absolutePath, version)
 	}
+	if name == toolWait && extmsg.IsChangesRequestedReply(line) {
+		tools.sessionReopened(session)
+		return textResult(changesRequestedText(session), false)
+	}
 	if overReply(line) {
 		tools.sessionOver(session)
 		if (name == toolReplace || name == toolWrite) && arguments.Session == "" && strings.Contains(line, "start a new session") {
@@ -336,6 +352,14 @@ func noEditorText(err error) string {
 		return "no ntee editor is open on this project — nothing was staged; make the edit with your usual file tools"
 	}
 	return "cannot find the ntee editor (" + err.Error() + ") — nothing was staged; make the edit with your usual file tools"
+}
+
+// changesRequestedText tells the agent to hand over to the user: they asked
+// for changes from the review and are coming to this terminal.
+func changesRequestedText(session string) string {
+	return "changes requested — the user has questions or changes for edit session " + session + " and is switching to this terminal. " +
+		"Stop here: tell them you are ready, and ask what they want to change or ask; do not call " + toolWait + " again yet. " +
+		"Once they answer, re-read the files with " + toolRead + ", stage the follow-ups (they go into the same session, open for edits again), then call " + toolEnd + " and " + toolWait + ".\nedit session: " + session
 }
 
 func stillWaitingText(session string) string {

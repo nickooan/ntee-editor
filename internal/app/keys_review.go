@@ -38,8 +38,8 @@ func (m Model) handleReviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.review.position = position
 		return m, nil
 	}
-	if next, handled := m.handleAgentEditReviewKey(k); handled {
-		return next, nil
+	if next, cmd, handled := m.handleAgentEditReviewKey(k); handled {
+		return next, cmd
 	}
 	file, _ := m.selectedReviewFile()
 	switch k {

@@ -671,6 +671,9 @@ func (m Model) Init() tea.Cmd {
 	if m.splash {
 		cmds = append(cmds, splashTick())
 	}
+	if m.agentEdits.ticking {
+		cmds = append(cmds, agentEditsTick()) // agents at work since an earlier run
+	}
 	if m.gitRepo {
 		cmds = append(cmds, m.refreshGitStatusCmd(), gitStatusTick())
 	}
@@ -1108,28 +1111,37 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleExternalSettings(msg)
 
 	case agentEditsChangedMsg:
-		return m.handleAgentEditsChanged(msg)
+		return withAgentEditsTick(m.handleAgentEditsChanged(msg))
 
 	case agentEditsFinishedMsg:
-		return m.handleAgentEditsFinished(msg)
+		return withAgentEditsTick(m.handleAgentEditsFinished(msg))
 
 	case agentEditsForceEndedMsg:
-		return m.handleAgentEditsForceEnded(msg)
+		return withAgentEditsTick(m.handleAgentEditsForceEnded(msg))
 
 	case agentEditsFinalisingMsg:
-		return m.handleAgentEditsFinalising(msg)
+		return withAgentEditsTick(m.handleAgentEditsFinalising(msg))
 
 	case agentEditsReopenedMsg:
-		return m.handleAgentEditsReopened(msg)
+		return withAgentEditsTick(m.handleAgentEditsReopened(msg))
 
 	case agentEditsLayerChangedMsg:
-		return m.handleAgentEditsLayerChanged(msg)
+		return withAgentEditsTick(m.handleAgentEditsLayerChanged(msg))
 
 	case agentEditsFinishedListMsg:
 		return m.handleAgentEditsFinishedList(msg)
 
 	case agentEditReviewPreparedMsg:
 		return m.handleAgentEditReviewPrepared(msg)
+
+	case agentEditReviewRefreshedMsg:
+		return m.handleAgentEditReviewRefreshed(msg)
+
+	case agentEditsChangesRequestedMsg:
+		return withAgentEditsTick(m.handleAgentEditsChangesRequested(msg))
+
+	case agentEditsTickMsg:
+		return m.handleAgentEditsTick()
 
 	case grepBatchMsg:
 		return m.handleGrepBatch(msg)

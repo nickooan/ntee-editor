@@ -52,7 +52,7 @@ First-line tokens starting with `--` are options: `--session=<id>`, `--diff-sess
 
 For `write` and `replace` (`carriesPayload`), the text after the first separator line is `Message.Payload` instead of a note, read from the raw request so it stays byte for byte; `HasPayload` tells an empty payload (an empty file) from none. `checkEditSessionCommand` holds what every edit session command shares (the option, no base, no note), and a replace's payload is decoded once here so a malformed one is refused before it reaches the editor.
 
-*Plus: `Message.Base` (the base revision, "" for HEAD), `OkReply`, `ErrorReply`, `IsErrorReply`, `EndedReply`, `IsEndedReply`, `oneLine` — the reply format; `BodyReply`, `BodyReplyWith`, `SplitBodyReply` (the size is the first word after `ok`), `BodyDetail` — a reply carrying content.*
+*Plus: `Message.Base` (the base revision, "" for HEAD), `OkReply`, `ErrorReply`, `IsErrorReply`, `EndedReply`, `IsEndedReply`, `ChangesRequestedReply`, `IsChangesRequestedReply` (an edit session's `wait` when the user asks its agents for changes: `ok changes requested — …`, exit 5 for the CLI), `oneLine` — the reply format; `BodyReply`, `BodyReplyWith`, `SplitBodyReply` (the size is the first word after `ok`), `BodyDetail` — a reply carrying content.*
 
 ### server.go
 

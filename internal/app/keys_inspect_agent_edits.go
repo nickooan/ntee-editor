@@ -83,7 +83,7 @@ func (m Model) handleAgentEditsPickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cm
 			}
 		}
 		return m.enterAgentEditReview(record, !pending)
-	case "a", "x", "f":
+	case "a", "x", "f", "r":
 		record, pending, ok := m.agentEditsSessionAt(picker.index)
 		if !ok || !pending {
 			return m, nil
@@ -93,6 +93,8 @@ func (m Model) handleAgentEditsPickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cm
 			return m.askApplyAgentEdits(record.Session), nil
 		case "f":
 			return m.askForceEndAgentEdits(record.Session), nil
+		case "r":
+			return m.startAgentEditRequestChanges(record.Session)
 		}
 		return m.askDiscardAgentEdits(record.Session), nil
 	}

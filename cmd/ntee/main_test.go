@@ -263,6 +263,8 @@ func TestDeliverRequestExitCodes(t *testing.T) {
 			return "ended session walk1 was closed by the user — stop sending steps"
 		case strings.HasPrefix(text, "waiting"):
 			return "ok waiting — the user hasn't answered yet"
+		case strings.HasPrefix(text, "changes"):
+			return extmsg.ChangesRequestedReply("the user has questions or changes for edit session e1")
 		}
 		return "error nope"
 	})
@@ -281,6 +283,7 @@ func TestDeliverRequestExitCodes(t *testing.T) {
 		{"finished\n", msgSession{id: "walk1", kind: extmsg.SessionNote}, 0, "ok finished"},
 		{"ended\n", msgSession{id: "walk1", kind: extmsg.SessionNote}, exitSessionEnded, "ended session walk1"},
 		{"waiting\n", msgSession{id: "walk1", kind: extmsg.SessionNote}, exitSessionWaiting, "ok waiting"},
+		{"changes\n", msgSession{id: "e1", kind: extmsg.SessionEdit}, exitChangesRequested, "ok changes requested"},
 		{"bad\n", msgSession{}, 1, "error nope"},
 		{"slow\n", msgSession{id: "walk1", kind: extmsg.SessionNote}, exitSessionWaiting, "--msg-session walk1 wait"},
 		{"slow\n", msgSession{id: "diff1", kind: extmsg.SessionDiff}, exitSessionWaiting, "--msg-diff-session diff1 wait"},

@@ -306,6 +306,12 @@ Edit sessions — stage your file edits in the editor instead of writing them:
                       (carry on; wait again for their decision)
                 ok waiting — edit session … is finalising (check it)
                       or back to editing (check again later)     exit 4
+                ok changes requested — the user has questions or
+                      changes for edit session …                 exit 5
+                      (stop: tell the user to switch to your
+                      terminal and ask what they want; the session
+                      is open for edits again — stage the
+                      follow-ups in it, then end it again)
       On the wire: "write --edit-session=<id>" (or replace), one path, then
       the content after a "---" line — a replace's as {"old","new","all"}
       JSON, which this command builds for you.
@@ -463,8 +469,9 @@ func (session msgSession) option() string {
 
 // Exit codes beyond 0 (ok) and 1 (error) for guided sessions.
 const (
-	exitSessionEnded   = 3 // the session is over: stop sending steps
-	exitSessionWaiting = 4 // the user hasn't answered yet: run wait
+	exitSessionEnded     = 3 // the session is over: stop sending steps
+	exitSessionWaiting   = 4 // the user hasn't answered yet: run wait
+	exitChangesRequested = 5 // edit session: the user asks for changes — ask them, then edit and end again
 )
 
 // sendMessage is the --msg client: it resolves the paths, finds the running
@@ -585,6 +592,8 @@ func exitCodeForReply(reply string) int {
 		return 1
 	case extmsg.IsEndedReply(reply):
 		return exitSessionEnded
+	case extmsg.IsChangesRequestedReply(reply):
+		return exitChangesRequested
 	case strings.HasPrefix(reply, "ok waiting"):
 		return exitSessionWaiting
 	}

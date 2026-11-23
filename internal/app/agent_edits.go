@@ -1,10 +1,12 @@
 package app
 
 import (
+	"cmp"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -43,6 +45,33 @@ type agentEditsState struct {
 	// choiceSession is the session an open apply/discard/ready overlay is
 	// about.
 	choiceSession string
+	// ticking: an agentEditsTickMsg is on its way, so the header's label
+	// animates while agents work; frame is its animation step.
+	ticking bool
+	frame   int
+	// typingPause is how long the user must have stopped typing before an
+	// agent edit session may move them to its review: a keystroke meant for
+	// the editor must never land on the review's a/x/r.
+	typingPause time.Duration
+}
+
+// defaultTypingPause is agentEditsState.typingPause outside tests.
+const defaultTypingPause = 1500 * time.Millisecond
+
+// agentEditsTickInterval paces the header label's animation while agents
+// work. Nothing ticks when none does.
+const agentEditsTickInterval = 150 * time.Millisecond
+
+// agentEditsTickMsg advances the header label's animation.
+type agentEditsTickMsg struct{}
+
+// agentEditsChangesRequestedMsg lands the user's request for changes, saved
+// off the UI goroutine: reopened are the agents asked.
+type agentEditsChangesRequestedMsg struct {
+	session  string
+	record   store.AgentEditSession
+	reopened []string
+	err      error
 }
 
 // agentEditsFinishedMsg lands a session that was applied or discarded off
@@ -63,7 +92,41 @@ type agentEditsFinishedListMsg struct {
 // WithAgentEdits attaches the edit session registry the socket stages into.
 func (m Model) WithAgentEdits(registry *staging.Registry) Model {
 	m.agentEdits.registry = registry
-	return m.refreshAgentEditsPending()
+	m.agentEdits.typingPause = defaultTypingPause
+	m = m.refreshAgentEditsPending()
+	m.agentEdits.ticking = m.agentsWorking() // Init starts the tick
+	return m
+}
+
+// agentsWorking reports whether any pending session's agents are editing
+// or checking it.
+func (m Model) agentsWorking() bool {
+	return len(m.agentEdits.stillEditing) > 0 || len(m.agentEdits.checking) > 0
+}
+
+// withAgentEditsTick starts the header label's animation once agents work,
+// one tick chain at a time.
+func withAgentEditsTick(model tea.Model, cmd tea.Cmd) (tea.Model, tea.Cmd) {
+	m, ok := model.(Model)
+	if !ok || m.agentEdits.ticking || !m.agentsWorking() {
+		return model, cmd
+	}
+	m.agentEdits.ticking = true
+	return m, tea.Batch(cmd, agentEditsTick())
+}
+
+func agentEditsTick() tea.Cmd {
+	return tea.Tick(agentEditsTickInterval, func(time.Time) tea.Msg { return agentEditsTickMsg{} })
+}
+
+// handleAgentEditsTick advances the animation, and stops once no agent works.
+func (m Model) handleAgentEditsTick() (tea.Model, tea.Cmd) {
+	if !m.agentsWorking() {
+		m.agentEdits.ticking = false
+		return m, nil
+	}
+	m.agentEdits.frame++
+	return m, agentEditsTick()
 }
 
 // refreshAgentEditsPending re-reads the pending sessions for the panel and
@@ -83,6 +146,35 @@ func (m Model) refreshAgentEditsPending() Model {
 		}
 	}
 	return m
+}
+
+// stagedReadOnly reports whether the open file is read-only because an agent
+// edit session staged edits for it: applying would replace whatever the user
+// typed. A buffer that was already dirty when the file got staged stays
+// editable (applying then asks to replace or skip it), and locks once saved.
+func (m Model) stagedReadOnly() (session string, locked bool) {
+	if m.openFile == nil || m.edit.dirty {
+		return "", false
+	}
+	session, locked = m.agentEdits.stagedFiles[m.openRel]
+	return session, locked
+}
+
+// refuseStagedEdit refuses changing a read-only staged file, with why.
+func (m Model) refuseStagedEdit(session string) Model {
+	m.errText = "read-only — edit session " + session + " has staged edits for this file · click the agent label in the header to review them"
+	return m
+}
+
+// agentEditsPendingRecord is a pending session from the mirror (no registry
+// locks: safe per frame).
+func (m Model) agentEditsPendingRecord(id string) (store.AgentEditSession, bool) {
+	for _, session := range m.agentEdits.pending {
+		if session.Session == id {
+			return session, true
+		}
+	}
+	return store.AgentEditSession{}, false
 }
 
 // stagedFilesOf maps each file with unsettled staged edits, by root path,
@@ -142,8 +234,10 @@ func (m Model) handleAgentEditsFinishedList(msg agentEditsFinishedListMsg) (tea.
 }
 
 // handleAgentEditsChanged follows the socket side: a staged edit updates the
-// pending list; a session the agent discarded ends for its waiters and
-// leaves the screen.
+// pending list and a live review of the session; a session's first edit
+// opens its live review when the user reviews first and is free to be
+// moved; a session the agent discarded ends for its waiters and leaves the
+// screen.
 func (m Model) handleAgentEditsChanged(msg agentEditsChangedMsg) (tea.Model, tea.Cmd) {
 	m = m.refreshAgentEditsPending()
 	if record, ok := m.agentEdits.registry.Finished(msg.session); ok {
@@ -151,13 +245,74 @@ func (m Model) handleAgentEditsChanged(msg agentEditsChangedMsg) (tea.Model, tea
 		m.notice = "edit session " + msg.session + " " + record.Outcome
 		return m, m.loadAgentEditsFinishedCmd()
 	}
-	if record, ok := m.agentEdits.registry.Snapshot(msg.session); ok && m.mode != modeReview {
+	record, ok := m.agentEdits.registry.Snapshot(msg.session)
+	if !ok {
+		return m, nil
+	}
+	if m.mode == modeReview && m.review.agentEdits == msg.session {
+		return m.refreshAgentEditReview(msg.session)
+	}
+	if msg.started && msg.policy != store.AgentEditPolicyApply && m.canAutoJumpToAgentReview() {
+		m, prepare := m.enterAgentEditReview(record, false)
+		m.notice = "✎ agent started editing — watching edit session " + msg.session + " live · Esc back to the editor"
+		return m, prepare
+	}
+	if m.mode != modeReview {
 		m.notice = "✎ agent edit session " + msg.session + " · " + countText(len(record.Files), "file") + " staged"
 		if notice := m.stagedFileNotice(); notice != "" && m.agentEdits.stagedFiles[m.openRel] == msg.session {
 			m.notice = notice
 		}
 	}
 	return m, nil
+}
+
+// agentEditsFinishedNotice says the agents finished, with each one's check.
+func agentEditsFinishedNotice(record store.AgentEditSession) string {
+	notice := "✎ agents finished"
+	for _, participant := range record.WithAgents().Agents {
+		if mark := map[store.AgentEditCheckResult]string{store.CheckPassed: "✓", store.CheckFailed: "✗", store.CheckSkipped: "–"}[participant.Check]; mark != "" {
+			notice += " · " + mark + " " + cmp.Or(participant.Agent, "unnamed") + " " + string(participant.Check)
+		}
+	}
+	return notice
+}
+
+// canAutoJumpToAgentReview reports whether an agent edit session may take
+// the user to its review without asking: only from the plain edit or query
+// view, since leaving anything else (a bar, an overlay, another view) would
+// throw away what the user was doing there — and not while they type.
+func (m Model) canAutoJumpToAgentReview() bool {
+	return (m.mode == modeEdit || m.mode == modeQuery) && !m.overlayOpen() && !m.reviewSessionRunning() && m.agentEdits.registry != nil &&
+		time.Since(m.lastInputAt) >= m.agentEdits.typingPause
+}
+
+// openWorkingAgentEditReview is a click on the header's agent label: it
+// opens the review of the newest session whose agents work — else the
+// newest one ready for the user — that is not on screen already.
+func (m Model) openWorkingAgentEditReview() (Model, tea.Cmd) {
+	onScreen := ""
+	if m.mode == modeReview && !m.review.agentEditsTrace {
+		onScreen = m.review.agentEdits
+	}
+	var working, ready string
+	for _, session := range m.agentEdits.pending { // oldest first: the newest wins
+		switch {
+		case session.Session == onScreen:
+		case m.agentEdits.stillEditing[session.Session] || m.agentEdits.checking[session.Session]:
+			working = session.Session
+		default:
+			ready = session.Session
+		}
+	}
+	id := cmp.Or(working, ready)
+	if id == "" {
+		return m, nil
+	}
+	record, ok := m.agentEdits.registry.Snapshot(id)
+	if !ok {
+		return m, nil
+	}
+	return m.enterAgentEditReview(record, false)
 }
 
 // handleAgentEditMessage takes an edit session's end or wait from the
@@ -174,8 +329,14 @@ func (m Model) handleAgentEditMessage(msg externalMessageMsg) (tea.Model, tea.Cm
 			sendExternalReply(msg.reply, agentEditOutcomeReply(record))
 			return m, nil
 		}
-		if _, ok := registry.Snapshot(id); !ok {
+		record, ok := registry.Snapshot(id)
+		if !ok {
 			sendExternalReply(msg.reply, extmsg.ErrorReply("no edit session "+id+" — nothing was staged"))
+			return m, nil
+		}
+		if _, open := record.OpenChangeRequest(); open {
+			// The user asked while this agent was not waiting.
+			sendExternalReply(msg.reply, agentEditChangesRequestedReply(id))
 			return m, nil
 		}
 		waiters := cloneWaiters(m.agentEdits.waiters)
@@ -208,6 +369,12 @@ func (m Model) handleAgentEditMessage(msg externalMessageMsg) (tea.Model, tea.Cm
 	case msg.agentEdits.policy == store.AgentEditPolicyApply:
 		m.notice = "✎ edit session " + id + ": " + staging.AgentNames(failed) + "'s check failed — review it"
 	}
+	if m.mode == modeReview && m.review.agentEdits == id && !m.review.agentEditsTrace {
+		// The user watched it live: it unlocks where they are.
+		m, refresh := m.refreshAgentEditReview(id)
+		m.notice = agentEditsFinishedNotice(record)
+		return m, refresh
+	}
 	if m.choice.open() || m.reviewSessionRunning() {
 		m.notice = "✎ agent edits ready: session " + id + " · " + countText(len(record.Files), "file") + " — review them under Ctrl+T › agent edits"
 		return m, nil
@@ -217,6 +384,11 @@ func (m Model) handleAgentEditMessage(msg externalMessageMsg) (tea.Model, tea.Cm
 		if msg.agentEdits.policy != store.AgentEditPolicyApply {
 			m.notice = "✎ EDITS opened without asking"
 		}
+		return m, prepare
+	}
+	if m.canAutoJumpToAgentReview() {
+		m, prepare := m.enterAgentEditReview(record, false)
+		m.notice = agentEditsFinishedNotice(record)
 		return m, prepare
 	}
 	m.agentEdits.choiceSession = id
@@ -571,6 +743,8 @@ func (m Model) resolveAgentEditsChoice(kind choiceOverlayKind, chosen int, choic
 			return m.startAgentEditApply(id, store.AgentEditPolicyReview, false, m.agentEditKeep(), nil)
 		case 1:
 			return m.startAgentEditDiscard(id)
+		case 2:
+			return m.startAgentEditRequestChanges(id)
 		}
 		m = m.exitReview().deferAgentEdits(id)
 		m.notice = "agent edits " + id + " kept for later — reopen them under Ctrl+T › agent edits"
@@ -695,9 +869,10 @@ func (m Model) askLeaveAgentEditReview(id string) Model {
 }
 
 func agentEditLeaveChoice(record store.AgentEditSession) choiceOverlay {
-	choice := choiceOverlay{kind: choiceLeaveAgentEditReview, title: "Edit session " + record.Session + " — what now?", choices: []string{"Apply all", "Discard all", "Keep for later"}}
+	choice := choiceOverlay{kind: choiceLeaveAgentEditReview, title: "Edit session " + record.Session + " — what now?", choices: []string{"Apply all", "Discard all", "Request changes", "Keep for later"}}
 	choice.body = append(choice.body, overlayLine{text: countText(len(record.Files), "file") + " staged — nothing is written yet", style: overlayLineStrong})
 	choice.body = append(choice.body, agentEditFileLines(record)...)
+	choice.body = append(choice.body, overlayLine{text: "request changes: the agent asks you in its terminal", style: overlayLineDim})
 	choice.body = append(choice.body, overlayLine{text: "later: reopen under Ctrl+T › agent edits", style: overlayLineDim})
 	return choice
 }
@@ -762,7 +937,7 @@ func (m Model) handleAgentEditsFinalising(msg agentEditsFinalisingMsg) (tea.Mode
 	if m.mode != modeReview {
 		m.notice = "⚙ edit session " + msg.session + " finalising — its agents check it in a sandbox"
 	}
-	return m, nil
+	return m.refreshAgentEditReview(msg.session)
 }
 
 // handleAgentEditsReopened tells the session's waiting agents it is back to
@@ -774,6 +949,50 @@ func (m Model) handleAgentEditsReopened(msg agentEditsReopenedMsg) (tea.Model, t
 		m.notice = "✎ edit session " + msg.session + " is back to editing — " + staging.AgentLabel(msg.agent) + " is fixing it"
 	}
 	return m, nil
+}
+
+// startAgentEditRequestChanges asks a ready session's agents for changes:
+// the session goes back to editing (saved off the UI goroutine) and the
+// waiting agents are told to ask the user in their terminal.
+func (m Model) startAgentEditRequestChanges(id string) (Model, tea.Cmd) {
+	if m.agentEdits.applying[id] {
+		m.errText = "edit session " + id + " is being applied"
+		return m, nil
+	}
+	registry := m.agentEdits.registry
+	return m, func() tea.Msg {
+		record, reopened, err := registry.RequestChanges(id)
+		return agentEditsChangesRequestedMsg{session: id, record: record, reopened: reopened, err: err}
+	}
+}
+
+// handleAgentEditsChangesRequested tells the waiting agents the user wants
+// to talk; the live review stays up, locked again while they work.
+func (m Model) handleAgentEditsChangesRequested(msg agentEditsChangesRequestedMsg) (tea.Model, tea.Cmd) {
+	m = m.refreshAgentEditsPending()
+	if msg.err != nil {
+		m.errText = msg.err.Error()
+		return m, nil
+	}
+	waiting := len(m.agentEdits.waiters[msg.session]) > 0
+	m = m.answerAgentEditWaiters(msg.session, agentEditChangesRequestedReply(msg.session))
+	if m.agentEdits.choiceSession == msg.session && m.choice.open() {
+		m.choice = choiceOverlay{}
+	}
+	if waiting {
+		m.notice = "✎ asked " + staging.AgentNames(msg.reopened) + " for changes to edit session " + msg.session + " — switch to the agent's terminal"
+	} else {
+		m.notice = "✎ changes requested for edit session " + msg.session + " — no agent is waiting now; it hears on its next wait"
+	}
+	return m.refreshAgentEditReview(msg.session)
+}
+
+// agentEditChangesRequestedReply is what a waiting agent hears when the
+// user asks for changes.
+func agentEditChangesRequestedReply(id string) string {
+	return extmsg.ChangesRequestedReply("the user has questions or changes for edit session " + id +
+		": stop and tell them to switch to this terminal, then ask what they want; do not wait again yet. " +
+		"The session is open for edits again: stage the follow-ups in it, then end it")
 }
 
 func agentEditDeferredReply(id string) string {

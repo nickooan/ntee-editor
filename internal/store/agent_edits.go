@@ -54,6 +54,36 @@ type AgentEditSession struct {
 	// asked (ReadyAt). Older records (false) are ready once their agents end.
 	Checks  bool      `json:"checks"`
 	ReadyAt time.Time `json:"readyAt"` // every check is in (or the user stopped waiting); zero until then
+	// ChangeRequests is every time the user asked the agents for changes
+	// from the review, oldest first; stored as [] when there are none.
+	ChangeRequests []AgentEditChangeRequest `json:"changeRequests"`
+}
+
+// AgentEditChangeRequest is the user asking a ready session's agents for
+// changes: the session went back to editing. It is answered by the next edit
+// or end one of its agents sends.
+type AgentEditChangeRequest struct {
+	At         time.Time `json:"at"`
+	AnsweredAt time.Time `json:"answeredAt"` // zero until an agent edits or ends
+	AnsweredBy string    `json:"answeredBy"` // the agent that answered; "" = unnamed
+}
+
+// OpenChangeRequest is the user's change request no agent has answered yet.
+func (session AgentEditSession) OpenChangeRequest() (AgentEditChangeRequest, bool) {
+	if len(session.ChangeRequests) == 0 {
+		return AgentEditChangeRequest{}, false
+	}
+	last := session.ChangeRequests[len(session.ChangeRequests)-1]
+	return last, last.AnsweredAt.IsZero()
+}
+
+// WithChangeRequests fills in the empty change-request log of a record from
+// before change requests were kept.
+func (session AgentEditSession) WithChangeRequests() AgentEditSession {
+	if session.ChangeRequests == nil {
+		session.ChangeRequests = []AgentEditChangeRequest{}
+	}
+	return session
 }
 
 // AgentEditPhase is where a pending session stands.
@@ -301,7 +331,7 @@ func (log *AgentEditLog) load(prefix string) ([]AgentEditSession, error) {
 		for index := range keys {
 			var session AgentEditSession
 			if found[index] && json.Unmarshal(values[index], &session) == nil {
-				sessions = append(sessions, session.WithAgents())
+				sessions = append(sessions, session.WithAgents().WithChangeRequests())
 			}
 		}
 		return nil

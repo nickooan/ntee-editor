@@ -93,7 +93,7 @@ func TestALayerOnAnAppliedSessionAppliesNormally(t *testing.T) {
 	_, err = registry.Replace("B", "", "a.go", Replacement{Old: "three", New: "THREE"})
 	must(t, err)
 	recordA, _ := registry.Snapshot("A")
-	_, err = registry.Finish("A", store.AgentEditPolicyReview, registry.ApplyFiles("A", recordA.Files, nil), 20)
+	_, err = registry.Finish("A", store.AgentEditPolicyReview, store.GitFollowUpNone, registry.ApplyFiles("A", recordA.Files, nil), 20)
 	must(t, err)
 	if content, session := latest(t, registry, "a.go"); session != "B" || content != "ONE\ntwo\nTHREE\ntwo\n" {
 		t.Fatalf("A is on disk, so B is the root and the top: %q from %q", content, session)
@@ -121,7 +121,7 @@ func TestApplyingAStackedFileWritesAndSettlesTheLayersBelow(t *testing.T) {
 	if below, _, ok := registry.ApplyCheck(recordB.Files[0]); !ok || len(below) != 1 || below[0] != "A" {
 		t.Fatalf("B's a.go writes A's along: %v %v", below, ok)
 	}
-	finishedB, err := registry.Finish("B", store.AgentEditPolicyReview, registry.ApplyFiles("B", recordB.Files, nil), 20)
+	finishedB, err := registry.Finish("B", store.AgentEditPolicyReview, store.GitFollowUpNone, registry.ApplyFiles("B", recordB.Files, nil), 20)
 	must(t, err)
 	if finishedB.Status != store.AgentEditApplied || readFile(t, root, "a.go") != "ONE\ntwo\nTHREE\ntwo\n" {
 		t.Fatalf("B applied both edits: %s %q", finishedB.Status, readFile(t, root, "a.go"))
@@ -141,7 +141,7 @@ func TestApplyingAStackedFileWritesAndSettlesTheLayersBelow(t *testing.T) {
 	}
 
 	recordA, _ := registry.Snapshot("A")
-	finishedA, err := registry.Finish("A", store.AgentEditPolicyReview, registry.ApplyFiles("A", recordA.Files, nil), 20)
+	finishedA, err := registry.Finish("A", store.AgentEditPolicyReview, store.GitFollowUpNone, registry.ApplyFiles("A", recordA.Files, nil), 20)
 	must(t, err)
 	if finishedA.Status != store.AgentEditApplied || readFile(t, root, "other.go") != "other\n" || readFile(t, root, "a.go") != "ONE\ntwo\nTHREE\ntwo\n" {
 		t.Fatalf("A applies the rest and keeps the settled file: %s %s", finishedA.Status, finishedA.Outcome)

@@ -45,6 +45,11 @@ type agentEditsState struct {
 	// choiceSession is the session an open apply/discard/ready overlay is
 	// about.
 	choiceSession string
+	// The apply popup's state: whether the unsaved-work step chose to
+	// replace that work, and the git follow-up behind each of its choices
+	// (parallel to the choices, Cancel left out).
+	applyReplaceUnsaved bool
+	applyFollowUps      []store.AgentEditGitFollowUp
 	// ticking: an agentEditsTickMsg is on its way, so the header's label
 	// animates while agents work; frame is its animation step.
 	ticking bool
@@ -353,7 +358,7 @@ func (m Model) handleAgentEditMessage(msg externalMessageMsg) (tea.Model, tea.Cm
 	}
 	bases, failed := m.pendingBaseSessions(record), failedChecks(record)
 	if msg.agentEdits.policy == store.AgentEditPolicyApply && len(bases) == 0 && len(failed) == 0 {
-		return m.startAgentEditApply(id, store.AgentEditPolicyApply, false, msg.agentEdits.keep, msg.reply)
+		return m.startAgentEditApply(id, store.AgentEditPolicyApply, false, store.GitFollowUpNone, msg.agentEdits.keep, msg.reply)
 	}
 	reviewing := "edit session " + id + " ended — the user is reviewing " + countText(len(record.Files), "staged file")
 	switch {
@@ -411,11 +416,53 @@ func cloneWaiters(waiters map[string][]chan<- string) map[string][]chan<- string
 func agentEditOutcomeReply(record store.AgentEditSession) string {
 	switch record.Status {
 	case store.AgentEditApplied:
-		return "finished — edit session " + record.Session + " " + record.Outcome
+		return "finished — edit session " + record.Session + " " + record.Outcome + agentEditGitFollowUpText(record)
 	case store.AgentEditDiscarded:
 		return extmsg.EndedReply("edit session " + record.Session + " was " + record.Outcome + " — nothing was written")
 	}
-	return extmsg.ErrorReply("edit session " + record.Session + " " + record.Outcome)
+	return extmsg.ErrorReply("edit session " + record.Session + " " + record.Outcome + agentEditGitFollowUpText(record))
+}
+
+// maxFollowUpFiles caps the files a git follow-up names.
+const maxFollowUpFiles = 20
+
+// agentEditGitFollowUpText is the git work the user asked of the agent with
+// applying, for its outcome reply; "" when they asked for none (the agent
+// then leaves git alone).
+func agentEditGitFollowUpText(record store.AgentEditSession) string {
+	if record.GitFollowUp != store.GitFollowUpCommit && record.GitFollowUp != store.GitFollowUpPullRequest {
+		return ""
+	}
+	var applied []string
+	for _, file := range record.Files {
+		if file.Result == store.AgentEditFileApplied {
+			applied = append(applied, file.Rel)
+		}
+	}
+	if len(applied) == 0 {
+		return ""
+	}
+	files := strings.Join(applied[:min(len(applied), maxFollowUpFiles)], ", ")
+	if len(applied) > maxFollowUpFiles {
+		files += " … and " + strconv.Itoa(len(applied)-maxFollowUpFiles) + " more"
+	}
+	if record.GitFollowUp == store.GitFollowUpCommit {
+		return " · the user asks you to commit the applied files on the current branch: commit only " + files +
+			", with a message you write from the change — no new branch, no push"
+	}
+	return " · the user asks for a new branch and a pull request: first ask them for the branch name (suggest one from the change); then create the branch, commit only " +
+		files + ", push it and open the pull request"
+}
+
+// gitFollowUpLabel names a follow-up for the user: "commit", "PR", "".
+func gitFollowUpLabel(followUp store.AgentEditGitFollowUp) string {
+	switch followUp {
+	case store.GitFollowUpCommit:
+		return "commit"
+	case store.GitFollowUpPullRequest:
+		return "PR"
+	}
+	return ""
 }
 
 // agentEditSessionOver answers the session's waiters and leaves its review.
@@ -480,7 +527,7 @@ func (m Model) rootRelOf(rel string) (string, bool) {
 // the user can undo back to what they had; the rest are written off the UI
 // goroutine. Unsaved work in the editor is replaced when replaceUnsaved,
 // otherwise its file is skipped.
-func (m Model) startAgentEditApply(id, policy string, replaceUnsaved bool, keep int, reply chan<- string) (Model, tea.Cmd) {
+func (m Model) startAgentEditApply(id, policy string, replaceUnsaved bool, followUp store.AgentEditGitFollowUp, keep int, reply chan<- string) (Model, tea.Cmd) {
 	registry := m.agentEdits.registry
 	record, ok := registry.Snapshot(id)
 	switch {
@@ -531,7 +578,7 @@ func (m Model) startAgentEditApply(id, policy string, replaceUnsaved bool, keep 
 	m.notice = "applying edit session " + id + "…"
 	return m, func() tea.Msg {
 		results := registry.ApplyFiles(id, record.Files, decided)
-		finished, err := registry.Finish(id, policy, results, keep)
+		finished, err := registry.Finish(id, policy, followUp, results, keep)
 		return agentEditsFinishedMsg{session: id, record: finished, err: err, reply: reply}
 	}
 }
@@ -581,11 +628,19 @@ func (m Model) handleAgentEditsFinished(msg agentEditsFinishedMsg) (tea.Model, t
 		return m.refreshAgentEditsPending(), nil
 	}
 	sendExternalReply(msg.reply, agentEditOutcomeReply(msg.record))
+	agentHeard := msg.reply != nil || len(m.agentEdits.waiters[msg.session]) > 0
 	m = m.agentEditSessionOver(msg.session, msg.record)
+	outcome := "edit session " + msg.session + " " + msg.record.Outcome
+	if agentEditGitFollowUpText(msg.record) != "" {
+		outcome += " · asked the agent to " + map[store.AgentEditGitFollowUp]string{store.GitFollowUpCommit: "commit", store.GitFollowUpPullRequest: "open a PR"}[msg.record.GitFollowUp]
+		if !agentHeard {
+			outcome += " (no agent is waiting now — it hears on its next wait)"
+		}
+	}
 	if msg.record.Status == store.AgentEditApplied || msg.record.Status == store.AgentEditDiscarded {
-		m.notice = "edit session " + msg.session + " " + msg.record.Outcome
+		m.notice = outcome
 	} else {
-		m.errText = "edit session " + msg.session + " " + msg.record.Outcome
+		m.errText = outcome
 	}
 	var gitCmd tea.Cmd
 	if msg.record.Status != store.AgentEditDiscarded {
@@ -634,10 +689,12 @@ func agentEditsReadyChoice(record store.AgentEditSession) choiceOverlay {
 	return choice
 }
 
-// agentEditApplyChoice confirms applying a session; unsaved work in the
-// editor gets its own choice: replace it (undo brings it back in the open
-// buffer) or skip its files.
-func (m Model) agentEditApplyChoice(record store.AgentEditSession) choiceOverlay {
+// agentEditApplyChoice confirms applying a session, and asks what the agent
+// should do in git afterwards: nothing, commit, or a new branch with a pull
+// request. The git choices are offered only when every staged file is in a
+// git repo the editor knows of. It returns the follow-up behind each choice
+// but the last (Cancel).
+func (m Model) agentEditApplyChoice(record store.AgentEditSession) (choiceOverlay, []store.AgentEditGitFollowUp) {
 	choice := choiceOverlay{kind: choiceApplyAgentEdits, title: "Apply edit session " + record.Session + "?"}
 	choice.body = append(choice.body, overlayLine{text: "write " + countText(len(record.Files), "file") + " to disk", style: overlayLineStrong})
 	choice.body = append(choice.body, agentEditFileLines(record)...)
@@ -652,14 +709,57 @@ func (m Model) agentEditApplyChoice(record store.AgentEditSession) choiceOverlay
 		choice.body = append(choice.body, stacked...)
 		apply = "Apply both"
 	}
-	unsaved := m.unsavedAgentEditFiles(record)
-	if len(unsaved) == 0 {
-		choice.choices = []string{apply, "Cancel"}
-		return choice
+	if unsaved := m.unsavedAgentEditFiles(record); len(unsaved) > 0 {
+		what := "skipped"
+		if m.agentEdits.applyReplaceUnsaved {
+			what = "replaced"
+		}
+		choice.body = append(choice.body, overlayLine{text: "unsaved edits in " + strings.Join(unsaved, ", ") + " — " + what, style: overlayLineHighlight})
 	}
-	choice.body = append(choice.body, overlayLine{text: "unsaved edits in " + strings.Join(unsaved, ", "), style: overlayLineHighlight})
-	choice.choices = []string{apply + ", replace unsaved", apply + ", skip those", "Cancel"}
+	repos, inRepos := m.agentEditRepos(record)
+	if !inRepos {
+		choice.choices = []string{apply, "Cancel"}
+		return choice, []store.AgentEditGitFollowUp{store.GitFollowUpNone}
+	}
+	choice.body = append(choice.body,
+		overlayLine{text: "then the agent: commits in " + strings.Join(repos, ", ") + ", or opens a PR on a new branch (it asks you the name) — Apply only leaves git alone", style: overlayLineDim})
+	choice.choices = []string{apply + " only", apply + " & commit", apply + " & new PR", "Cancel"}
+	return choice, []store.AgentEditGitFollowUp{store.GitFollowUpNone, store.GitFollowUpCommit, store.GitFollowUpPullRequest}
+}
+
+// agentEditUnsavedChoice asks, before the apply popup, what becomes of
+// unsaved work in files the session changes: replace it (undo brings it back
+// in the open buffer) or skip those files.
+func agentEditUnsavedChoice(record store.AgentEditSession, unsaved []string) choiceOverlay {
+	choice := choiceOverlay{kind: choiceAgentEditsUnsaved, title: "Apply edit session " + record.Session + "?", choices: []string{"Replace unsaved", "Skip those files", "Cancel"}}
+	choice.body = append(choice.body,
+		overlayLine{text: "unsaved edits in " + strings.Join(unsaved, ", "), style: overlayLineHighlight},
+		overlayLine{text: "replace them with the staged content (undo brings an open buffer's back), or apply the other files only", style: overlayLineDim},
+	)
 	return choice
+}
+
+// agentEditRepos names the git repos a session's files are in, by
+// workspace path ("." = the workspace itself); inRepos is false when some
+// file is in none. It reads only what the editor already knows: no disk.
+func (m Model) agentEditRepos(record store.AgentEditSession) (repos []string, inRepos bool) {
+	for _, file := range record.Files {
+		repo := "."
+		if !m.workspaceIsRepo {
+			if repo = m.deepestRepoFor(file.Rel); repo == "" {
+				return nil, false
+			}
+		}
+		if !slices.Contains(repos, repo) {
+			repos = append(repos, repo)
+		}
+	}
+	for index, repo := range repos {
+		if repo == "." {
+			repos[index] = filepath.Base(m.workspaceRoot)
+		}
+	}
+	return repos, len(repos) > 0
 }
 
 // pendingBaseSessions lists the pending sessions the record's files build
@@ -735,12 +835,7 @@ func (m Model) resolveAgentEditsChoice(kind choiceOverlayKind, chosen int, choic
 	case choiceLeaveAgentEditReview:
 		switch chosen {
 		case 0:
-			if len(m.unsavedAgentEditFiles(record)) > 0 || len(m.pendingBaseSessions(record)) > 0 {
-				m.agentEdits.choiceSession = id
-				m.choice = m.agentEditApplyChoice(record)
-				return m, nil
-			}
-			return m.startAgentEditApply(id, store.AgentEditPolicyReview, false, m.agentEditKeep(), nil)
+			return m.askApplyAgentEdits(id), nil
 		case 1:
 			return m.startAgentEditDiscard(id)
 		case 2:
@@ -748,15 +843,22 @@ func (m Model) resolveAgentEditsChoice(kind choiceOverlayKind, chosen int, choic
 		}
 		m = m.exitReview().deferAgentEdits(id)
 		m.notice = "agent edits " + id + " kept for later — reopen them under Ctrl+T › agent edits"
-	case choiceApplyAgentEdits:
-		switch {
-		case chosen == choiceCount-1:
+	case choiceAgentEditsUnsaved:
+		if chosen >= 2 {
 			m.notice = "apply cancelled"
-		case choiceCount == 3:
-			return m.startAgentEditApply(id, store.AgentEditPolicyReview, chosen == 0, m.agentEditKeep(), nil)
-		default:
-			return m.startAgentEditApply(id, store.AgentEditPolicyReview, false, m.agentEditKeep(), nil)
+			return m, nil
 		}
+		m.agentEdits.applyReplaceUnsaved = chosen == 0
+		m.agentEdits.choiceSession = id
+		m.choice, m.agentEdits.applyFollowUps = m.agentEditApplyChoice(record)
+	case choiceApplyAgentEdits:
+		followUps := m.agentEdits.applyFollowUps
+		m.agentEdits.applyFollowUps = nil
+		if chosen < 0 || chosen >= len(followUps) {
+			m.notice = "apply cancelled"
+			return m, nil
+		}
+		return m.startAgentEditApply(id, store.AgentEditPolicyReview, m.agentEdits.applyReplaceUnsaved, followUps[chosen], m.agentEditKeep(), nil)
 	case choiceDiscardAgentEdits:
 		if chosen == 0 {
 			return m.startAgentEditDiscard(id)
@@ -784,7 +886,12 @@ func (m Model) askApplyAgentEdits(id string) Model {
 		return m
 	}
 	m.agentEdits.choiceSession = id
-	m.choice = m.agentEditApplyChoice(record)
+	m.agentEdits.applyReplaceUnsaved = false
+	if unsaved := m.unsavedAgentEditFiles(record); len(unsaved) > 0 {
+		m.choice = agentEditUnsavedChoice(record, unsaved)
+		return m
+	}
+	m.choice, m.agentEdits.applyFollowUps = m.agentEditApplyChoice(record)
 	return m
 }
 

@@ -57,7 +57,20 @@ type AgentEditSession struct {
 	// ChangeRequests is every time the user asked the agents for changes
 	// from the review, oldest first; stored as [] when there are none.
 	ChangeRequests []AgentEditChangeRequest `json:"changeRequests"`
+	// GitFollowUp is what the user asked the agent to do in git once the
+	// session was applied; the editor itself never runs git for it.
+	GitFollowUp AgentEditGitFollowUp `json:"gitFollowUp"`
 }
+
+// AgentEditGitFollowUp is the git work the user asks of the agent along
+// with applying a session.
+type AgentEditGitFollowUp string
+
+const (
+	GitFollowUpNone        AgentEditGitFollowUp = "none"         // apply only: the agent leaves git alone
+	GitFollowUpCommit      AgentEditGitFollowUp = "commit"       // commit the applied files on the current branch
+	GitFollowUpPullRequest AgentEditGitFollowUp = "pull-request" // a new branch (name agreed with the user), commit, push, open a PR
+)
 
 // AgentEditChangeRequest is the user asking a ready session's agents for
 // changes: the session went back to editing. It is answered by the next edit
@@ -77,11 +90,14 @@ func (session AgentEditSession) OpenChangeRequest() (AgentEditChangeRequest, boo
 	return last, last.AnsweredAt.IsZero()
 }
 
-// WithChangeRequests fills in the empty change-request log of a record from
-// before change requests were kept.
-func (session AgentEditSession) WithChangeRequests() AgentEditSession {
+// WithStoredDefaults fills in what a record from before change requests and
+// git follow-ups were kept lacks: an empty log and no follow-up.
+func (session AgentEditSession) WithStoredDefaults() AgentEditSession {
 	if session.ChangeRequests == nil {
 		session.ChangeRequests = []AgentEditChangeRequest{}
+	}
+	if session.GitFollowUp == "" {
+		session.GitFollowUp = GitFollowUpNone
 	}
 	return session
 }
@@ -331,7 +347,7 @@ func (log *AgentEditLog) load(prefix string) ([]AgentEditSession, error) {
 		for index := range keys {
 			var session AgentEditSession
 			if found[index] && json.Unmarshal(values[index], &session) == nil {
-				sessions = append(sessions, session.WithAgents().WithChangeRequests())
+				sessions = append(sessions, session.WithAgents().WithStoredDefaults())
 			}
 		}
 		return nil

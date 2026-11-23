@@ -23,6 +23,7 @@ const (
 	choiceDiscardAgentEdits                      // drop a staged edit session — same payload
 	choiceLeaveAgentEditReview                   // Esc on a staged review: apply, discard or keep for later — same payload
 	choiceForceEndAgentEdits                     // stop waiting for a session's agents still editing — same payload
+	choiceAgentEditsUnsaved                      // before applying: replace or skip files with unsaved work — same payload
 )
 
 // overlayLineStyle is how one body line of a choice overlay is drawn.
@@ -162,7 +163,7 @@ func (m Model) handleChoiceKey(key string) (tea.Model, tea.Cmd) {
 		if chosen == 0 {
 			return m.quitReviewSession()
 		}
-	case choiceAgentEditsReady, choiceApplyAgentEdits, choiceDiscardAgentEdits, choiceLeaveAgentEditReview, choiceForceEndAgentEdits:
+	case choiceAgentEditsReady, choiceApplyAgentEdits, choiceDiscardAgentEdits, choiceLeaveAgentEditReview, choiceForceEndAgentEdits, choiceAgentEditsUnsaved:
 		return m.resolveAgentEditsChoice(kind, chosen, choiceCount)
 	}
 	return m, nil

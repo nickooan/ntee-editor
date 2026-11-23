@@ -755,3 +755,14 @@ func TestAChangeRequestSendsTheNextEditBackToTheSession(t *testing.T) {
 		t.Fatalf("the follow-up goes to the same session, open for edits again: %q", got)
 	}
 }
+
+func TestAFinishedOutcomeCarriesTheUsersGitFollowUp(t *testing.T) {
+	h := newHarness(t)
+	h.setReply(func(string) string {
+		return "ok finished — edit session e1 applied 1 file · the user asks for a new branch and a pull request: first ask them for the branch name (suggest one from the change); then create the branch, commit only a.go, push it and open the pull request"
+	})
+	result := h.call(1, toolWait, map[string]any{"session": "e1"})
+	if text := result.Content[0].Text; result.IsError || !strings.Contains(text, "first ask them for the branch name") || !strings.Contains(text, "commit only a.go") {
+		t.Fatalf("the follow-up reaches the agent intact: %+v", result)
+	}
+}

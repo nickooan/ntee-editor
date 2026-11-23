@@ -192,7 +192,7 @@ func TestApplyWritesAndSkipsConflicts(t *testing.T) {
 		t.Fatal("applied files are written, the conflicted one is left alone")
 	}
 
-	finished, err := registry.Finish("s1", store.AgentEditPolicyApply, results, 20)
+	finished, err := registry.Finish("s1", store.AgentEditPolicyApply, store.GitFollowUpNone, results, 20)
 	must(t, err)
 	if finished.Status != store.AgentEditPartlyApplied || !strings.Contains(finished.Outcome, "applied 2 of 3 files") || !strings.Contains(finished.Outcome, "c.go (changed on disk") {
 		t.Fatalf("finished = %s: %s", finished.Status, finished.Outcome)

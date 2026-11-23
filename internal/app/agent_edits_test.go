@@ -327,10 +327,14 @@ func TestAgentEditUserApplyCanReplaceUnsavedWork(t *testing.T) {
 	m.choice = choiceOverlay{}
 
 	m = m.askApplyAgentEdits("e1")
-	if len(m.choice.choices) != 3 || !strings.Contains(m.choice.body[len(m.choice.body)-1].text, "unsaved edits in main.go") {
-		t.Fatalf("unsaved work gets its own choice: %+v", m.choice)
+	if m.choice.kind != choiceAgentEditsUnsaved || len(m.choice.choices) != 3 || !strings.Contains(m.choice.body[0].text, "unsaved edits in main.go") {
+		t.Fatalf("unsaved work is its own first step: %+v", m.choice)
 	}
-	next, cmd := m.Update(keyPress(tea.KeyEnter)) // Apply, replace unsaved
+	m = key(m, keyPress(tea.KeyEnter)) // Replace unsaved
+	if m.choice.kind != choiceApplyAgentEdits || !strings.Contains(m.choice.body[len(m.choice.body)-1].text, "unsaved edits in main.go — replaced") {
+		t.Fatalf("then the apply popup, saying what becomes of it: %+v", m.choice)
+	}
+	next, cmd := m.Update(keyPress(tea.KeyEnter)) // Apply
 	m = settleAgentEdits(next.(Model), cmd)
 	if m.edit.dirty || diskContent(t, root, "main.go") != "package app\n\nfunc main() {\n}\n" {
 		t.Fatalf("applied over the unsaved edits: dirty=%v", m.edit.dirty)
@@ -407,7 +411,12 @@ func TestAgentEditReviewEscKeepsForLaterAndTellsTheAgent(t *testing.T) {
 func TestAgentEditReviewEscApplyAll(t *testing.T) {
 	m, root, waitReply := stagedReview(t)
 	m = key(m, keyPress(tea.KeyEscape))
-	next, cmd := m.Update(keyPress(tea.KeyEnter)) // Apply all
+	m = key(m, keyPress(tea.KeyEnter)) // Apply all
+	if m.choice.kind != choiceApplyAgentEdits {
+		t.Fatalf("Apply all opens the apply popup: %+v", m.choice)
+	}
+	noReply(t, waitReply)
+	next, cmd := m.Update(keyPress(tea.KeyEnter)) // Apply
 	m = settleAgentEdits(next.(Model), cmd)
 	if outcome := gotReply(t, waitReply); outcome != "finished — edit session e1 applied 1 file" {
 		t.Fatalf("apply all from the Esc prompt applies at once: %q", outcome)
@@ -435,7 +444,7 @@ func TestAgentEditReviewEscApplyAllAsksAboutUnsavedWork(t *testing.T) {
 	m, root, waitReply := stagedReviewWith(t, func(m Model) Model { return runes(m.openFileAt("main.go"), "// mine ") })
 	m = key(m, keyPress(tea.KeyEscape))
 	m = key(m, keyPress(tea.KeyEnter)) // Apply all
-	if m.choice.kind != choiceApplyAgentEdits || len(m.choice.choices) != 3 {
+	if m.choice.kind != choiceAgentEditsUnsaved || len(m.choice.choices) != 3 {
 		t.Fatalf("unsaved work is asked about first: %+v", m.choice)
 	}
 	noReply(t, waitReply)

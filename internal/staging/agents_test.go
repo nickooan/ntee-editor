@@ -264,10 +264,57 @@ func TestChangeRequestsAreStoredExplicitly(t *testing.T) {
 	}
 	var legacy store.AgentEditSession
 	must(t, json.Unmarshal([]byte(`{"session":"old","status":"pending","files":[]}`), &legacy))
-	if legacy = legacy.WithChangeRequests(); legacy.ChangeRequests == nil {
+	if legacy = legacy.WithStoredDefaults(); legacy.ChangeRequests == nil {
 		t.Fatal("a legacy record loads with an empty log")
 	}
 	if _, open := legacy.OpenChangeRequest(); open {
 		t.Fatal("and nothing open")
 	}
+}
+
+func TestFinishKeepsTheGitFollowUpExplicitly(t *testing.T) {
+	registry, _, log := newTestRegistry(t)
+	_, err := registry.Write("S", "agent-a", "a.go", "a\n")
+	must(t, err)
+	if pending, _ := log.LoadPendingAgentEdits(); pending[0].GitFollowUp != store.GitFollowUpNone {
+		t.Fatalf("a new session stores none: %q", pending[0].GitFollowUp)
+	}
+	_, _, err = registry.MarkAgentEnded("S", "agent-a")
+	must(t, err)
+	record, err := registry.Finish("S", store.AgentEditPolicyReview, store.GitFollowUpPullRequest, registry.ApplyFiles("S", mustSnapshot(t, registry, "S").Files, nil), 20)
+	must(t, err)
+	if record.GitFollowUp != store.GitFollowUpPullRequest {
+		t.Fatalf("finish records the follow-up: %q", record.GitFollowUp)
+	}
+
+	_, err = registry.Write("D", "agent-a", "a.go", "d\n")
+	must(t, err)
+	discarded, err := registry.Discard("D", "the user", 20)
+	must(t, err)
+	data, err := json.Marshal(discarded)
+	must(t, err)
+	if !strings.Contains(string(data), `"gitFollowUp":"none"`) {
+		t.Fatalf("a discard stores none explicitly: %s", data)
+	}
+
+	_, err = registry.Write("E", "agent-a", "a.go", "e\n")
+	must(t, err)
+	if empty, err := registry.Finish("E", store.AgentEditPolicyApply, "", nil, 20); err != nil || empty.GitFollowUp != store.GitFollowUpNone {
+		t.Fatalf("no follow-up given is none: %q %v", empty.GitFollowUp, err)
+	}
+
+	var legacy store.AgentEditSession
+	must(t, json.Unmarshal([]byte(`{"session":"old","status":"applied","files":[]}`), &legacy))
+	if legacy.WithStoredDefaults().GitFollowUp != store.GitFollowUpNone {
+		t.Fatal("a legacy record loads as none")
+	}
+}
+
+func mustSnapshot(t *testing.T, registry *Registry, session string) store.AgentEditSession {
+	t.Helper()
+	record, ok := registry.Snapshot(session)
+	if !ok {
+		t.Fatalf("no pending session %s", session)
+	}
+	return record
 }

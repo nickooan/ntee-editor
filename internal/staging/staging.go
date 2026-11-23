@@ -344,7 +344,7 @@ func (r *Registry) setFor(session string) (*stagedSet, bool, error) {
 	if finished, ok := r.finished[session]; ok {
 		return nil, false, fmt.Errorf("edit session %s already finished (%s) — start a new session id", session, finished.Status)
 	}
-	set := &stagedSet{record: store.AgentEditSession{Session: session, Status: store.AgentEditPending, StartedAt: r.now(), Files: []store.AgentEditFile{}, Checks: true, ChangeRequests: []store.AgentEditChangeRequest{}}}
+	set := &stagedSet{record: store.AgentEditSession{Session: session, Status: store.AgentEditPending, StartedAt: r.now(), Files: []store.AgentEditFile{}, Checks: true, ChangeRequests: []store.AgentEditChangeRequest{}, GitFollowUp: store.GitFollowUpNone}}
 	r.pending[session] = set
 	return set, true, nil
 }
@@ -565,7 +565,7 @@ func (r *Registry) RequestChanges(session string) (record store.AgentEditSession
 	}
 	record.Agents = agents
 	record.AgentEndedAt, record.ReadyAt = time.Time{}, time.Time{}
-	record.ChangeRequests = append(slices.Clip(record.WithChangeRequests().ChangeRequests), store.AgentEditChangeRequest{At: r.now()})
+	record.ChangeRequests = append(slices.Clip(record.WithStoredDefaults().ChangeRequests), store.AgentEditChangeRequest{At: r.now()})
 	if err := r.log.SavePendingAgentEdit(record); err != nil {
 		return store.AgentEditSession{}, nil, fmt.Errorf("cannot save the session: %w", err)
 	}
@@ -658,10 +658,11 @@ func (r *Registry) noSession(session string) error {
 }
 
 // Finish records how applying went — each file's result, the session's
-// status and outcome — and moves the session to the finished records,
-// keeping the newest keep of them.
-func (r *Registry) Finish(session, policy string, results map[string]FileResult, keep int) (store.AgentEditSession, error) {
+// status and outcome, and the git work the user asked of the agent — and
+// moves the session to the finished records, keeping the newest keep.
+func (r *Registry) Finish(session, policy string, followUp store.AgentEditGitFollowUp, results map[string]FileResult, keep int) (store.AgentEditSession, error) {
 	return r.finish(session, keep, func(record store.AgentEditSession) store.AgentEditSession {
+		record.GitFollowUp = cmp.Or(followUp, store.GitFollowUpNone)
 		files := slices.Clone(record.Files)
 		applied := 0
 		var notApplied []string
@@ -703,6 +704,7 @@ func (r *Registry) Discard(session, by string, keep int) (store.AgentEditSession
 	return r.finish(session, keep, func(record store.AgentEditSession) store.AgentEditSession {
 		record.Status = store.AgentEditDiscarded
 		record.Outcome = "discarded by " + by
+		record.GitFollowUp = store.GitFollowUpNone
 		return record
 	})
 }

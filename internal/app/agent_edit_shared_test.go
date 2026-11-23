@@ -67,7 +67,7 @@ func TestASharedSessionWaitsForEveryAgent(t *testing.T) {
 	if m = m.askApplyAgentEdits("S"); m.choice.open() || !strings.Contains(m.errText, "agents are still editing edit session S (agent-b)") {
 		t.Fatalf("applying waits for every agent: choice=%v err=%q", m.choice.open(), m.errText)
 	}
-	if m, _ = m.startAgentEditApply("S", store.AgentEditPolicyReview, false, 20, nil); diskContent(t, root, "main.go") != "package main\n\nfunc main() {\n}\n" {
+	if m, _ = m.startAgentEditApply("S", store.AgentEditPolicyReview, false, store.GitFollowUpNone, 20, nil); diskContent(t, root, "main.go") != "package main\n\nfunc main() {\n}\n" {
 		t.Fatal("nothing is written")
 	}
 	if m = m.askDiscardAgentEdits("S"); m.choice.kind != choiceDiscardAgentEdits {

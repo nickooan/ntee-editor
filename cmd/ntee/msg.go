@@ -297,6 +297,10 @@ Edit sessions — stage your file edits in the editor instead of writing them:
                       reviewing N staged files; agent applies — as
                       wait below, once the files are written
         wait    ok finished — edit session … applied N files     exit 0
+                      · the user may ask you to commit the applied
+                      files, or for a new branch (ask them its name)
+                      and a pull request — do just that; nothing
+                      asked: leave git alone
                 error edit session … applied N of M files; not applied:
                       <file> (<why>), …                          exit 1
                 ended edit session … was discarded by the user — nothing

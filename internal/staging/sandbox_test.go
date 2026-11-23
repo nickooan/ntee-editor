@@ -133,7 +133,7 @@ func TestSandboxesGoWhenTheSessionFinishes(t *testing.T) {
 		must(t, err)
 	}
 	record, _ := registry.Snapshot("applied")
-	_, err := registry.Finish("applied", store.AgentEditPolicyReview, registry.ApplyFiles("applied", record.Files, nil), 20)
+	_, err := registry.Finish("applied", store.AgentEditPolicyReview, store.GitFollowUpNone, registry.ApplyFiles("applied", record.Files, nil), 20)
 	must(t, err)
 	_, err = registry.Discard("discarded", "the user", 20)
 	must(t, err)

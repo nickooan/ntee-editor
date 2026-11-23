@@ -22,6 +22,7 @@ Rules:
 - "not applied … changed on disk since it was staged" (or a session it built on changed or was discarded): re-read it with read_file and stage it again (a new session).
 - "ended" or "discarded": the user stopped this change set — do not re-send it unless asked.
 - "changes requested" (from edit_wait): the user wants to talk about the session before deciding. Stop calling tools and tell the user, in your reply, that you are ready for their questions or changes. Once they answer, re-read with read_file, stage the follow-ups (they go into the same session), then edit_end and edit_wait again.
+- Git after applying: when edit_wait's outcome says the user asks you to commit, commit only the files it lists, on the current branch, with a message you write from the change. When it asks for a new branch and a pull request, first ask the user for the branch name (suggest one), then create the branch, commit those files, push and open the pull request. When it asks neither, do not touch git.
 - "set aside for later": the edits stay staged and unwritten until the user decides; carry on, and call edit_wait again when you need the outcome.
 - If a tool says no ntee editor is running, nothing was staged: make the edit with your usual file tools.`
 
@@ -145,7 +146,8 @@ var toolDefinitions = []toolDefinition{
 		Name:  toolWait,
 		Title: "Wait for the user's review",
 		Description: "Wait until the user applies or discards the session they are reviewing (default: the session that ended last). If it says still waiting, call it again. " +
-			"If it says changes requested, stop and ask the user in your reply what they want; then stage the follow-ups in the same session and end it again.",
+			"If it says changes requested, stop and ask the user in your reply what they want; then stage the follow-ups in the same session and end it again. " +
+			"A finished outcome may ask you to commit the applied files, or to open a pull request on a new branch (agree the branch name with the user first).",
 		InputSchema: objectSchema(map[string]any{
 			"timeout_seconds": map[string]any{"type": "integer", "minimum": 1, "maximum": maxWaitSeconds, "description": "How long to wait this call (default 300)."},
 		}),

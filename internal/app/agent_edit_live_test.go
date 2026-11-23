@@ -271,3 +271,10 @@ func TestTheReviewWaitsForTheUserToStopTyping(t *testing.T) {
 		t.Fatalf("the end asks instead of moving them: mode=%v choice=%v", m.mode, m.choice.kind)
 	}
 }
+
+func TestAChangeRequestReachesTheSenderAsItsOwnReply(t *testing.T) {
+	line := replyFromOutcome(agentEditChangesRequestedReply("e1"))
+	if !strings.HasPrefix(line, "ok changes requested — ") || strings.HasPrefix(line, "ok ok") || !extmsg.IsChangesRequestedReply(line) {
+		t.Fatalf("the wire reply is not wrapped twice: %q", line)
+	}
+}

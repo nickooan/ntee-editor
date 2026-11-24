@@ -2,7 +2,9 @@ package filetree
 
 import (
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/nickooan/ntee-editor/internal/gitcmd"
 )
@@ -44,18 +46,40 @@ func MergeRepoDirty(root string, repos []string) (map[string]bool, bool) {
 	if len(repos) == 0 {
 		return nil, false
 	}
-	merged := map[string]bool{}
-	anyOK := false
-	for _, rel := range repos {
+	type repoStatus struct {
+		rel   string
+		dirty map[string]bool
+		ok    bool
+	}
+	statuses := make([]repoStatus, len(repos))
+	// One git status per repo, several at a time: a workspace of many nested
+	// repos must not wait for them one after another.
+	slots := make(chan struct{}, runtime.NumCPU())
+	var wait sync.WaitGroup
+	for index, rel := range repos {
 		rel = strings.Trim(filepath.ToSlash(rel), "/")
 		if rel == "" || rel == "." {
 			continue
 		}
-		dirty, ok := GitDirtySet(filepath.Join(root, filepath.FromSlash(rel)))
-		if !ok {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			slots <- struct{}{}
+			defer func() { <-slots }()
+			dirty, ok := GitDirtySet(filepath.Join(root, filepath.FromSlash(rel)))
+			statuses[index] = repoStatus{rel: rel, dirty: dirty, ok: ok}
+		}()
+	}
+	wait.Wait()
+
+	merged := map[string]bool{}
+	anyOK := false
+	for _, status := range statuses {
+		if !status.ok {
 			continue
 		}
 		anyOK = true
+		rel, dirty := status.rel, status.dirty
 		for path := range dirty {
 			full := rel
 			if path != "" {

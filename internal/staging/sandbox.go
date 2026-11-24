@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nickooan/ntee-editor/internal/filetree"
@@ -38,11 +39,13 @@ type SandboxResult struct {
 }
 
 // sandboxState is one session's box. mu serializes building it, apart from
-// the session's saveMu, so edits never wait on a clone.
+// the session's saveMu, so edits never wait on a clone. stale marks a box
+// dropped while a build held mu: whoever takes mu next trashes it first.
 type sandboxState struct {
 	mu      sync.Mutex
 	units   map[string]bool
 	builtAt time.Time
+	stale   atomic.Bool
 }
 
 // WithSandboxDir sets where sessions' sandboxes live; without it Sandbox is
@@ -61,6 +64,9 @@ func (r *Registry) Sandbox(session string, fresh bool, include []string) (Sandbo
 	if r.sandboxDir == "" {
 		return SandboxResult{}, errors.New("this editor keeps no sandboxes")
 	}
+	if _, ok := r.pendingSet(session); !ok {
+		return SandboxResult{}, r.noSession(session)
+	}
 	state := r.sandboxStateFor(session)
 	state.mu.Lock()
 	defer state.mu.Unlock()
@@ -76,7 +82,7 @@ func (r *Registry) Sandbox(session string, fresh bool, include []string) (Sandbo
 		return SandboxResult{}, fmt.Errorf("edit session %s is still being edited (by %s) — its sandbox is built once every agent has sent end", session, AgentNames(record.WithAgents().EditingAgents()))
 	}
 	box := r.sandboxPath(session)
-	if fresh {
+	if state.stale.Swap(false) || fresh {
 		r.trashSandbox(box)
 		state.units, state.builtAt = map[string]bool{}, time.Time{}
 	}
@@ -143,45 +149,47 @@ func placeFile(target, content string) error {
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return err
 	}
-	temporary, err := os.CreateTemp(filepath.Dir(target), "."+filepath.Base(target)+".placing-*")
-	if err != nil {
-		return err
-	}
-	if _, err := temporary.WriteString(content); err != nil {
-		temporary.Close()
-		os.Remove(temporary.Name())
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		os.Remove(temporary.Name())
-		return err
-	}
-	if err := os.Chmod(temporary.Name(), 0o644); err != nil {
-		os.Remove(temporary.Name())
-		return err
-	}
-	if err := os.Rename(temporary.Name(), target); err != nil {
-		os.Remove(temporary.Name())
-		return err
-	}
-	return nil
+	return filetree.WriteFileAtomic(target, content, 0o644) // a copied executable stays one
 }
 
-// DropSandbox deletes the session's sandbox, if it has one.
+// DropSandbox deletes the session's sandbox, if it has one. It never waits
+// for a build in progress — callers hold the session's saveMu — but marks
+// the box stale, and it is trashed as soon as that build lets go.
 func (r *Registry) DropSandbox(session string) {
 	if r.sandboxDir == "" {
 		return
 	}
+	_, pending := r.pendingSet(session)
 	r.sandboxMu.Lock()
 	state := r.sandboxes[session]
-	delete(r.sandboxes, session)
+	if !pending {
+		delete(r.sandboxes, session) // finished: no build comes after this one
+	}
 	r.sandboxMu.Unlock()
-	if state != nil {
-		// Wait out a build in progress, so it cannot land after the drop.
+	box := r.sandboxPath(session)
+	if state == nil {
+		r.trashSandbox(box)
+		return
+	}
+	state.stale.Store(true)
+	if state.mu.TryLock() {
+		r.dropStaleSandbox(state, box)
+		state.mu.Unlock()
+		return
+	}
+	go func() {
 		state.mu.Lock()
 		defer state.mu.Unlock()
+		r.dropStaleSandbox(state, box)
+	}()
+}
+
+// dropStaleSandbox trashes a box marked stale; the caller holds state.mu.
+func (r *Registry) dropStaleSandbox(state *sandboxState, box string) {
+	if state.stale.Swap(false) {
+		r.trashSandbox(box)
+		state.units, state.builtAt = map[string]bool{}, time.Time{}
 	}
-	r.trashSandbox(r.sandboxPath(session))
 }
 
 // sweepSandboxes removes what an earlier run left behind: half-deleted

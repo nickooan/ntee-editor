@@ -66,16 +66,17 @@ func (g *Gitignore) MatchState(path string, isDir bool) (matched, ignored bool) 
 		return false, false
 	}
 	path = strings.TrimPrefix(path, "/")
-	for _, r := range g.rules {
-		if r.dirOnly && !isDir {
+	// The last matching rule wins, so search from the end and stop at it.
+	for index := len(g.rules) - 1; index >= 0; index-- {
+		rule := g.rules[index]
+		if rule.dirOnly && !isDir {
 			continue
 		}
-		if r.re.MatchString(path) {
-			matched = true
-			ignored = !r.negated
+		if rule.re.MatchString(path) {
+			return true, !rule.negated
 		}
 	}
-	return matched, ignored
+	return false, false
 }
 
 // compileGitRule turns one .gitignore line into a rule. ok is false for blank

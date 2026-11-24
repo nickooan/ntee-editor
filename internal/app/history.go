@@ -21,13 +21,19 @@ type snapMetaEntry struct {
 // beginEditSession resets the undo timeline for a freshly-opened editor and
 // records the baseline snapshot (the on-disk content).
 func (m Model) beginEditSession(content string) Model {
+	return m.startEditSession(content, true)
+}
+
+// startEditSession is beginEditSession; syncLSP false skips telling the
+// language server the content, when it was just opened with it (DidOpen).
+func (m Model) startEditSession(content string, syncLSP bool) Model {
 	m.edit = newEditor(content)
 	m.undoSeqs = nil
 	m.undoCursor = 0
 	m.snapDirty = false
 	m.snapMeta = map[int64]snapMetaEntry{}
 	m = m.refreshFileHighlights()
-	return m.pushSnapshot("edit")
+	return m.checkpoint("edit", syncLSP)
 }
 
 // pushSnapshot checkpoints the current editor content: it drops any redo branch
@@ -36,6 +42,10 @@ func (m Model) beginEditSession(content string) Model {
 // every burst boundary (word, newline, cursor line change), so the hot path is
 // hash-only: one rev-memoized join+hash, no store read.
 func (m Model) pushSnapshot(kind string) Model {
+	return m.checkpoint(kind, true)
+}
+
+func (m Model) checkpoint(kind string, syncLSP bool) Model {
 	if m.openFile == nil {
 		return m
 	}
@@ -102,7 +112,7 @@ func (m Model) pushSnapshot(kind string) Model {
 
 	m.snapMeta[seq] = snapMetaEntry{hash: hash, kind: kind}
 	_ = m.db.SnapshotPut(m.openRel, seq, kind, content) // best-effort
-	if client, ok := m.lsp.ClientFor(m.openFile.Path); ok {
+	if client, ok := m.lsp.ClientFor(m.openFile.Path); ok && syncLSP {
 		client.DidChange(m.openFile.Path, content, m.edit.rev)
 	}
 	return m

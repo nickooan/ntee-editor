@@ -205,31 +205,27 @@ type Model struct {
 	// display model (ctx/add rows index into edit.lines, which
 	// liveDiffDocument binds at use; del rows carry the removed text); it is
 	// computed once per entry by an async computeDiffCmd and guarded against
-	// staleness by diffGen. diffPending* carry a Ctrl+O restore position,
+	// staleness by diffGen. diffPending carries a Ctrl+O restore position,
 	// applied when the recomputed diff lands.
-	diffDocument      diffDocument
-	diffPosition      rowCursor // column is the rune column within the cursor row (Ctrl+J targeting)
-	diffBase          string    // "" = HEAD; else the user-typed revision
-	diffLoading       bool
-	diffGen           int
-	diffPendingCursor int
-	diffPendingScroll int
-	diffHasPending    bool
+	diffDocument diffDocument
+	diffPosition rowCursor // column is the rune column within the cursor row (Ctrl+J targeting)
+	diffBase     string    // "" = HEAD; else the user-typed revision
+	diffLoading  bool
+	diffGen      int
+	diffPending  pendingPosition
 
 	// Blame mode ("git blame" in the @exec bar): a read-only view of the edit
 	// buffer with a per-line author+date gutter (no line numbers). blameRows
 	// map 1:1 to buffer lines; computed once per entry by an async
 	// computeBlameCmd and guarded against staleness by blameGen.
-	// blamePending* carry a Ctrl+O restore position.
-	blameRows          []blameRow
-	blamePosition      rowCursor // row == buffer line; column is the rune column (Ctrl+J targeting)
-	blameAuthorW       int       // author column width: min(longest author, blameAuthorCap)
-	blameNewFile       bool      // untracked path or empty repo: everything uncommitted
-	blameLoading       bool
-	blameGen           int
-	blamePendingCursor int
-	blamePendingScroll int
-	blameHasPending    bool
+	// blamePending carries a Ctrl+O restore position.
+	blameRows     []blameRow
+	blamePosition rowCursor // row == buffer line; column is the rune column (Ctrl+J targeting)
+	blameAuthorW  int       // author column width: min(longest author, blameAuthorCap)
+	blameNewFile  bool      // untracked path or empty repo: everything uncommitted
+	blameLoading  bool
+	blameGen      int
+	blamePending  pendingPosition
 
 	// Document preview modes ("openapi"/"graphql" in the @exec bar): one
 	// read-only rendered document shared by both modes (they are mutually
@@ -372,9 +368,15 @@ type Model struct {
 	hlLines [][]view.HighlightSegment
 	hlHash  string
 	hlPath  string
+	// hlRowsPending: some hlLines rows were marked or spliced plain since the
+	// last full rescan, so they are no complete highlight of hlHash's content.
+	hlRowsPending bool
 
 	// LSP diagnostics, keyed by root-relative path.
 	diags map[string][]lsp.Diagnostic
+	// diagIndex is diags summarized per file when they land, so a frame
+	// reads counts and per-line severities instead of rescanning them.
+	diagIndex map[string]diagnosticIndex
 
 	// Definition/reference picker (Ctrl+J with multiple hits). The preview
 	// caches the selected candidate's file (re-read on file change only);
@@ -424,27 +426,39 @@ type Model struct {
 	session       externalSession
 	endedSessions []endedSession
 
-	// Repo-wide content search overlay (Ctrl+G). All heavy work is async: the
-	// snapshot loads via grepLoadedMsg (guarded by grepGen), searches are
-	// debounced via grepTickMsg and land via grepResultsMsg (guarded by
-	// grepSearchGen). grepResultsGen == grepSearchGen means the displayed
-	// results are current.
-	grepOpen       bool
-	grepTarget     grepTarget // where Enter on a hit goes
-	grepQuery      string
-	grepCursor     int // rune offset into grepQuery
-	grepIndex      int
-	grepResults    []grepHit
-	grepFiles      []grepFile     // streams in per grepBatchMsg; released on close
-	grepFileIndex  map[string]int // rel → grepFiles index; the renderer looks up per frame
-	grepLoading    bool           // snapshot batches still arriving
-	grepLoadBytes  int            // bytes loaded so far, for the maxGrepBytes cap
-	grepGen        int            // bumped per openGrep; drops stale loads
-	grepSearchGen  int            // bumped per query change; tags ticks + results
-	grepResultsGen int            // grepSearchGen of the displayed grepResults
-	grepPrevLines  []string       // selected file's lines, derived on demand
-	grepHlRel      string
-	grepHl         [][]view.HighlightSegment
+	// Repo-wide content search overlay (Ctrl+G).
+	grep grepState
+}
+
+// pendingPosition is a view position to restore once the view's async
+// content lands (a Ctrl+O back into a diff or blame view); set is false when
+// there is none.
+type pendingPosition struct {
+	cursor, scroll int
+	set            bool
+}
+
+// grepState is the Ctrl+G overlay. All heavy work is async: the snapshot
+// loads via grepLoadedMsg (guarded by gen), searches are debounced via
+// grepTickMsg and land via grepResultsMsg (guarded by searchGen).
+// resultsGen == searchGen means the displayed results are current.
+type grepState struct {
+	open       bool
+	target     grepTarget // where Enter on a hit goes
+	query      string
+	cursor     int // rune offset into query
+	index      int
+	results    []grepHit
+	files      []grepFile     // streams in per grepBatchMsg; released on close
+	fileIndex  map[string]int // rel → files index; the renderer looks up per frame
+	loading    bool           // snapshot batches still arriving
+	loadBytes  int            // bytes loaded so far, for the maxGrepBytes cap
+	gen        int            // bumped per openGrep; drops stale loads
+	searchGen  int            // bumped per query change; tags ticks + results
+	resultsGen int            // searchGen of the displayed results
+	prevLines  []string       // selected file's lines, derived on demand
+	hlRel      string
+	hl         [][]view.HighlightSegment
 }
 
 func New(cfg config.Config, db store.Backend, root, notice string, reg lsp.Registry) Model {
@@ -522,10 +536,11 @@ func (m Model) enterRoot() Model {
 	m.gitStatusRunning = false
 	m.gitStatusFailed = false
 	m.diags = map[string][]lsp.Diagnostic{}
+	m.diagIndex = map[string]diagnosticIndex{}
 
 	m.openFile, m.openRel = nil, ""
 	m.fileScrollX, m.fileScrollY = 0, 0
-	m.fileLines, m.hlLines = nil, nil
+	m.fileLines, m.hlLines, m.hlRowsPending = nil, nil, false
 	m.hlPath, m.hlHash = "", ""
 	m.edit = newEditor("")
 	m.undoSeqs, m.undoCursor, m.snapDirty = nil, 0, false
@@ -545,11 +560,7 @@ func (m Model) enterRoot() Model {
 	m.corpusTruncated = false
 	m.pendingValidate = nil
 	m.mode = modeQuery
-	if m.frames != nil {
-		// Same text, different root: the per-message memos must not serve the
-		// previous root's rows within this message.
-		m.frames.treeOk, m.frames.sugOk = false, false
-	}
+	m.invalidateTreeEntries() // same text, different root: rebuild the rows
 
 	lastFile, savedCommand := m.rootSessionPosition()
 	m.selectedCommand = savedCommand
@@ -768,6 +779,7 @@ func (m Model) scanWorkspaceReposCmd() tea.Cmd {
 // :refresh, and Ctrl+U bypassed the in-flight guard and could stack spawns
 // against the poller).
 func (m Model) maybeGitRefresh() (Model, tea.Cmd) {
+	m.invalidateTreeEntries() // its callers just wrote files, or poll for others' writes
 	if !m.gitStatusEnabled() || m.gitStatusRunning {
 		return m, nil
 	}
@@ -912,9 +924,6 @@ func truncatedNotice(cap int) string {
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if m.frames != nil {
-		m.frames.seq++ // new message: per-message memos (treeEntries) go stale
-	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		wasReady := m.ready
@@ -929,12 +938,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case lsp.DiagnosticsMsg:
 		// Servers are workspace-wide; a repo root only keeps its own files.
-		if rel, err := filepath.Rel(m.root, msg.Path); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		if rel, err := filepath.Rel(m.root, msg.Path); err == nil && !filetree.IsEscapingRel(rel) {
 			rel = filepath.ToSlash(rel)
 			if len(msg.Items) == 0 {
 				delete(m.diags, rel)
+				delete(m.diagIndex, rel)
 			} else {
 				m.diags[rel] = msg.Items
+				m.diagIndex[rel] = indexDiagnostics(msg.Items)
 			}
 		}
 		return m, nil
@@ -990,6 +1001,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.corpusBuiltAt = msg.builtAt
 		m.corpusRebuilding = false
 		m.corpusTruncated = msg.truncated
+		m.invalidateTreeEntries()      // a fresh walk and .gitignore
 		m = m.refreshFuzzyCandidates() // an open finder tracks the fresh corpus
 		_ = m.db.SaveCorpus(store.CorpusIndex{
 			Version:   store.CorpusVersion,
@@ -1034,6 +1046,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// search index now (the only passive index trigger in a non-git root).
 		m.termFocused = true
 		m.lastInputAt = time.Now()
+		m.invalidateTreeEntries()
 		var gitCmd, corpusCmd tea.Cmd
 		m, gitCmd = m.maybeGitRefresh()
 		m, corpusCmd = m.ensureCorpus()
@@ -1056,6 +1069,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.gitDirty = msg.dirty
 			m.gitStatusFailed = false
 			if changed {
+				m.invalidateTreeEntries() // the rows' uncommitted colours
 				// The porcelain key-set changing is the "files appeared,
 				// vanished, or changed state" signal: re-derive an open Ctrl+U
 				// list and nudge the search index (TTL-gated, so 3s-poll
@@ -1127,6 +1141,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case agentEditsLayerChangedMsg:
 		return withAgentEditsTick(m.handleAgentEditsLayerChanged(msg))
+
+	case sessionWaitExpiredMsg:
+		return m.dropExpiredWait(msg.reply), nil
 
 	case agentEditsFinishedListMsg:
 		return m.handleAgentEditsFinishedList(msg)
@@ -1207,26 +1224,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.notice = ""
 		m.errText = ""
 
-		if m.choice.open() {
+		switch m.topOverlay() {
+		case overlayChoice:
 			return m.handleChoiceKey(k)
-		}
-		if m.messageOverlay != "" {
+		case overlayMessage:
 			if k == "enter" || k == "esc" {
 				m.messageOverlay = ""
 			}
 			return m, nil
-		}
-
-		if m.fuzzyOpen {
+		case overlayFuzzy:
 			return m.handleFuzzyKey(msg)
-		}
-		if m.defPickOpen {
+		case overlayDefinitionPicker:
 			return m.handleDefPickKey(msg)
-		}
-		if m.grepOpen {
+		case overlayGrep:
 			return m.handleGrepKey(msg)
-		}
-		if m.opMode.open {
+		case overlayOpCommands:
 			return m.handleOpKey(msg)
 		}
 		// The list + detail views own every key: the project-wide chords would
@@ -1290,17 +1302,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // Only the grep query and the edit buffer are multi-line — the single-line
 // bars take the paste with newlines collapsed to spaces.
 func (m Model) handlePaste(text string) (tea.Model, tea.Cmd) {
-	if m.messageOverlay != "" || m.defPickOpen || m.choice.open() {
+	switch m.topOverlay() {
+	case overlayMessage, overlayDefinitionPicker, overlayChoice:
 		return m, nil
-	}
-	if m.fuzzyOpen {
+	case overlayFuzzy:
 		m.fuzzyQuery += pasteLine(text)
 		return m.refreshFuzzy(), nil
-	}
-	if m.grepOpen {
+	case overlayGrep:
 		return m.grepPaste(text)
-	}
-	if m.opMode.open {
+	case overlayOpCommands:
 		if m.opMode.stage == opStageArgs {
 			m.opMode.args, m.opMode.argsCursor = input.InsertAtCursor(m.opMode.args, m.opMode.argsCursor, pasteLine(text))
 		} else if m.opMode.stage == opStagePick {
@@ -1520,27 +1530,37 @@ func (m Model) repoRelativePath(rel string) string {
 // is identical to the uncached walk. Shared by all Model copies (pointer);
 // Update and View run on the program goroutine, so no locking is needed.
 type frameCache struct {
-	seq     int
-	treeOk  bool
-	treeSeq int
-	treeKey string
-	entries []filetree.FileTreeEntry
+	// The sidebar tree memo, kept until its inputs change: the driving path
+	// (treeKey), or anything invalidateTreeEntries is called for. Disk
+	// changes nothing reports are picked up within treeEntriesMaxAge.
+	treeOk      bool
+	treeKey     string
+	treeBuiltAt time.Time
+	treeBuilds  int // bumped on every rebuild: the suggestion memo keys on it
+	entries     []filetree.FileTreeEntry
 
-	// Query-bar suggestion memo (keyed by the typed bar text): the fuzzy
-	// filter over the whole corpus is the dominant per-keystroke cost in home
-	// mode, and the key handler and View must not both pay it.
-	sugOk       bool
-	sugSeq      int
-	sugKey      string
-	suggestions []filetree.InputSuggestion
+	// Query-bar suggestion memo (keyed by the typed bar text, the tree build
+	// and the corpus): the fuzzy filter over the whole corpus is the dominant
+	// per-keystroke cost in home mode, and the key handler and View must not
+	// both pay it.
+	sugOk         bool
+	sugKey        string
+	sugTreeBuild  int
+	sugCorpusAt   time.Time
+	sugCorpusSize int
+	suggestions   []filetree.InputSuggestion
 }
 
-// invalidateTreeEntries drops the per-message tree memo. Handlers that mutate
-// the filesystem mid-message (:touch/:mkdir/:rm) call this so the same
-// cycle's View walks fresh.
+// treeEntriesMaxAge bounds how stale the sidebar memo may get when no event
+// says the tree changed (another process writing files in a non-git root).
+const treeEntriesMaxAge = time.Second
+
+// invalidateTreeEntries drops the tree and suggestion memos. Called when an
+// input of the tree changes: the root, the corpus or .gitignore, the git
+// dirty set, focus regained, or the user's own :touch/:mkdir/:rm.
 func (m Model) invalidateTreeEntries() {
 	if m.frames != nil {
-		m.frames.treeOk = false
+		m.frames.treeOk, m.frames.sugOk = false, false
 	}
 }
 
@@ -1551,15 +1571,13 @@ func (m Model) invalidateTreeEntries() {
 func (m Model) treeEntries() []filetree.FileTreeEntry {
 	key := m.sidebarCommand()
 	f := m.frames
-	if f != nil && f.treeOk && f.treeSeq == f.seq && f.treeKey == key {
+	if f != nil && f.treeOk && f.treeKey == key && time.Since(f.treeBuiltAt) < treeEntriesMaxAge {
 		return f.entries
 	}
 	if m.onlyFile != "" {
 		// Single-file mode: the tree is that file alone.
 		entries := filetree.BuildPathTreeEntries([]string{m.onlyFile}, nil)
-		if f != nil {
-			f.treeOk, f.treeSeq, f.treeKey, f.entries = true, f.seq, key, entries
-		}
+		f.remember(key, entries)
 		return entries
 	}
 	entries := filetree.BuildFileTreeEntries(
@@ -1569,10 +1587,16 @@ func (m Model) treeEntries() []filetree.FileTreeEntry {
 		m.gitignore,
 		m.gitDirty,
 	)
-	if f != nil {
-		f.treeOk, f.treeSeq, f.treeKey, f.entries = true, f.seq, key, entries
-	}
+	f.remember(key, entries)
 	return entries
+}
+
+func (f *frameCache) remember(key string, entries []filetree.FileTreeEntry) {
+	if f == nil {
+		return
+	}
+	f.treeOk, f.treeKey, f.treeBuiltAt, f.entries = true, key, time.Now(), entries
+	f.treeBuilds++
 }
 
 // sidebarCommand is the path that drives directory EXPANSION.
@@ -1649,6 +1673,19 @@ func (m Model) openNewFileAt(rel string) Model {
 // left is stashed, the new one gets an edit session, its draft, a tab, and
 // its remembered cursor. Shared by openFileAt and openNewFileAt.
 func (m Model) showOpenedFile(rel string, f filetree.OpenViewFile) Model {
+	return m.showFile(rel, f, nil)
+}
+
+// jumpLanding is where a jump (openJumpFile) puts the cursor and scroll of
+// the file it opens, instead of the file's remembered cursor.
+type jumpLanding struct {
+	cy, cx, scrollY int
+}
+
+// showFile is showOpenedFile for both kinds of open: a deliberate one
+// (landing nil) starts a fresh jump trail and restores the remembered
+// cursor; a jump keeps the trail and lands where it says.
+func (m Model) showFile(rel string, f filetree.OpenViewFile, landing *jumpLanding) Model {
 	m = m.recordCursor()      // remember where we were in the file being left
 	m = m.stashDraftIfDirty() // the old buffer's unsaved edits become a draft
 	if m.openFile != nil && m.openFile.Path != f.Path {
@@ -1663,8 +1700,10 @@ func (m Model) showOpenedFile(rel string, f filetree.OpenViewFile) Model {
 	m.openFile = &f
 	m.openRel = rel
 	m.fileScrollX, m.fileScrollY = 0, 0
-	m.selectedCommand = rel    // sidebar keeps tracking the open file
-	m.jumpStack = nil          // a deliberate open starts a fresh navigation trail
+	m.selectedCommand = rel // sidebar keeps tracking the open file
+	if landing == nil {
+		m.jumpStack = nil // a deliberate open starts a fresh navigation trail
+	}
 	m = m.clearDiffState()     // and ends any diff review of the file being left
 	m = m.clearConflictState() // likewise any conflict-solving session
 	m = m.clearPreviewState()  // and any OpenAPI/GraphQL preview
@@ -1672,13 +1711,18 @@ func (m Model) showOpenedFile(rel string, f filetree.OpenViewFile) Model {
 	if client, ok := m.lsp.ClientFor(f.Path); ok {
 		client.DidOpen(f.Path, f.Content)
 	}
-	m = m.beginEditSession(f.Content)
+	m = m.startEditSession(f.Content, false) // DidOpen just sent this content
 	if d, ok := m.db.LoadDraft(rel); ok {
 		m = m.restoreDraft(d)
 	}
 	m = m.addTab(rel)
-	// Restore the remembered cursor and anchor its line ~30% from the top.
-	if p, ok := m.cursorMem[rel]; ok {
+	switch p, remembered := m.cursorMem[rel]; {
+	case landing != nil:
+		m.edit.cy, m.edit.cx = landing.cy, landing.cx
+		m.edit.clampCursor()
+		m.fileScrollY = landing.scrollY
+	case remembered:
+		// Restore the remembered cursor and anchor its line ~30% from the top.
 		m.edit.cy = input.Clamp(p.Cy, 0, len(m.edit.lines)-1)
 		m.edit.cx = p.Cx
 		m.edit.clampCursor()
@@ -1697,7 +1741,7 @@ func (m Model) showOpenedFile(rel string, f filetree.OpenViewFile) Model {
 // events, never per keystroke.
 func (m Model) refreshFileHighlights() Model {
 	if m.openFile == nil {
-		m.fileLines, m.hlLines = nil, nil
+		m.fileLines, m.hlLines, m.hlRowsPending = nil, nil, false
 		m.hlPath, m.hlHash = "", "" // a later reopen must not skip on the stale key
 		return m
 	}
@@ -1725,17 +1769,18 @@ func (m Model) refreshFileHighlights() Model {
 	// Identical content already highlighted (save right after a flushed burst,
 	// Esc with no edits, undo back to a rendered state): both caches are
 	// current, skip the whole-buffer re-tokenize.
-	if m.hlPath == m.openRel && m.hlHash == hash {
+	if m.hlPath == m.openRel && m.hlHash == hash && !m.hlRowsPending {
 		return m
 	}
 	m.fileLines = view.NormalizeLines(content)
 	m.hlHash = hash
 	m.hlPath = m.openRel
 	if kb := m.cfg.Editor.MaxHighlightKB; kb > 0 && len(content) > kb*1024 {
-		m.hlLines = nil // too big: render plain
+		m.hlLines, m.hlRowsPending = nil, false // too big: render plain
 		return m
 	}
 	m.hlLines = syntax.HighlightLines(m.openFile.FileName, content)
+	m.hlRowsPending = false
 	return m
 }
 
@@ -1749,7 +1794,7 @@ func (m Model) invalidateHighlightCaches() Model {
 	if m.searchHl != nil && m.openFile != nil { // frozen at enterSearch
 		m.searchHl = syntax.HighlightLines(m.openFile.FileName, m.searchContent)
 	}
-	m.grepHlRel, m.grepHl = "", nil // refreshGrepPreview recomputes on next selection
+	m.grep.hlRel, m.grep.hl = "", nil // refreshGrepPreview recomputes on next selection
 	m.defPickPrevRel, m.defPickPrevLines, m.defPickPrevHl = "", nil, nil
 	return m
 }
@@ -1759,6 +1804,7 @@ func (m Model) invalidateHighlightCaches() Model {
 func (m Model) hlMarkLine(i int) Model {
 	if i >= 0 && i < len(m.hlLines) {
 		m.hlLines[i] = nil
+		m.hlRowsPending = true
 	}
 	return m
 }
@@ -1775,6 +1821,7 @@ func (m Model) hlInsertLines(i, n int) Model {
 		return m
 	}
 	m.hlLines = slices.Insert(m.hlLines, i, make([][]view.HighlightSegment, n)...)
+	m.hlRowsPending = true
 	return m
 }
 

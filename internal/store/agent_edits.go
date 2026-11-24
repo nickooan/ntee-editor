@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -231,6 +232,10 @@ type AgentEditLogStore interface {
 	// SavePendingAgentEdit writes a pending session's record, replacing its
 	// previous one.
 	SavePendingAgentEdit(session AgentEditSession) error
+	// SavePendingAgentEditFiles is SavePendingAgentEdit when only the files
+	// named in changed (none: only the session's own fields) differ from
+	// the record last saved — an edit rewrites one file, not the session.
+	SavePendingAgentEditFiles(session AgentEditSession, changed []string) error
 	// FinishAgentEdit moves a finished session to the finished records and
 	// keeps only the newest keep of them.
 	FinishAgentEdit(session AgentEditSession, keep int) error
@@ -238,6 +243,11 @@ type AgentEditLogStore interface {
 	LoadPendingAgentEdits() ([]AgentEditSession, error)
 	// LoadFinishedAgentEdits returns the finished sessions, newest first.
 	LoadFinishedAgentEdits() ([]AgentEditSession, error)
+	// LoadFinishedAgentEditSummaries is LoadFinishedAgentEdits without the
+	// files' contents and edits (SummarizeAgentEdit) — what a list needs.
+	LoadFinishedAgentEditSummaries() ([]AgentEditSession, error)
+	// LoadFinishedAgentEdit returns one finished session whole, for tracing.
+	LoadFinishedAgentEdit(session string) (AgentEditSession, bool, error)
 	// TrimAgentEdits deletes the oldest finished sessions beyond keep.
 	TrimAgentEdits(keep int) error
 	// Tidy reclaims the space dead records take, when that is worth it.
@@ -256,9 +266,43 @@ type TidyResult struct {
 var tidyMinBytes int64 = 1 << 20
 
 const (
-	agentEditPendingPrefix = "agentedit:pending:"
-	agentEditDonePrefix    = "agentedit:done:"
+	agentEditPendingPrefix     = "agentedit:pending:"
+	agentEditPendingFilePrefix = "agentedit:pendingfile:"
+	agentEditDonePrefix        = "agentedit:done:"
+	agentEditSummaryPrefix     = "agentedit:donesum:"
 )
+
+// SummarizeAgentEdit is session without its files' contents and edits: the
+// status, outcome, agents and each file's path and result.
+func SummarizeAgentEdit(session AgentEditSession) AgentEditSession {
+	files := make([]AgentEditFile, len(session.Files))
+	for index, file := range session.Files {
+		files[index] = AgentEditFile{Rel: file.Rel, BaseExists: file.BaseExists, BaseSession: file.BaseSession, Result: file.Result, ResultNote: file.ResultNote, Edits: []AgentEdit{}}
+	}
+	session.Files = files
+	return session
+}
+
+// agentEditSummaryKey is a finished session's summary, beside its done key.
+func agentEditSummaryKey(doneKey string) string {
+	return agentEditSummaryPrefix + strings.TrimPrefix(doneKey, agentEditDonePrefix)
+}
+
+// pendingAgentEditHeader is how the db keeps a pending session: its own
+// fields under the pending key, with each staged file under its own key
+// (agentEditPendingFileKey) so an edit rewrites only its file. FileRels
+// names them in order, stored as [] when there are none; a record from
+// before files were kept apart has no fileRels and its files inline.
+type pendingAgentEditHeader struct {
+	AgentEditSession
+	FileRels []string `json:"fileRels"`
+}
+
+// agentEditPendingFileKey is one staged file of a pending session. The
+// session id is length-prefixed, so no id or path can run into another's.
+func agentEditPendingFileKey(session AgentEditSession, rel string) string {
+	return fmt.Sprintf("%s%020d:%d:%s:%s", agentEditPendingFilePrefix, session.StartedAt.UnixNano(), len(session.Session), session.Session, rel)
+}
 
 // Keys embed zero-padded nanoseconds so they sort by time: pending by start,
 // finished by end, which makes trimming the oldest finished a key-order cut.
@@ -274,6 +318,13 @@ func agentEditDoneKey(session AgentEditSession) string {
 // history. Like it, it opens the db per call.
 type AgentEditLog struct {
 	dir string
+
+	// apart holds the pending keys whose every file is stored under its own
+	// key, as this process last saved or loaded them. A session not in it
+	// (new, or a legacy record with inline files) gets all its files written
+	// on its next save, so a header never names a file that is not there.
+	apartMu sync.Mutex
+	apart   map[string]bool
 }
 
 // NewAgentEditLog is the agent edit log of the project at projectRoot.
@@ -282,7 +333,7 @@ func NewAgentEditLog(projectRoot string) (*AgentEditLog, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &AgentEditLog{dir: filepath.Join(dir, "edits")}, nil
+	return &AgentEditLog{dir: filepath.Join(dir, "edits"), apart: map[string]bool{}}, nil
 }
 
 func (log *AgentEditLog) withDB(run func(db *nteedb.DB) error) error {
@@ -290,13 +341,62 @@ func (log *AgentEditLog) withDB(run func(db *nteedb.DB) error) error {
 }
 
 func (log *AgentEditLog) SavePendingAgentEdit(session AgentEditSession) error {
-	data, err := json.Marshal(session)
+	rels := make([]string, len(session.Files))
+	for index, file := range session.Files {
+		rels[index] = file.Rel
+	}
+	return log.SavePendingAgentEditFiles(session, rels)
+}
+
+func (log *AgentEditLog) SavePendingAgentEditFiles(session AgentEditSession, changed []string) error {
+	pendingKey := agentEditPendingKey(session)
+	log.apartMu.Lock()
+	allFiles := !log.apart[pendingKey]
+	log.apartMu.Unlock()
+	header := pendingAgentEditHeader{AgentEditSession: session, FileRels: make([]string, len(session.Files))}
+	header.Files = []AgentEditFile{}
+	files := map[string][]byte{}
+	for index, file := range session.Files {
+		header.FileRels[index] = file.Rel
+		if !allFiles && !slices.Contains(changed, file.Rel) {
+			continue
+		}
+		data, err := json.Marshal(file)
+		if err != nil {
+			return err
+		}
+		files[agentEditPendingFileKey(session, file.Rel)] = data
+	}
+	headerData, err := json.Marshal(header)
 	if err != nil {
 		return err
 	}
-	return log.withDB(func(db *nteedb.DB) error {
-		return db.Put(agentEditPendingKey(session), data)
+	err = log.withDB(func(db *nteedb.DB) error {
+		// Files first: a header never names a file it cannot find.
+		for key, data := range files {
+			if err := db.Put(key, data); err != nil {
+				return err
+			}
+		}
+		return db.Put(pendingKey, headerData)
 	})
+	if err == nil {
+		log.markApart(pendingKey, true)
+	}
+	return err
+}
+
+func (log *AgentEditLog) markApart(pendingKey string, apart bool) {
+	log.apartMu.Lock()
+	defer log.apartMu.Unlock()
+	if log.apart == nil {
+		log.apart = map[string]bool{}
+	}
+	if apart {
+		log.apart[pendingKey] = true
+	} else {
+		delete(log.apart, pendingKey)
+	}
 }
 
 func (log *AgentEditLog) FinishAgentEdit(session AgentEditSession, keep int) error {
@@ -304,13 +404,26 @@ func (log *AgentEditLog) FinishAgentEdit(session AgentEditSession, keep int) err
 	if err != nil {
 		return err
 	}
+	summary, err := json.Marshal(SummarizeAgentEdit(session))
+	if err != nil {
+		return err
+	}
 	return log.withDB(func(db *nteedb.DB) error {
 		if err := db.Put(agentEditDoneKey(session), data); err != nil {
+			return err
+		}
+		if err := db.Put(agentEditSummaryKey(agentEditDoneKey(session)), summary); err != nil {
 			return err
 		}
 		if err := db.Delete(agentEditPendingKey(session)); err != nil {
 			return err
 		}
+		for _, file := range session.Files {
+			if err := db.Delete(agentEditPendingFileKey(session, file.Rel)); err != nil {
+				return err
+			}
+		}
+		log.markApart(agentEditPendingKey(session), false)
 		if err := trimAgentEditKeys(db, keep); err != nil {
 			return err
 		}
@@ -322,20 +435,9 @@ func (log *AgentEditLog) FinishAgentEdit(session AgentEditSession, keep int) err
 }
 
 func (log *AgentEditLog) LoadPendingAgentEdits() ([]AgentEditSession, error) {
-	return log.load(agentEditPendingPrefix)
-}
-
-func (log *AgentEditLog) LoadFinishedAgentEdits() ([]AgentEditSession, error) {
-	sessions, err := log.load(agentEditDonePrefix)
-	reverseAgentEdits(sessions)
-	return sessions, err
-}
-
-// load returns the sessions under prefix in key (time) order.
-func (log *AgentEditLog) load(prefix string) ([]AgentEditSession, error) {
 	var sessions []AgentEditSession
 	err := log.withDB(func(db *nteedb.DB) error {
-		keys, err := db.PrefixScan(prefix)
+		keys, err := db.PrefixScan(agentEditPendingPrefix)
 		if err != nil || len(keys) == 0 {
 			return err
 		}
@@ -345,14 +447,125 @@ func (log *AgentEditLog) load(prefix string) ([]AgentEditSession, error) {
 			return err
 		}
 		for index := range keys {
-			var session AgentEditSession
-			if found[index] && json.Unmarshal(values[index], &session) == nil {
-				sessions = append(sessions, session.WithAgents().WithStoredDefaults())
+			var header pendingAgentEditHeader
+			if !found[index] || json.Unmarshal(values[index], &header) != nil {
+				continue
 			}
+			session := header.AgentEditSession
+			if header.FileRels != nil {
+				if session.Files, err = loadPendingAgentEditFiles(db, session, header.FileRels); err != nil {
+					return err
+				}
+				log.markApart(keys[index], true)
+			}
+			sessions = append(sessions, session.WithAgents().WithStoredDefaults())
 		}
 		return nil
 	})
 	return sessions, err
+}
+
+// loadPendingAgentEditFiles reads a pending session's files kept apart, in
+// the header's order.
+func loadPendingAgentEditFiles(db *nteedb.DB, session AgentEditSession, rels []string) ([]AgentEditFile, error) {
+	keys := make([]string, len(rels))
+	for index, rel := range rels {
+		keys[index] = agentEditPendingFileKey(session, rel)
+	}
+	values, found, err := db.GetMany(keys)
+	if err != nil {
+		return nil, err
+	}
+	files := make([]AgentEditFile, 0, len(rels))
+	for index, rel := range rels {
+		var file AgentEditFile
+		if !found[index] || json.Unmarshal(values[index], &file) != nil {
+			return nil, fmt.Errorf("edit session %s: the staged copy of %s is missing from the log", session.Session, rel)
+		}
+		files = append(files, file)
+	}
+	return files, nil
+}
+
+func (log *AgentEditLog) LoadFinishedAgentEdits() ([]AgentEditSession, error) {
+	var sessions []AgentEditSession
+	err := log.withDB(func(db *nteedb.DB) error {
+		var err error
+		sessions, err = decodePrefix[AgentEditSession](db, agentEditDonePrefix)
+		for index := range sessions {
+			sessions[index] = sessions[index].WithAgents().WithStoredDefaults()
+		}
+		return err
+	})
+	reverseAgentEdits(sessions)
+	return sessions, err
+}
+
+// LoadFinishedAgentEditSummaries reads the summaries, newest first. A
+// session finished before summaries were kept gets one now, from its whole
+// record, once.
+func (log *AgentEditLog) LoadFinishedAgentEditSummaries() ([]AgentEditSession, error) {
+	var sessions []AgentEditSession
+	err := log.withDB(func(db *nteedb.DB) error {
+		doneKeys, err := db.PrefixScan(agentEditDonePrefix)
+		if err != nil || len(doneKeys) == 0 {
+			return err
+		}
+		sort.Strings(doneKeys)
+		summaryKeys := make([]string, len(doneKeys))
+		for index, key := range doneKeys {
+			summaryKeys[index] = agentEditSummaryKey(key)
+		}
+		values, found, err := db.GetMany(summaryKeys)
+		if err != nil {
+			return err
+		}
+		for index, key := range doneKeys {
+			var session AgentEditSession
+			if found[index] && json.Unmarshal(values[index], &session) == nil {
+				sessions = append(sessions, session.WithAgents().WithStoredDefaults())
+				continue
+			}
+			whole, ok, err := db.Get(key)
+			if err != nil || !ok || json.Unmarshal(whole, &session) != nil {
+				continue
+			}
+			session = SummarizeAgentEdit(session)
+			if summary, err := json.Marshal(session); err == nil {
+				_ = db.Put(summaryKeys[index], summary) // best effort: it is rebuilt next time otherwise
+			}
+			sessions = append(sessions, session.WithAgents().WithStoredDefaults())
+		}
+		return nil
+	})
+	reverseAgentEdits(sessions)
+	return sessions, err
+}
+
+func (log *AgentEditLog) LoadFinishedAgentEdit(id string) (AgentEditSession, bool, error) {
+	var session AgentEditSession
+	found := false
+	err := log.withDB(func(db *nteedb.DB) error {
+		keys, err := db.PrefixScan(agentEditDonePrefix)
+		if err != nil {
+			return err
+		}
+		for _, key := range keys {
+			if !strings.HasSuffix(key, ":"+id) {
+				continue
+			}
+			data, ok, err := db.Get(key)
+			if err != nil {
+				return err
+			}
+			if ok && json.Unmarshal(data, &session) == nil && session.Session == id {
+				session, found = session.WithAgents().WithStoredDefaults(), true
+				return nil
+			}
+		}
+		return nil
+	})
+	return session, found, err
 }
 
 func (log *AgentEditLog) TrimAgentEdits(keep int) error {
@@ -420,6 +633,9 @@ func trimAgentEditKeys(db *nteedb.DB, keep int) error {
 		if err := db.Delete(key); err != nil {
 			return err
 		}
+		if err := db.Delete(agentEditSummaryKey(key)); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -448,6 +664,12 @@ func (m *MemoryAgentEditLog) SavePendingAgentEdit(session AgentEditSession) erro
 	return nil
 }
 
+// SavePendingAgentEditFiles keeps the whole record: memory has no write
+// cost to save.
+func (m *MemoryAgentEditLog) SavePendingAgentEditFiles(session AgentEditSession, _ []string) error {
+	return m.SavePendingAgentEdit(session)
+}
+
 func (m *MemoryAgentEditLog) FinishAgentEdit(session AgentEditSession, keep int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -469,6 +691,25 @@ func (m *MemoryAgentEditLog) LoadFinishedAgentEdits() ([]AgentEditSession, error
 	sessions := m.loadLocked(agentEditDonePrefix)
 	reverseAgentEdits(sessions)
 	return sessions, nil
+}
+
+func (m *MemoryAgentEditLog) LoadFinishedAgentEditSummaries() ([]AgentEditSession, error) {
+	sessions, err := m.LoadFinishedAgentEdits()
+	for index := range sessions {
+		sessions[index] = SummarizeAgentEdit(sessions[index])
+	}
+	return sessions, err
+}
+
+func (m *MemoryAgentEditLog) LoadFinishedAgentEdit(id string) (AgentEditSession, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, session := range m.loadLocked(agentEditDonePrefix) {
+		if session.Session == id {
+			return session, true, nil
+		}
+	}
+	return AgentEditSession{}, false, nil
 }
 
 // Tidy has nothing to reclaim in memory.

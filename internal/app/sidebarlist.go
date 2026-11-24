@@ -156,15 +156,15 @@ func (m Model) fileTreeSidebarList(width int) sidebarList {
 			selectedIndex: -1,
 		}
 	}
-	rows := make([]sidebarRow, len(entries))
-	for index, entry := range entries {
+	rowAt := func(index int) sidebarRow {
+		entry := entries[index]
 		label, style := filetree.FormatFileTreeEntryLabel(entry, width), m.fileTreeEntryStyle(entry)
-		rows[index] = sidebarRow{segments: []sidebarSegment{{text: label, style: style}}}
 		if _, staged := m.agentEdits.stagedFiles[entry.RelativePath]; staged && entry.Type != "directory" {
-			rows[index] = stagedFileTreeRow(label, entry.Depth, style)
+			return stagedFileTreeRow(label, entry.Depth, style)
 		}
+		return sidebarRow{segments: []sidebarSegment{{text: label, style: style}}}
 	}
-	return sidebarList{rows: rows, selectedIndex: m.highlightedEntryIndex(entries)}
+	return sidebarList{rowCount: len(entries), rowAt: rowAt, selectedIndex: m.highlightedEntryIndex(entries)}
 }
 
 // stagedFileTreeRow puts the staged mark in a file row's marker column

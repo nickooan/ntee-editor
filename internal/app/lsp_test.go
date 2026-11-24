@@ -94,6 +94,29 @@ func TestLifecycleCallsReachClient(t *testing.T) {
 	}
 }
 
+func TestDefinitionJumpClosesTheFileItLeaves(t *testing.T) {
+	m, client := newLSPTestModel(t)
+	m = m.openFileAt("main.go")
+	m.edit.cy, m.edit.cx = 0, 2
+	next, cmd := m.jumpToReference()
+	m = next.(Model)
+	msg := cmd().(definitionMsg)
+	msg.locs = []lsp.Location{{URI: lsp.PathToURI(filepath.Join(m.root, "lib", "util.ts"))}}
+	next, _ = m.handleDefinition(msg)
+	m = next.(Model)
+	if m.openRel != "lib/util.ts" || len(m.jumpStack) != 1 {
+		t.Fatalf("jumped with the trail kept: open=%q stack=%d", m.openRel, len(m.jumpStack))
+	}
+	if got := strings.Join(client.calls, ","); !strings.Contains(got, "close:main.go,open:util.ts") {
+		t.Fatalf("the jump closes the file it leaves before opening the target: %v", client.calls)
+	}
+	next, _ = m.jumpBack()
+	m = next.(Model)
+	if got := strings.Join(client.calls, ","); !strings.HasSuffix(got, "close:util.ts,open:main.go") || m.openRel != "main.go" {
+		t.Fatalf("and so does the way back: %v", client.calls)
+	}
+}
+
 func TestLSPDefinitionJumpAndFallback(t *testing.T) {
 	m, client := newLSPTestModel(t)
 	m = m.openFileAt("main.go")
@@ -278,5 +301,22 @@ func TestLSPAnswerForOtherFileDropped(t *testing.T) {
 	m = next.(Model)
 	if m.openRel != "main.go" || m.defPickOpen || m.errText != "" {
 		t.Fatalf("stale-file references must be a no-op: open=%q pick=%v err=%q", m.openRel, m.defPickOpen, m.errText)
+	}
+}
+
+func TestDiagnosticsAreIndexedWhenTheyLand(t *testing.T) {
+	index := indexDiagnostics([]lsp.Diagnostic{
+		{Line: 3, Severity: 2, Message: "warn first"},
+		{Line: 3, Severity: 1, Message: "error later"},
+		{Line: 7, Severity: 2, Message: "only warn"},
+	})
+	if index.errors != 1 || index.warnings != 2 {
+		t.Fatalf("counts: %+v", index)
+	}
+	if index.worstSeverity[3] != 1 || index.worstSeverity[7] != 2 {
+		t.Fatalf("worst severity per line: %v", index.worstSeverity)
+	}
+	if index.firstAtLine[3].Message != "warn first" {
+		t.Fatalf("first diagnostic of a line: %+v", index.firstAtLine[3])
 	}
 }

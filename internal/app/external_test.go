@@ -184,7 +184,11 @@ func TestExternalReceiverChecksSwitchAndPaths(t *testing.T) {
 	// An accepted request is recorded with workspace-relative paths and
 	// delivered to the UI, whose outcome is the reply.
 	delivered := make(chan externalMessageMsg, 1)
-	receiver.SetSink(func(msg any) { delivered <- msg.(externalMessageMsg) })
+	receiver.SetSink(func(msg any) {
+		if queued, ok := msg.(externalMessageMsg); ok {
+			delivered <- queued
+		}
+	})
 	replies := make(chan string, 1)
 	go func() { replies <- receiver.Handle("open\n" + root + "/main.go#L2\n") }()
 	msg := <-delivered
@@ -497,5 +501,30 @@ func TestExternalHistoryDetailTakesFocusToScroll(t *testing.T) {
 	m = key(m, keyPress(tea.KeyEscape))
 	if m.mode != modeInspect {
 		t.Fatal("Esc in the list leaves the history view")
+	}
+}
+
+func TestABusyRefusalIsNotLeftPendingInHistory(t *testing.T) {
+	_, root := newTestModel(t, nil)
+	settings := store.NewMemoryExternalSettings(store.ExternalSettings{Enabled: true, HistoryLimit: 100})
+	history := store.NewMemoryExternalHistory()
+	receiver := NewExternalReceiver(root, settings, history)
+	receiver.replyWait = time.Millisecond
+	for range externalQueueSize {
+		receiver.Handle("open\nmain.go\n")
+	}
+	if reply := receiver.Handle("open\nmain.go\n"); !strings.Contains(reply, "the editor is busy") {
+		t.Fatalf("a full queue refuses: %q", reply)
+	}
+	records, err := history.LoadExternal()
+	must(t, err)
+	failed := 0
+	for _, record := range records {
+		if record.Status == store.ExternalFailed {
+			failed++
+		}
+	}
+	if failed != 1 {
+		t.Fatalf("the refused request is recorded as failed, not pending: %d failed of %d", failed, len(records))
 	}
 }

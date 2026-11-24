@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/nickooan/ntee-editor/internal/extmsg"
@@ -15,6 +14,11 @@ import (
 // hookTimeout bounds the editor check: a hook runs before every matched
 // tool call, so a slow or missing editor must never hold the agent up.
 const hookTimeout = 2 * time.Second
+
+// maxHookPayloadBytes bounds the PreToolUse payload read. It carries the
+// tool's whole input — a Write's full content — so it is far above the
+// socket's message cap: a cut payload does not parse and is allowed.
+const maxHookPayloadBytes = 64 << 20
 
 // hookInput is the part of Claude Code's PreToolUse payload the hook reads.
 type hookInput struct {
@@ -38,7 +42,7 @@ type hookOutput struct {
 // it cannot decide — no editor, a bad payload, a file outside the project —
 // is allowed, silently. It always exits 0.
 func runHook(editorRoot string, stdin io.Reader, stdout io.Writer) int {
-	data, err := io.ReadAll(io.LimitReader(stdin, extmsg.MaxMessageBytes))
+	data, err := readHookPayload(stdin)
 	if err != nil {
 		return 0
 	}
@@ -47,6 +51,10 @@ func runHook(editorRoot string, stdin io.Reader, stdout io.Writer) int {
 		io.WriteString(stdout, output+"\n")
 	}
 	return 0
+}
+
+func readHookPayload(stdin io.Reader) ([]byte, error) {
+	return io.ReadAll(io.LimitReader(stdin, maxHookPayloadBytes))
 }
 
 // hookDecision is the hook's answer to one payload: a deny when the tool
@@ -101,10 +109,7 @@ func stagedSession(editorRoot, path string) string {
 	if err != nil {
 		return ""
 	}
-	session, staged := strings.CutPrefix(line, "ok staged · edit session ")
-	if !staged {
-		return ""
-	}
+	session, _ := extmsg.StagedReplySession(line)
 	return session
 }
 

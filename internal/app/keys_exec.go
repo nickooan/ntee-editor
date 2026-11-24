@@ -52,19 +52,10 @@ func (m Model) handleExecKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if n := len(m.execSugs); n > 0 {
 			m.execSugIndex = (m.execSugIndex + n - 1) % n
 		}
-	case "left":
-		m.execCursor = input.MoveCursor(m.execInput, m.execCursor, -1)
-	case "right":
-		m.execCursor = input.MoveCursor(m.execInput, m.execCursor, 1)
-	case "backspace":
-		m.execInput, m.execCursor, _ = input.RemoveBeforeCursor(m.execInput, m.execCursor)
-		m = m.refreshExecSugs()
-	case "space":
-		m.execInput, m.execCursor = input.InsertAtCursor(m.execInput, m.execCursor, " ")
-		m = m.refreshExecSugs()
 	default:
-		if t := keyText(msg); t != "" {
-			m.execInput, m.execCursor = input.InsertAtCursor(m.execInput, m.execCursor, t)
+		previous := m.execInput
+		m.execInput, m.execCursor = editLineInput(m.execInput, m.execCursor, msg)
+		if m.execInput != previous {
 			m = m.refreshExecSugs()
 		}
 	}

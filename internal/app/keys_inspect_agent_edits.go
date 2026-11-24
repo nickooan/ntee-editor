@@ -156,13 +156,7 @@ func (m Model) setAgentEditKeep(keep int) (Model, tea.Cmd) {
 		return m, save
 	}
 	log := m.agentEdits.registry.Log()
-	trim := func() tea.Msg {
-		if err := log.TrimAgentEdits(settings.AgentEditKeep); err != nil {
-			return agentEditsFinishedListMsg{err: err}
-		}
-		sessions, err := log.LoadFinishedAgentEdits()
-		return agentEditsFinishedListMsg{sessions: sessions, err: err}
-	}
+	m, trim := m.loadAgentEditsFinishedAfter(func() error { return log.TrimAgentEdits(settings.AgentEditKeep) })
 	return m, tea.Sequence(save, trim)
 }
 

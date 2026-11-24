@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -231,4 +232,113 @@ func TestTheMemoryLogHasNothingToTidy(t *testing.T) {
 	if result, err := NewMemoryAgentEditLog().Tidy(); err != nil || result != (TidyResult{}) {
 		t.Fatalf("%+v %v", result, err)
 	}
+}
+
+func TestAPendingSessionSavesOnlyTheFileThatChanged(t *testing.T) {
+	log := &AgentEditLog{dir: t.TempDir()}
+	session := agentEditSession("S", time.Unix(1_800_000_000, 0))
+	session.Files = append(session.Files, AgentEditFile{Rel: "b.go", Content: strings.Repeat("b", 100_000), Edits: []AgentEdit{}})
+	must(t, log.SavePendingAgentEditFiles(session, []string{session.Files[0].Rel}))
+	_, first := logSizes(t, log)
+	mainBefore, _ := logSizes(t, log)
+
+	session.Files[0].Content = "changed"
+	must(t, log.SavePendingAgentEditFiles(session, []string{session.Files[0].Rel}))
+	mainAfter, blobsAfter := logSizes(t, log)
+	if grown := (mainAfter - mainBefore) + (blobsAfter - first); grown > 20_000 {
+		t.Fatalf("an edit to one file does not rewrite the other's 100 kB: grew %d bytes", grown)
+	}
+	session.AgentEndedAt = session.StartedAt.Add(time.Minute)
+	must(t, log.SavePendingAgentEditFiles(session, nil)) // the session's own fields only
+
+	pending, err := log.LoadPendingAgentEdits()
+	must(t, err)
+	if len(pending) != 1 || len(pending[0].Files) != 2 || pending[0].Files[0].Content != "changed" ||
+		len(pending[0].Files[1].Content) != 100_000 || !pending[0].AgentEndedAt.Equal(session.AgentEndedAt) {
+		t.Fatalf("the files load back in order, with the session's fields: %+v", pending)
+	}
+
+	session.Status, session.EndedAt = AgentEditApplied, session.StartedAt.Add(time.Hour)
+	must(t, log.FinishAgentEdit(session, 10))
+	must(t, log.withDB(func(db *nteedb.DB) error {
+		left, err := db.PrefixScan(agentEditPendingFilePrefix)
+		if len(left) != 0 {
+			t.Fatalf("finishing drops the files kept apart: %v", left)
+		}
+		return err
+	}))
+}
+
+func TestALegacyInlineRecordIsSavedWholeOnItsNextSave(t *testing.T) {
+	dir := t.TempDir()
+	session := agentEditSession("old", time.Unix(1_800_000_000, 0))
+	legacy, _ := json.Marshal(session) // files inline, no fileRels
+	writer := &AgentEditLog{dir: dir}
+	must(t, writer.withDB(func(db *nteedb.DB) error { return db.Put(agentEditPendingKey(session), legacy) }))
+
+	restarted := &AgentEditLog{dir: dir}
+	pending, err := restarted.LoadPendingAgentEdits()
+	must(t, err)
+	if len(pending) != 1 || pending[0].Files[0].Content != session.Files[0].Content {
+		t.Fatalf("a legacy record loads its inline files: %+v", pending)
+	}
+	pending[0].AgentEndedAt = session.StartedAt.Add(time.Minute)
+	must(t, restarted.SavePendingAgentEditFiles(pending[0], nil))
+	again, err := (&AgentEditLog{dir: dir}).LoadPendingAgentEdits()
+	must(t, err)
+	if len(again) != 1 || len(again[0].Files) != 1 || again[0].Files[0].Content != session.Files[0].Content {
+		t.Fatalf("a header-only save of a legacy record still writes its files: %+v %v", again, err)
+	}
+}
+
+func TestFinishedSessionsListAsSummariesAndLoadWholeForATrace(t *testing.T) {
+	dir := t.TempDir()
+	log := &AgentEditLog{dir: dir}
+	started := time.Unix(1_800_000_000, 0)
+	legacy := agentEditSession("legacy", started)
+	legacy.Status, legacy.EndedAt = AgentEditApplied, started.Add(time.Minute)
+	legacyData, _ := json.Marshal(legacy) // finished before summaries were kept
+	must(t, log.withDB(func(db *nteedb.DB) error { return db.Put(agentEditDoneKey(legacy), legacyData) }))
+	fresh := agentEditSession("fresh", started.Add(time.Hour))
+	fresh.Status, fresh.EndedAt = AgentEditDiscarded, started.Add(2*time.Hour)
+	must(t, log.FinishAgentEdit(fresh, 10))
+
+	summaries, err := log.LoadFinishedAgentEditSummaries()
+	must(t, err)
+	if len(summaries) != 2 || summaries[0].Session != "fresh" || summaries[1].Session != "legacy" {
+		t.Fatalf("newest first: %+v", summaries)
+	}
+	for _, summary := range summaries {
+		if file := summary.Files[0]; file.Rel != "a.go" || file.Content != "" || file.BaseContent != "" || len(file.Edits) != 0 {
+			t.Fatalf("a summary keeps paths and results, not contents: %+v", file)
+		}
+	}
+	must(t, log.withDB(func(db *nteedb.DB) error {
+		_, ok, err := db.Get(agentEditSummaryKey(agentEditDoneKey(legacy)))
+		if !ok {
+			t.Fatal("the legacy session got its summary on the first list")
+		}
+		return err
+	}))
+
+	whole, found, err := log.LoadFinishedAgentEdit("legacy")
+	must(t, err)
+	if !found || whole.Files[0].Content != "new\n" || len(whole.Files[0].Edits) != 1 {
+		t.Fatalf("a trace loads the whole record: %+v %v", whole, found)
+	}
+	if _, found, _ := log.LoadFinishedAgentEdit("gacy"); found {
+		t.Fatal("only the exact session id matches")
+	}
+
+	must(t, log.TrimAgentEdits(1))
+	if summaries, _ := log.LoadFinishedAgentEditSummaries(); len(summaries) != 1 || summaries[0].Session != "fresh" {
+		t.Fatalf("trimming drops the summary with its record: %+v", summaries)
+	}
+	must(t, log.withDB(func(db *nteedb.DB) error {
+		left, err := db.PrefixScan(agentEditSummaryPrefix)
+		if len(left) != 1 {
+			t.Fatalf("one summary left: %v", left)
+		}
+		return err
+	}))
 }

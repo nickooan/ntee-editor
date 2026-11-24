@@ -102,7 +102,7 @@ func (m Model) renderConflict(width, height int) string {
 			case conflictBaseLine:
 				content = plainWindowStyled(lines[i], 0, contentWidth, conflictBaseTextStyle, tabWidth)
 			default:
-				content = m.renderContentLine(i, lines[i], 0, contentWidth)
+				content = m.renderContentLine(i, lines[i], 0, contentWidth, tabWidth)
 			}
 		}
 		rows = append(rows, number+content)

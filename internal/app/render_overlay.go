@@ -88,14 +88,9 @@ func (m Model) renderFuzzyOverlay(width, height int) string {
 		}
 	}
 
-	visible := min(len(m.fuzzyMatches), maxRows)
-	selected := input.Clamp(m.fuzzyIndex, 0, max(0, len(m.fuzzyMatches)-1))
-	start := 0
-	if selected >= visible {
-		start = selected - visible + 1
-	}
+	selected, start, end := listWindow(len(m.fuzzyMatches), m.fuzzyIndex, maxRows)
 	searchText := m.fuzzySearchText()
-	for i := start; i < start+visible && i < len(m.fuzzyMatches); i++ {
+	for i := start; i < end; i++ {
 		match := m.fuzzyMatches[i]
 		cand := m.fuzzyCorpus[match.Index]
 		// Matched positions are computed here, only for the visible rows, rather
@@ -133,13 +128,8 @@ func (m Model) renderDefPickOverlay(width, height int) string {
 		b.WriteString(overlayHintStyle.Render(strings.Repeat("─", rowWidth)))
 	}
 
-	visible := min(len(m.defPickItems), maxRows)
-	selected := input.Clamp(m.defPickIndex, 0, max(0, len(m.defPickItems)-1))
-	start := 0
-	if selected >= visible {
-		start = selected - visible + 1
-	}
-	for i := start; i < start+visible && i < len(m.defPickItems); i++ {
+	selected, start, end := listWindow(len(m.defPickItems), m.defPickIndex, maxRows)
+	for i := start; i < end; i++ {
 		c := m.defPickItems[i]
 		dir := path.Dir(c.rel)
 		if dir == "." {
@@ -284,22 +274,22 @@ func (m Model) renderGrepOverlay(width, height int) string {
 	// The preview highlights per line, so a pattern containing a literal
 	// newline can never match there; highlight the first query line instead
 	// so the hit's start line still lights up.
-	previewQuery := m.grepQuery
+	previewQuery := m.grep.query
 	if i := strings.IndexByte(previewQuery, '\n'); i >= 0 {
 		previewQuery = previewQuery[:i]
 	}
 	re := m.grepPreviewRC.multiline(previewQuery)
 	file, hit, ok := m.grepSelectedFile()
-	if ok && m.grepPrevLines != nil {
-		rows = append(rows, renderPreviewRows(m.grepPrevLines, m.grepHl, re, hit.line, previewH, innerW, m.tabWidthFor(file.rel))...)
+	if ok && m.grep.prevLines != nil {
+		rows = append(rows, renderPreviewRows(m.grep.prevLines, m.grep.hl, re, hit.line, previewH, innerW, m.tabWidthFor(file.rel))...)
 	} else {
 		msg := "Type at least 2 characters to search the repo."
 		switch {
-		case m.grepLoading:
+		case m.grep.loading:
 			msg = "Indexing repository…"
-		case m.grepResultsGen != m.grepSearchGen:
+		case m.grep.resultsGen != m.grep.searchGen:
 			msg = "Searching…"
-		case len([]rune(m.grepQuery)) >= 2:
+		case len([]rune(m.grep.query)) >= 2:
 			msg = "No matches."
 		}
 		rows = append(rows, overlayHintStyle.Render(padTo(" "+msg, innerW)))
@@ -311,24 +301,19 @@ func (m Model) renderGrepOverlay(width, height int) string {
 	rows = append(rows, overlayHintStyle.Render(strings.Repeat("─", innerW)))
 
 	// --- bottom: query input + result rows ---
-	count := fmt.Sprintf("%d results", len(m.grepResults))
+	count := fmt.Sprintf("%d results", len(m.grep.results))
 	switch {
-	case m.grepLoading:
-		count = fmt.Sprintf("indexing %d/%d files…", len(m.grepFiles), len(m.corpus))
-	case m.grepResultsGen != m.grepSearchGen:
+	case m.grep.loading:
+		count = fmt.Sprintf("indexing %d/%d files…", len(m.grep.files), len(m.corpus))
+	case m.grep.resultsGen != m.grep.searchGen:
 		count = "searching…"
 	}
-	inputRows := renderGrepInputRows(m.grepQuery, m.grepCursor, count, innerW)
+	inputRows := renderGrepInputRows(m.grep.query, m.grep.cursor, count, innerW)
 	rows = append(rows, inputRows...)
 
-	visible := min(len(m.grepResults), max(0, listH-len(inputRows)))
-	selected := input.Clamp(m.grepIndex, 0, max(0, len(m.grepResults)-1))
-	start := 0
-	if selected >= visible && visible > 0 {
-		start = selected - visible + 1
-	}
-	for i := start; i < start+visible && i < len(m.grepResults); i++ {
-		h := m.grepResults[i]
+	selected, start, end := listWindow(len(m.grep.results), m.grep.index, listH-len(inputRows))
+	for i := start; i < end; i++ {
+		h := m.grep.results[i]
 		dir := path.Dir(h.rel)
 		if dir == "." {
 			dir = ""

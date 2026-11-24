@@ -71,8 +71,8 @@ func (m Model) clearBlameState() Model {
 	m.blameAuthorW = 0
 	m.blameNewFile = false
 	m.blameLoading = false
-	m.blameHasPending = false
-	m.blamePendingCursor, m.blamePendingScroll = 0, 0
+	m.blamePending.set = false
+	m.blamePending.cursor, m.blamePending.scroll = 0, 0
 	return m
 }
 
@@ -239,12 +239,12 @@ func (m Model) handleBlameReady(msg blameReadyMsg) (tea.Model, tea.Cmd) {
 	m.blameAuthorW = msg.authorW
 	m.blameNewFile = msg.newFile
 	h := m.contentHeight() + 1 // rendered rows: single-line status, like edit mode
-	if m.blameHasPending {
+	if m.blamePending.set {
 		// Ctrl+O return: restore the remembered position, clamped — the
 		// buffer may have shrunk while we were away.
-		m.blameHasPending = false
-		m.blamePosition.row = input.Clamp(m.blamePendingCursor, 0, len(m.blameRows)-1)
-		m.blamePosition.scrollY = input.Clamp(m.blamePendingScroll, 0, max(0, len(m.blameRows)-h))
+		m.blamePending.set = false
+		m.blamePosition.row = input.Clamp(m.blamePending.cursor, 0, len(m.blameRows)-1)
+		m.blamePosition.scrollY = input.Clamp(m.blamePending.scroll, 0, max(0, len(m.blameRows)-h))
 	} else {
 		// Fresh entry: stay at the current place — same buffer line, same
 		// on-screen row. The exact inverse of the Esc mapping in exitBlame.

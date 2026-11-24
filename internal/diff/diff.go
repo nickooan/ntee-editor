@@ -20,8 +20,10 @@ type Op struct {
 
 // maxD bounds the Myers search depth. The backtracking trace costs
 // O(maxD²) ints (~16MB at 1024), and a real review diff — after common
-// prefix/suffix trimming — sits far below it. Past the bound the middle
-// degrades to "everything changed" instead of burning time and memory.
+// prefix/suffix trimming — sits far below it. Past the bound the middle is
+// split at lines unique to both sides (anchoredDiff) and each piece diffed
+// on its own; only a piece with no such line degrades to "everything
+// changed".
 const maxD = 1024
 
 // Lines diffs a (old) against b (new), one Op per line, Equal ops included.
@@ -89,6 +91,9 @@ func myers(a, b []int, aOff, bOff int) []Op {
 		return out
 	}
 
+	if abs(n-m) > maxD {
+		return anchoredDiff(a, b, aOff, bOff) // more than maxD edits for certain
+	}
 	bound := min(n+m, maxD)
 	size := 2*bound + 1
 	v := make([]int, size) // furthest x per diagonal k, index k+bound
@@ -115,15 +120,7 @@ func myers(a, b []int, aOff, bOff int) []Op {
 		trace = append(trace, append([]int(nil), v...))
 	}
 	if !found {
-		// Bound exceeded (pathological rewrite): everything changed.
-		out := make([]Op, 0, n+m)
-		for i := 0; i < n; i++ {
-			out = append(out, Op{Kind: Delete, AIdx: aOff + i})
-		}
-		for j := 0; j < m; j++ {
-			out = append(out, Op{Kind: Insert, BIdx: bOff + j})
-		}
-		return out
+		return anchoredDiff(a, b, aOff, bOff) // bound exceeded: a big rewrite
 	}
 
 	// Backtrack from (n, m) through the per-D frontiers, emitting in reverse.
@@ -162,6 +159,111 @@ func myers(a, b []int, aOff, bOff int) []Op {
 		rev[i], rev[j] = rev[j], rev[i]
 	}
 	return rev
+}
+
+// anchoredDiff diffs a middle too different for one bounded Myers search.
+// Lines that occur exactly once on each side are matched up, the longest
+// run of them in order on both sides becomes the anchors (as patience diff
+// does), and the pieces between anchors are diffed one by one — each far
+// smaller than the whole. A middle with no such line is all changed.
+func anchoredDiff(a, b []int, aOff, bOff int) []Op {
+	anchors := uniqueCommonAnchors(a, b)
+	if len(anchors) == 0 {
+		return allChanged(len(a), len(b), aOff, bOff)
+	}
+	out := make([]Op, 0, len(a)+len(b))
+	aStart, bStart := 0, 0
+	for _, anchor := range anchors {
+		out = append(out, myers(a[aStart:anchor.a], b[bStart:anchor.b], aOff+aStart, bOff+bStart)...)
+		out = append(out, Op{Kind: Equal, AIdx: aOff + anchor.a, BIdx: bOff + anchor.b})
+		aStart, bStart = anchor.a+1, anchor.b+1
+	}
+	return append(out, myers(a[aStart:], b[bStart:], aOff+aStart, bOff+bStart)...)
+}
+
+// linePair is a line at a[a] equal to the one at b[b].
+type linePair struct{ a, b int }
+
+// uniqueCommonAnchors is the longest sequence of lines unique to both a and
+// b whose positions rise on both sides, in order.
+func uniqueCommonAnchors(a, b []int) []linePair {
+	type seen struct{ inA, inB, atA, atB int }
+	counts := map[int]*seen{}
+	for index, line := range a {
+		entry := counts[line]
+		if entry == nil {
+			entry = &seen{}
+			counts[line] = entry
+		}
+		entry.inA++
+		entry.atA = index
+	}
+	for index, line := range b {
+		if entry := counts[line]; entry != nil {
+			entry.inB++
+			entry.atB = index
+		}
+	}
+	var pairs []linePair // in a's order
+	for index, line := range a {
+		if entry := counts[line]; entry.inA == 1 && entry.inB == 1 && entry.atA == index {
+			pairs = append(pairs, linePair{a: index, b: entry.atB})
+		}
+	}
+	return longestRisingInB(pairs)
+}
+
+// longestRisingInB picks the longest subsequence of pairs (already rising
+// in a) whose b also rises — patience sorting, O(k log k).
+func longestRisingInB(pairs []linePair) []linePair {
+	if len(pairs) == 0 {
+		return nil
+	}
+	tails := []int{}                    // tails[length-1]: index into pairs ending the best run of that length
+	previous := make([]int, len(pairs)) // the pair before each one in its run
+	for index, pair := range pairs {
+		low, high := 0, len(tails)
+		for low < high {
+			middle := (low + high) / 2
+			if pairs[tails[middle]].b < pair.b {
+				low = middle + 1
+			} else {
+				high = middle
+			}
+		}
+		previous[index] = -1
+		if low > 0 {
+			previous[index] = tails[low-1]
+		}
+		if low == len(tails) {
+			tails = append(tails, index)
+		} else {
+			tails[low] = index
+		}
+	}
+	run := make([]linePair, len(tails))
+	for index, at := len(tails)-1, tails[len(tails)-1]; index >= 0; index, at = index-1, previous[at] {
+		run[index] = pairs[at]
+	}
+	return run
+}
+
+func allChanged(n, m, aOff, bOff int) []Op {
+	out := make([]Op, 0, n+m)
+	for i := 0; i < n; i++ {
+		out = append(out, Op{Kind: Delete, AIdx: aOff + i})
+	}
+	for j := 0; j < m; j++ {
+		out = append(out, Op{Kind: Insert, BIdx: bOff + j})
+	}
+	return out
+}
+
+func abs(value int) int {
+	if value < 0 {
+		return -value
+	}
+	return value
 }
 
 // groupDelsFirst reorders each maximal run of non-Equal ops so all Deletes

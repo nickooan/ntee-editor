@@ -3,14 +3,10 @@ package app
 import (
 	"cmp"
 	"path/filepath"
-	"slices"
-	"strconv"
-	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/nickooan/ntee-editor/internal/extmsg"
 	"github.com/nickooan/ntee-editor/internal/input"
 	"github.com/nickooan/ntee-editor/internal/staging"
 	"github.com/nickooan/ntee-editor/internal/store"
@@ -40,8 +36,9 @@ type agentEditsState struct {
 	stillEditing map[string]bool
 	// checking holds the finalising sessions: their agents check them.
 	checking       map[string]bool
-	finished       []store.AgentEditSession
+	finished       []store.AgentEditSession // summaries (store.SummarizeAgentEdit)
 	finishedLoaded bool
+	finishedGen    int // the newest finished-list load; older answers are dropped
 	// choiceSession is the session an open apply/discard/ready overlay is
 	// about.
 	choiceSession string
@@ -54,6 +51,11 @@ type agentEditsState struct {
 	// animates while agents work; frame is its animation step.
 	ticking bool
 	frame   int
+	// lastActivityAt is the newest edit, join, end or check of a session its
+	// agents still work on; the label stops animating after
+	// agentEditsAnimationIdle without one (a restored session whose agent is
+	// gone), and starts again on the next.
+	lastActivityAt time.Time
 	// typingPause is how long the user must have stopped typing before an
 	// agent edit session may move them to its review: a keystroke meant for
 	// the editor must never land on the review's a/x/r.
@@ -86,10 +88,14 @@ type agentEditsFinishedMsg struct {
 	record  store.AgentEditSession
 	err     error
 	reply   chan<- string
+	// replacedDrafts are the drafts (staged rel → root rel) the user chose
+	// to replace; each is dropped only once its file was actually written.
+	replacedDrafts map[string]string
 }
 
 // agentEditsFinishedListMsg lands the log's finished sessions.
 type agentEditsFinishedListMsg struct {
+	gen      int
 	sessions []store.AgentEditSession
 	err      error
 }
@@ -99,7 +105,7 @@ func (m Model) WithAgentEdits(registry *staging.Registry) Model {
 	m.agentEdits.registry = registry
 	m.agentEdits.typingPause = defaultTypingPause
 	m = m.refreshAgentEditsPending()
-	m.agentEdits.ticking = m.agentsWorking() // Init starts the tick
+	m.agentEdits.ticking = m.agentsAnimating() // Init starts the tick
 	return m
 }
 
@@ -109,11 +115,42 @@ func (m Model) agentsWorking() bool {
 	return len(m.agentEdits.stillEditing) > 0 || len(m.agentEdits.checking) > 0
 }
 
+// agentEditsAnimationIdle is how long the header label animates after the
+// working sessions' last activity: a redraw ~7 times a second is for agents
+// visibly at work, not for one that went quiet hours ago.
+const agentEditsAnimationIdle = 2 * time.Minute
+
+// agentsAnimating reports whether the header label should animate.
+func (m Model) agentsAnimating() bool {
+	return m.agentsWorking() && time.Since(m.agentEdits.lastActivityAt) < agentEditsAnimationIdle
+}
+
+// sessionLastActivity is the newest timestamp the session's agents left.
+func sessionLastActivity(session store.AgentEditSession) time.Time {
+	latest := session.StartedAt
+	later := func(candidate time.Time) {
+		if candidate.After(latest) {
+			latest = candidate
+		}
+	}
+	for _, participant := range session.Agents {
+		later(participant.JoinedAt)
+		later(participant.EndedAt)
+		later(participant.CheckedAt)
+	}
+	for _, file := range session.Files {
+		if count := len(file.Edits); count > 0 {
+			later(file.Edits[count-1].At)
+		}
+	}
+	return latest
+}
+
 // withAgentEditsTick starts the header label's animation once agents work,
 // one tick chain at a time.
 func withAgentEditsTick(model tea.Model, cmd tea.Cmd) (tea.Model, tea.Cmd) {
 	m, ok := model.(Model)
-	if !ok || m.agentEdits.ticking || !m.agentsWorking() {
+	if !ok || m.agentEdits.ticking || !m.agentsAnimating() {
 		return model, cmd
 	}
 	m.agentEdits.ticking = true
@@ -126,7 +163,7 @@ func agentEditsTick() tea.Cmd {
 
 // handleAgentEditsTick advances the animation, and stops once no agent works.
 func (m Model) handleAgentEditsTick() (tea.Model, tea.Cmd) {
-	if !m.agentsWorking() {
+	if !m.agentsAnimating() {
 		m.agentEdits.ticking = false
 		return m, nil
 	}
@@ -141,12 +178,18 @@ func (m Model) refreshAgentEditsPending() Model {
 		m.agentEdits.pending = m.agentEdits.registry.Pending()
 		m.agentEdits.stagedFiles = m.stagedFilesOf(m.agentEdits.pending)
 		m.agentEdits.stillEditing, m.agentEdits.checking = map[string]bool{}, map[string]bool{}
+		m.agentEdits.lastActivityAt = time.Time{}
 		for _, session := range m.agentEdits.pending {
 			switch session.Phase() {
 			case store.PhaseEditing:
 				m.agentEdits.stillEditing[session.Session] = true
 			case store.PhaseFinalising:
 				m.agentEdits.checking[session.Session] = true
+			default:
+				continue
+			}
+			if activity := sessionLastActivity(session); activity.After(m.agentEdits.lastActivityAt) {
+				m.agentEdits.lastActivityAt = activity
 			}
 		}
 	}
@@ -218,18 +261,38 @@ func (m Model) stagedFileNotice() string {
 	return "✎ " + m.openRel + " has staged edits (edit session " + session + ") — not on disk yet · Ctrl+T › agent edits"
 }
 
-func (m Model) loadAgentEditsFinishedCmd() tea.Cmd {
+func (m Model) loadAgentEditsFinishedCmd() (Model, tea.Cmd) {
+	return m.loadAgentEditsFinishedAfter(nil)
+}
+
+// loadAgentEditsFinishedAfter is loadAgentEditsFinishedCmd after before (a
+// trim), numbered so only the newest load's answer lands.
+func (m Model) loadAgentEditsFinishedAfter(before func() error) (Model, tea.Cmd) {
 	if m.agentEdits.registry == nil {
-		return nil
+		return m, nil
 	}
-	log := m.agentEdits.registry.Log()
+	m.agentEdits.finishedGen++
+	return m, loadAgentEditSummariesCmd(m.agentEdits.registry.Log(), m.agentEdits.finishedGen, before)
+}
+
+// loadAgentEditSummariesCmd lists the finished sessions' summaries off the
+// UI goroutine, after before (a trim) when given.
+func loadAgentEditSummariesCmd(log store.AgentEditLogStore, gen int, before func() error) tea.Cmd {
 	return func() tea.Msg {
-		sessions, err := log.LoadFinishedAgentEdits()
-		return agentEditsFinishedListMsg{sessions: sessions, err: err}
+		if before != nil {
+			if err := before(); err != nil {
+				return agentEditsFinishedListMsg{gen: gen, err: err}
+			}
+		}
+		sessions, err := log.LoadFinishedAgentEditSummaries()
+		return agentEditsFinishedListMsg{gen: gen, sessions: sessions, err: err}
 	}
 }
 
 func (m Model) handleAgentEditsFinishedList(msg agentEditsFinishedListMsg) (tea.Model, tea.Cmd) {
+	if msg.gen != m.agentEdits.finishedGen {
+		return m, nil // a newer load is on its way
+	}
 	if msg.err != nil {
 		m.errText = "agent edits: " + msg.err.Error()
 	}
@@ -248,7 +311,7 @@ func (m Model) handleAgentEditsChanged(msg agentEditsChangedMsg) (tea.Model, tea
 	if record, ok := m.agentEdits.registry.Finished(msg.session); ok {
 		m = m.agentEditSessionOver(msg.session, record)
 		m.notice = "edit session " + msg.session + " " + record.Outcome
-		return m, m.loadAgentEditsFinishedCmd()
+		return m.loadAgentEditsFinishedCmd()
 	}
 	record, ok := m.agentEdits.registry.Snapshot(msg.session)
 	if !ok {
@@ -320,151 +383,6 @@ func (m Model) openWorkingAgentEditReview() (Model, tea.Cmd) {
 	return m.enterAgentEditReview(record, false)
 }
 
-// handleAgentEditMessage takes an edit session's end or wait from the
-// socket (its edits never reach the UI).
-func (m Model) handleAgentEditMessage(msg externalMessageMsg) (tea.Model, tea.Cmd) {
-	id := msg.record.Session
-	registry := m.agentEdits.registry
-	if registry == nil {
-		sendExternalReply(msg.reply, extmsg.ErrorReply("this editor takes no agent edits"))
-		return m, nil
-	}
-	if msg.record.Command == extmsg.CommandWait {
-		if record, ok := registry.Finished(id); ok {
-			sendExternalReply(msg.reply, agentEditOutcomeReply(record))
-			return m, nil
-		}
-		record, ok := registry.Snapshot(id)
-		if !ok {
-			sendExternalReply(msg.reply, extmsg.ErrorReply("no edit session "+id+" — nothing was staged"))
-			return m, nil
-		}
-		if _, open := record.OpenChangeRequest(); open {
-			// The user asked while this agent was not waiting.
-			sendExternalReply(msg.reply, agentEditChangesRequestedReply(id))
-			return m, nil
-		}
-		waiters := cloneWaiters(m.agentEdits.waiters)
-		waiters[id] = append(slices.Clip(waiters[id]), msg.reply)
-		m.agentEdits.waiters = waiters
-		return m, nil
-	}
-
-	m = m.refreshAgentEditsPending()
-	record, ok := registry.Snapshot(id)
-	if !ok {
-		sendExternalReply(msg.reply, extmsg.ErrorReply("no edit session "+id+" — nothing was staged"))
-		return m, nil
-	}
-	bases, failed := m.pendingBaseSessions(record), failedChecks(record)
-	if msg.agentEdits.policy == store.AgentEditPolicyApply && len(bases) == 0 && len(failed) == 0 {
-		return m.startAgentEditApply(id, store.AgentEditPolicyApply, false, store.GitFollowUpNone, msg.agentEdits.keep, msg.reply)
-	}
-	reviewing := "edit session " + id + " ended — the user is reviewing " + countText(len(record.Files), "staged file")
-	switch {
-	case len(bases) > 0:
-		reviewing += " (it builds on edit session " + strings.Join(bases, ", ") + ", still pending, so the user decides)"
-	case len(failed) > 0 && msg.agentEdits.policy == store.AgentEditPolicyApply:
-		reviewing += " (a check failed, so the user decides)"
-	}
-	sendExternalReply(msg.reply, reviewing+"; to hear the outcome run: ntee --msg --msg-edit-session "+id+" wait")
-	switch {
-	case msg.agentEdits.policy == store.AgentEditPolicyApply && len(bases) > 0:
-		m.notice = "✎ edit session " + id + " builds on " + strings.Join(bases, ", ") + "'s pending edits — review it"
-	case msg.agentEdits.policy == store.AgentEditPolicyApply:
-		m.notice = "✎ edit session " + id + ": " + staging.AgentNames(failed) + "'s check failed — review it"
-	}
-	if m.mode == modeReview && m.review.agentEdits == id && !m.review.agentEditsTrace {
-		// The user watched it live: it unlocks where they are.
-		m, refresh := m.refreshAgentEditReview(id)
-		m.notice = agentEditsFinishedNotice(record)
-		return m, refresh
-	}
-	if m.choice.open() || m.reviewSessionRunning() {
-		m.notice = "✎ agent edits ready: session " + id + " · " + countText(len(record.Files), "file") + " — review them under Ctrl+T › agent edits"
-		return m, nil
-	}
-	if msg.sessionAutoStart || msg.agentEdits.policy == store.AgentEditPolicyApply {
-		m, prepare := m.enterAgentEditReview(record, false)
-		if msg.agentEdits.policy != store.AgentEditPolicyApply {
-			m.notice = "✎ EDITS opened without asking"
-		}
-		return m, prepare
-	}
-	if m.canAutoJumpToAgentReview() {
-		m, prepare := m.enterAgentEditReview(record, false)
-		m.notice = agentEditsFinishedNotice(record)
-		return m, prepare
-	}
-	m.agentEdits.choiceSession = id
-	m.choice = agentEditsReadyChoice(record)
-	return m, nil
-}
-
-// cloneWaiters copies a waiter map for copy-on-write.
-func cloneWaiters(waiters map[string][]chan<- string) map[string][]chan<- string {
-	copied := make(map[string][]chan<- string, len(waiters)+1)
-	for id, channels := range waiters {
-		copied[id] = channels
-	}
-	return copied
-}
-
-// agentEditOutcomeReply is what the agent hears about a finished session:
-// all applied is ok (exit 0), some not applied an error (exit 1) naming
-// them, discarded ended (exit 3).
-func agentEditOutcomeReply(record store.AgentEditSession) string {
-	switch record.Status {
-	case store.AgentEditApplied:
-		return "finished — edit session " + record.Session + " " + record.Outcome + agentEditGitFollowUpText(record)
-	case store.AgentEditDiscarded:
-		return extmsg.EndedReply("edit session " + record.Session + " was " + record.Outcome + " — nothing was written")
-	}
-	return extmsg.ErrorReply("edit session " + record.Session + " " + record.Outcome + agentEditGitFollowUpText(record))
-}
-
-// maxFollowUpFiles caps the files a git follow-up names.
-const maxFollowUpFiles = 20
-
-// agentEditGitFollowUpText is the git work the user asked of the agent with
-// applying, for its outcome reply; "" when they asked for none (the agent
-// then leaves git alone).
-func agentEditGitFollowUpText(record store.AgentEditSession) string {
-	if record.GitFollowUp != store.GitFollowUpCommit && record.GitFollowUp != store.GitFollowUpPullRequest {
-		return ""
-	}
-	var applied []string
-	for _, file := range record.Files {
-		if file.Result == store.AgentEditFileApplied {
-			applied = append(applied, file.Rel)
-		}
-	}
-	if len(applied) == 0 {
-		return ""
-	}
-	files := strings.Join(applied[:min(len(applied), maxFollowUpFiles)], ", ")
-	if len(applied) > maxFollowUpFiles {
-		files += " … and " + strconv.Itoa(len(applied)-maxFollowUpFiles) + " more"
-	}
-	if record.GitFollowUp == store.GitFollowUpCommit {
-		return " · the user asks you to commit the applied files on the current branch: commit only " + files +
-			", with a message you write from the change — no new branch, no push"
-	}
-	return " · the user asks for a new branch and a pull request: first ask them for the branch name (suggest one from the change); then create the branch, commit only " +
-		files + ", push it and open the pull request"
-}
-
-// gitFollowUpLabel names a follow-up for the user: "commit", "PR", "".
-func gitFollowUpLabel(followUp store.AgentEditGitFollowUp) string {
-	switch followUp {
-	case store.GitFollowUpCommit:
-		return "commit"
-	case store.GitFollowUpPullRequest:
-		return "PR"
-	}
-	return ""
-}
-
 // agentEditSessionOver answers the session's waiters and leaves its review.
 func (m Model) agentEditSessionOver(id string, record store.AgentEditSession) Model {
 	for _, waiter := range m.agentEdits.waiters[id] {
@@ -485,447 +403,6 @@ func (m Model) agentEditSessionOver(id string, record store.AgentEditSession) Mo
 		m.choice = choiceOverlay{}
 	}
 	return m.refreshAgentEditsPending()
-}
-
-// unsavedAgentEditFiles are the session's files with unsaved work in the
-// editor: the open buffer's edits, or another tab's draft. Applying would
-// replace that work.
-func (m Model) unsavedAgentEditFiles(record store.AgentEditSession) []string {
-	var unsaved []string
-	for _, file := range record.Files {
-		if m.agentEditFileIsOpen(file.Rel) {
-			if m.edit.dirty {
-				unsaved = append(unsaved, file.Rel)
-			}
-			continue
-		}
-		if rootRel, ok := m.rootRelOf(file.Rel); ok && m.draftSet[rootRel] {
-			unsaved = append(unsaved, file.Rel)
-		}
-	}
-	return unsaved
-}
-
-// agentEditFileIsOpen reports whether the workspace file rel is the open
-// buffer's.
-func (m Model) agentEditFileIsOpen(rel string) bool {
-	return m.openFile != nil && filepath.Clean(m.openFile.Path) == filepath.Join(m.workspaceRoot, filepath.FromSlash(rel))
-}
-
-// rootRelOf maps a workspace path to the current root's, which keys drafts
-// and tabs; ok is false outside the root.
-func (m Model) rootRelOf(rel string) (string, bool) {
-	rootRel, err := filepath.Rel(m.root, filepath.Join(m.workspaceRoot, filepath.FromSlash(rel)))
-	if err != nil || rootRel == ".." || strings.HasPrefix(rootRel, ".."+string(filepath.Separator)) {
-		return "", false
-	}
-	return filepath.ToSlash(rootRel), true
-}
-
-// startAgentEditApply writes a session's staged files. The open buffer's
-// file is applied here, into the buffer as one undoable step and saved, so
-// the user can undo back to what they had; the rest are written off the UI
-// goroutine. Unsaved work in the editor is replaced when replaceUnsaved,
-// otherwise its file is skipped.
-func (m Model) startAgentEditApply(id, policy string, replaceUnsaved bool, followUp store.AgentEditGitFollowUp, keep int, reply chan<- string) (Model, tea.Cmd) {
-	registry := m.agentEdits.registry
-	record, ok := registry.Snapshot(id)
-	switch {
-	case !ok:
-		sendExternalReply(reply, extmsg.ErrorReply("no edit session "+id+" is pending"))
-		m.errText = "no edit session " + id + " is pending"
-		return m, nil
-	case m.agentEdits.applying[id]:
-		sendExternalReply(reply, extmsg.ErrorReply("edit session "+id+" is already being applied"))
-		return m, nil
-	case record.AgentEndedAt.IsZero():
-		m.errText = agentsStillEditingText(record)
-		return m, nil
-	}
-	applying := make(map[string]bool, len(m.agentEdits.applying)+1)
-	for session := range m.agentEdits.applying {
-		applying[session] = true
-	}
-	applying[id] = true
-	m.agentEdits.applying = applying
-
-	decided := map[string]staging.FileResult{}
-	for _, file := range record.Files {
-		if file.Result != "" {
-			continue // written along with a session stacked on this one
-		}
-		if m.agentEditFileIsOpen(file.Rel) {
-			if m.edit.dirty && !replaceUnsaved {
-				decided[file.Rel] = staging.FileResult{Result: store.AgentEditFileSkipped, Note: "unsaved edits in the editor"}
-				continue
-			}
-			var result staging.FileResult
-			m, result = m.applyAgentEditToBuffer(file)
-			decided[file.Rel] = result
-			continue
-		}
-		rootRel, inRoot := m.rootRelOf(file.Rel)
-		if !inRoot || !m.draftSet[rootRel] {
-			continue
-		}
-		if !replaceUnsaved {
-			decided[file.Rel] = staging.FileResult{Result: store.AgentEditFileSkipped, Note: "unsaved draft in the editor"}
-			continue
-		}
-		_ = m.db.DeleteDraft(rootRel)
-		delete(m.draftSet, rootRel)
-	}
-	m.notice = "applying edit session " + id + "…"
-	return m, func() tea.Msg {
-		results := registry.ApplyFiles(id, record.Files, decided)
-		finished, err := registry.Finish(id, policy, followUp, results, keep)
-		return agentEditsFinishedMsg{session: id, record: finished, err: err, reply: reply}
-	}
-}
-
-// applyAgentEditToBuffer puts a staged file's content into the open buffer
-// as one undoable step and saves it — unless it cannot be written
-// (staging's ApplyCheck: it changed on disk, or a layer below it did). The
-// result names the layers below, settled once the session finishes.
-func (m Model) applyAgentEditToBuffer(file store.AgentEditFile) (Model, staging.FileResult) {
-	below, refusal, ok := m.agentEdits.registry.ApplyCheck(file)
-	if !ok {
-		return m, refusal
-	}
-	m = m.flushBurst()
-	lines := splitBufferLines(file.Content)
-	m.edit.lines = lines
-	m.edit.cy = input.Clamp(m.edit.cy, 0, len(lines)-1)
-	m.edit.clampCursor()
-	m.fileScrollY = input.Clamp(m.fileScrollY, 0, max(0, len(lines)-1))
-	m.edit.dirty = true
-	m.edit.rev++ // buffer changed: force a highlight rescan (see edit.go)
-	m.snapDirty = true
-	m = m.pushSnapshot("edit") // the whole staged file = one undoable step
-	previousError := m.errText
-	m = m.saveEdit()
-	if m.edit.dirty {
-		note := strings.TrimPrefix(m.errText, "save failed: ")
-		m.errText = previousError
-		return m, staging.FileResult{Result: store.AgentEditFileSkipped, Note: "write failed: " + note}
-	}
-	return m, staging.FileResult{Result: store.AgentEditFileApplied, Settles: below}
-}
-
-// handleAgentEditsFinished lands an applied or discarded session: the agent
-// and its waiters hear the outcome, the views and the panel follow.
-func (m Model) handleAgentEditsFinished(msg agentEditsFinishedMsg) (tea.Model, tea.Cmd) {
-	applying := make(map[string]bool, len(m.agentEdits.applying))
-	for session := range m.agentEdits.applying {
-		if session != msg.session {
-			applying[session] = true
-		}
-	}
-	m.agentEdits.applying = applying
-	if msg.err != nil {
-		sendExternalReply(msg.reply, extmsg.ErrorReply(msg.err.Error()))
-		m.errText = "edit session " + msg.session + ": " + msg.err.Error()
-		return m.refreshAgentEditsPending(), nil
-	}
-	sendExternalReply(msg.reply, agentEditOutcomeReply(msg.record))
-	agentHeard := msg.reply != nil || len(m.agentEdits.waiters[msg.session]) > 0
-	m = m.agentEditSessionOver(msg.session, msg.record)
-	outcome := "edit session " + msg.session + " " + msg.record.Outcome
-	if agentEditGitFollowUpText(msg.record) != "" {
-		outcome += " · asked the agent to " + map[store.AgentEditGitFollowUp]string{store.GitFollowUpCommit: "commit", store.GitFollowUpPullRequest: "open a PR"}[msg.record.GitFollowUp]
-		if !agentHeard {
-			outcome += " (no agent is waiting now — it hears on its next wait)"
-		}
-	}
-	if msg.record.Status == store.AgentEditApplied || msg.record.Status == store.AgentEditDiscarded {
-		m.notice = outcome
-	} else {
-		m.errText = outcome
-	}
-	var gitCmd tea.Cmd
-	if msg.record.Status != store.AgentEditDiscarded {
-		m, gitCmd = m.maybeGitRefresh() // the files changed on disk
-	}
-	return m, tea.Batch(gitCmd, m.loadAgentEditsFinishedCmd())
-}
-
-// startAgentEditDiscard drops a pending session's staged edits for the user.
-func (m Model) startAgentEditDiscard(id string) (Model, tea.Cmd) {
-	if m.agentEdits.applying[id] {
-		m.errText = "edit session " + id + " is being applied"
-		return m, nil
-	}
-	registry, keep := m.agentEdits.registry, m.agentEditKeep()
-	return m, func() tea.Msg {
-		record, err := registry.Discard(id, "the user", keep)
-		return agentEditsFinishedMsg{session: id, record: record, err: err}
-	}
-}
-
-// agentEditKeep is the finished sessions kept, from the settings once
-// loaded.
-func (m Model) agentEditKeep() int {
-	if m.external.settingsLoaded {
-		return m.external.settings.AgentEditKeep
-	}
-	return store.DefaultAgentEditKeep
-}
-
-// agentEditsReadyChoice offers to review a session the agent just ended.
-func agentEditsReadyChoice(record store.AgentEditSession) choiceOverlay {
-	banner, meaning := sessionKindBanner(extmsg.SessionEdit, "")
-	choice := choiceOverlay{kind: choiceAgentEditsReady, title: banner + " " + record.Session, choices: []string{"Review edits", "Later"}}
-	choice.body = append(choice.body, overlayLine{text: meaning, style: overlayLineHighlight})
-	choice.body = append(choice.body, overlayLine{text: countText(len(record.Files), "file") + " staged", style: overlayLineStrong})
-	choice.body = append(choice.body, agentEditFileLines(record)...)
-	for _, line := range checkLines(record) {
-		style := overlayLineStrong
-		if strings.HasPrefix(line, "✗") {
-			style = overlayLineHighlight
-		}
-		choice.body = append(choice.body, overlayLine{text: line, style: style})
-	}
-	choice.body = append(choice.body, overlayLine{text: "later: Ctrl+T › agent edits", style: overlayLineDim})
-	return choice
-}
-
-// agentEditApplyChoice confirms applying a session, and asks what the agent
-// should do in git afterwards: nothing, commit, or a new branch with a pull
-// request. The git choices are offered only when every staged file is in a
-// git repo the editor knows of. It returns the follow-up behind each choice
-// but the last (Cancel).
-func (m Model) agentEditApplyChoice(record store.AgentEditSession) (choiceOverlay, []store.AgentEditGitFollowUp) {
-	choice := choiceOverlay{kind: choiceApplyAgentEdits, title: "Apply edit session " + record.Session + "?"}
-	choice.body = append(choice.body, overlayLine{text: "write " + countText(len(record.Files), "file") + " to disk", style: overlayLineStrong})
-	choice.body = append(choice.body, agentEditFileLines(record)...)
-	for _, line := range checkLines(record) {
-		choice.body = append(choice.body, overlayLine{text: line})
-	}
-	if checking := record.CheckingAgents(); record.Phase() == store.PhaseFinalising && len(checking) > 0 {
-		choice.body = append(choice.body, overlayLine{text: "checks still running: " + staging.AgentNames(checking) + " — applying now skips them", style: overlayLineHighlight})
-	}
-	apply := "Apply"
-	if stacked := m.stackedAgentEditLines(record); len(stacked) > 0 {
-		choice.body = append(choice.body, stacked...)
-		apply = "Apply both"
-	}
-	if unsaved := m.unsavedAgentEditFiles(record); len(unsaved) > 0 {
-		what := "skipped"
-		if m.agentEdits.applyReplaceUnsaved {
-			what = "replaced"
-		}
-		choice.body = append(choice.body, overlayLine{text: "unsaved edits in " + strings.Join(unsaved, ", ") + " — " + what, style: overlayLineHighlight})
-	}
-	repos, inRepos := m.agentEditRepos(record)
-	if !inRepos {
-		choice.choices = []string{apply, "Cancel"}
-		return choice, []store.AgentEditGitFollowUp{store.GitFollowUpNone}
-	}
-	choice.body = append(choice.body,
-		overlayLine{text: "then the agent: commits in " + strings.Join(repos, ", ") + ", or opens a PR on a new branch (it asks you the name) — Apply only leaves git alone", style: overlayLineDim})
-	choice.choices = []string{apply + " only", apply + " & commit", apply + " & new PR", "Cancel"}
-	return choice, []store.AgentEditGitFollowUp{store.GitFollowUpNone, store.GitFollowUpCommit, store.GitFollowUpPullRequest}
-}
-
-// agentEditUnsavedChoice asks, before the apply popup, what becomes of
-// unsaved work in files the session changes: replace it (undo brings it back
-// in the open buffer) or skip those files.
-func agentEditUnsavedChoice(record store.AgentEditSession, unsaved []string) choiceOverlay {
-	choice := choiceOverlay{kind: choiceAgentEditsUnsaved, title: "Apply edit session " + record.Session + "?", choices: []string{"Replace unsaved", "Skip those files", "Cancel"}}
-	choice.body = append(choice.body,
-		overlayLine{text: "unsaved edits in " + strings.Join(unsaved, ", "), style: overlayLineHighlight},
-		overlayLine{text: "replace them with the staged content (undo brings an open buffer's back), or apply the other files only", style: overlayLineDim},
-	)
-	return choice
-}
-
-// agentEditRepos names the git repos a session's files are in, by
-// workspace path ("." = the workspace itself); inRepos is false when some
-// file is in none. It reads only what the editor already knows: no disk.
-func (m Model) agentEditRepos(record store.AgentEditSession) (repos []string, inRepos bool) {
-	for _, file := range record.Files {
-		repo := "."
-		if !m.workspaceIsRepo {
-			if repo = m.deepestRepoFor(file.Rel); repo == "" {
-				return nil, false
-			}
-		}
-		if !slices.Contains(repos, repo) {
-			repos = append(repos, repo)
-		}
-	}
-	for index, repo := range repos {
-		if repo == "." {
-			repos[index] = filepath.Base(m.workspaceRoot)
-		}
-	}
-	return repos, len(repos) > 0
-}
-
-// pendingBaseSessions lists the pending sessions the record's files build
-// on: applying it writes their edits to those files too.
-func (m Model) pendingBaseSessions(record store.AgentEditSession) []string {
-	var bases []string
-	for _, file := range record.Files {
-		if file.Result != "" {
-			continue
-		}
-		if base := m.agentEdits.registry.PendingBase(file); base != "" && !slices.Contains(bases, base) {
-			bases = append(bases, base)
-		}
-	}
-	return bases
-}
-
-// stackedAgentEditLines warns, per file, that applying writes the edits of
-// the pending session it builds on too.
-func (m Model) stackedAgentEditLines(record store.AgentEditSession) []overlayLine {
-	var lines []overlayLine
-	for _, file := range record.Files {
-		if file.Result != "" {
-			continue
-		}
-		if base := m.agentEdits.registry.PendingBase(file); base != "" {
-			lines = append(lines, overlayLine{text: file.Rel + " builds on edit session " + base + "'s edits, which aren't applied yet — applying writes them to it too", style: overlayLineHighlight})
-		}
-	}
-	return lines
-}
-
-// agentEditDiscardChoice confirms dropping a session's staged edits.
-func agentEditDiscardChoice(record store.AgentEditSession) choiceOverlay {
-	choice := choiceOverlay{kind: choiceDiscardAgentEdits, title: "Discard edit session " + record.Session + "?", choices: []string{"Discard", "Cancel"}}
-	choice.body = append(choice.body, overlayLine{text: countText(len(record.Files), "staged file") + " — nothing will be written", style: overlayLineStrong})
-	choice.body = append(choice.body, overlayLine{text: "the session stays in Ctrl+T › agent edits for tracing", style: overlayLineDim})
-	return choice
-}
-
-// agentEditFileLines lists a session's files for an overlay, a few at most.
-func agentEditFileLines(record store.AgentEditSession) []overlayLine {
-	const shown = 6
-	lines := make([]overlayLine, 0, shown+1)
-	for _, file := range record.Files[:min(len(record.Files), shown)] {
-		mark := "M "
-		if !file.BaseExists {
-			mark = "A "
-		}
-		lines = append(lines, overlayLine{text: mark + file.Rel})
-	}
-	if len(record.Files) > shown {
-		lines = append(lines, overlayLine{text: "… and " + strconv.Itoa(len(record.Files)-shown) + " more", style: overlayLineDim})
-	}
-	return lines
-}
-
-// resolveAgentEditsChoice acts on an agent edits overlay's answer.
-func (m Model) resolveAgentEditsChoice(kind choiceOverlayKind, chosen int, choiceCount int) (Model, tea.Cmd) {
-	id := m.agentEdits.choiceSession
-	m.agentEdits.choiceSession = ""
-	record, ok := m.agentEdits.registry.Snapshot(id)
-	if !ok {
-		return m, nil // it finished while the overlay was up
-	}
-	switch kind {
-	case choiceAgentEditsReady:
-		if chosen == 0 {
-			return m.enterAgentEditReview(record, false)
-		}
-		m = m.deferAgentEdits(id)
-		m.notice = "agent edits " + id + " wait under Ctrl+T › agent edits"
-	case choiceLeaveAgentEditReview:
-		switch chosen {
-		case 0:
-			return m.askApplyAgentEdits(id), nil
-		case 1:
-			return m.startAgentEditDiscard(id)
-		case 2:
-			return m.startAgentEditRequestChanges(id)
-		}
-		m = m.exitReview().deferAgentEdits(id)
-		m.notice = "agent edits " + id + " kept for later — reopen them under Ctrl+T › agent edits"
-	case choiceAgentEditsUnsaved:
-		if chosen >= 2 {
-			m.notice = "apply cancelled"
-			return m, nil
-		}
-		m.agentEdits.applyReplaceUnsaved = chosen == 0
-		m.agentEdits.choiceSession = id
-		m.choice, m.agentEdits.applyFollowUps = m.agentEditApplyChoice(record)
-	case choiceApplyAgentEdits:
-		followUps := m.agentEdits.applyFollowUps
-		m.agentEdits.applyFollowUps = nil
-		if chosen < 0 || chosen >= len(followUps) {
-			m.notice = "apply cancelled"
-			return m, nil
-		}
-		return m.startAgentEditApply(id, store.AgentEditPolicyReview, m.agentEdits.applyReplaceUnsaved, followUps[chosen], m.agentEditKeep(), nil)
-	case choiceDiscardAgentEdits:
-		if chosen == 0 {
-			return m.startAgentEditDiscard(id)
-		}
-		m.notice = "discard cancelled"
-	case choiceForceEndAgentEdits:
-		if chosen == 0 {
-			return m.startAgentEditForceEnd(id)
-		}
-		m.notice = "still waiting for the agents"
-	}
-	return m, nil
-}
-
-// askApplyAgentEdits opens the apply confirm for a pending session — once
-// every agent in it has ended.
-func (m Model) askApplyAgentEdits(id string) Model {
-	record, ok := m.agentEdits.registry.Snapshot(id)
-	if !ok {
-		m.errText = "no edit session " + id + " is pending"
-		return m
-	}
-	if record.AgentEndedAt.IsZero() {
-		m.errText = agentsStillEditingText(record)
-		return m
-	}
-	m.agentEdits.choiceSession = id
-	m.agentEdits.applyReplaceUnsaved = false
-	if unsaved := m.unsavedAgentEditFiles(record); len(unsaved) > 0 {
-		m.choice = agentEditUnsavedChoice(record, unsaved)
-		return m
-	}
-	m.choice, m.agentEdits.applyFollowUps = m.agentEditApplyChoice(record)
-	return m
-}
-
-// agentsStillEditingText is why a session cannot be applied yet.
-func agentsStillEditingText(record store.AgentEditSession) string {
-	return "agents are still editing edit session " + record.Session + " (" + staging.AgentNames(record.WithAgents().EditingAgents()) +
-		") — apply once they end, or stop waiting with f under Ctrl+T › agent edits"
-}
-
-// askForceEndAgentEdits confirms no longer waiting for a session's agents.
-func (m Model) askForceEndAgentEdits(id string) Model {
-	record, ok := m.agentEdits.registry.Snapshot(id)
-	switch {
-	case !ok:
-		m.errText = "no edit session " + id + " is pending"
-		return m
-	case record.Phase() == store.PhaseReady:
-		m.notice = "edit session " + id + " is ready — a applies it"
-		return m
-	}
-	m.agentEdits.choiceSession = id
-	m.choice = choiceOverlay{kind: choiceForceEndAgentEdits, title: "Stop waiting for edit session " + id + "?", choices: []string{"Stop waiting", "Cancel"}}
-	if editing := record.WithAgents().EditingAgents(); len(editing) > 0 {
-		m.choice.body = append(m.choice.body,
-			overlayLine{text: "still editing: " + staging.AgentNames(editing), style: overlayLineStrong},
-			overlayLine{text: "their further edits are refused; you then review and apply what is staged", style: overlayLineHighlight},
-		)
-		return m
-	}
-	m.choice.body = append(m.choice.body,
-		overlayLine{text: "still checking: " + staging.AgentNames(record.CheckingAgents()), style: overlayLineStrong},
-		overlayLine{text: "their checks are skipped; you then review and apply what is staged", style: overlayLineHighlight},
-	)
-	return m
 }
 
 // startAgentEditForceEnd stops waiting for the session's agents, off the UI
@@ -963,27 +440,6 @@ func (m Model) handleAgentEditsForceEnded(msg agentEditsForceEndedMsg) (tea.Mode
 	return m, nil
 }
 
-// askLeaveAgentEditReview is Esc on a staged review: the user decides
-// before leaving — apply, discard, or keep the edits staged for later.
-func (m Model) askLeaveAgentEditReview(id string) Model {
-	record, ok := m.agentEdits.registry.Snapshot(id)
-	if !ok {
-		return m.exitReview()
-	}
-	m.agentEdits.choiceSession = id
-	m.choice = agentEditLeaveChoice(record)
-	return m
-}
-
-func agentEditLeaveChoice(record store.AgentEditSession) choiceOverlay {
-	choice := choiceOverlay{kind: choiceLeaveAgentEditReview, title: "Edit session " + record.Session + " — what now?", choices: []string{"Apply all", "Discard all", "Request changes", "Keep for later"}}
-	choice.body = append(choice.body, overlayLine{text: countText(len(record.Files), "file") + " staged — nothing is written yet", style: overlayLineStrong})
-	choice.body = append(choice.body, agentEditFileLines(record)...)
-	choice.body = append(choice.body, overlayLine{text: "request changes: the agent asks you in its terminal", style: overlayLineDim})
-	choice.body = append(choice.body, overlayLine{text: "later: reopen under Ctrl+T › agent edits", style: overlayLineDim})
-	return choice
-}
-
 // deferAgentEdits answers the session's waiting agents that the user set
 // it aside: still staged, so a new wait blocks until the real decision.
 func (m Model) deferAgentEdits(id string) Model {
@@ -1000,62 +456,6 @@ func (m Model) deferAgentEdits(id string) Model {
 	delete(waiters, id)
 	m.agentEdits.waiters = waiters
 	return m
-}
-
-// answerAgentEditWaiters answers every agent waiting on the session with
-// reply, a "waiting — …" that says what changed; they wait again.
-func (m Model) answerAgentEditWaiters(id, reply string) Model {
-	if len(m.agentEdits.waiters[id]) == 0 {
-		return m
-	}
-	for _, waiter := range m.agentEdits.waiters[id] {
-		select {
-		case waiter <- reply:
-		default:
-		}
-	}
-	waiters := cloneWaiters(m.agentEdits.waiters)
-	delete(waiters, id)
-	m.agentEdits.waiters = waiters
-	return m
-}
-
-// handleAgentEditsLayerChanged tells the waiting agents of a session that
-// the copy one of its files builds on changed underneath it.
-func (m Model) handleAgentEditsLayerChanged(msg agentEditsLayerChangedMsg) (tea.Model, tea.Cmd) {
-	m = m.refreshAgentEditsPending()
-	text := "waiting — edit session " + msg.below + " changed " + msg.rel + " after edit session " + msg.session + " built on it: "
-	if msg.rebased {
-		text += "your edits to it were replayed onto the new copy — read it again to see both; wait again to hear the outcome"
-	} else {
-		text += "your copy can no longer be applied as it is (" + msg.reason + ") — read it again and stage your change on the current content (in a new session, or join " + msg.below + ")"
-		if m.mode != modeReview {
-			m.notice = "✎ edit session " + msg.session + "'s " + msg.rel + " no longer fits edit session " + msg.below + "'s newer copy"
-		}
-	}
-	m = m.answerAgentEditWaiters(msg.session, text)
-	return m, nil
-}
-
-// handleAgentEditsFinalising asks the session's waiting agents to check it.
-func (m Model) handleAgentEditsFinalising(msg agentEditsFinalisingMsg) (tea.Model, tea.Cmd) {
-	m = m.refreshAgentEditsPending()
-	m = m.answerAgentEditWaiters(msg.session, "waiting — edit session "+msg.session+" is finalising: every agent ended; build and test it in its sandbox (sandbox), report with check, then wait again for the user's decision")
-	if m.mode != modeReview {
-		m.notice = "⚙ edit session " + msg.session + " finalising — its agents check it in a sandbox"
-	}
-	return m.refreshAgentEditReview(msg.session)
-}
-
-// handleAgentEditsReopened tells the session's waiting agents it is back to
-// editing: their checks are due again later.
-func (m Model) handleAgentEditsReopened(msg agentEditsReopenedMsg) (tea.Model, tea.Cmd) {
-	m = m.refreshAgentEditsPending()
-	m = m.answerAgentEditWaiters(msg.session, "waiting — edit session "+msg.session+" is back to editing ("+staging.AgentLabel(msg.agent)+" is fixing it): its sandbox is gone; check again once every agent has sent end — wait again to hear when")
-	if m.mode != modeReview {
-		m.notice = "✎ edit session " + msg.session + " is back to editing — " + staging.AgentLabel(msg.agent) + " is fixing it"
-	}
-	return m, nil
 }
 
 // startAgentEditRequestChanges asks a ready session's agents for changes:
@@ -1092,28 +492,4 @@ func (m Model) handleAgentEditsChangesRequested(msg agentEditsChangesRequestedMs
 		m.notice = "✎ changes requested for edit session " + msg.session + " — no agent is waiting now; it hears on its next wait"
 	}
 	return m.refreshAgentEditReview(msg.session)
-}
-
-// agentEditChangesRequestedReply is what a waiting agent hears when the
-// user asks for changes.
-func agentEditChangesRequestedReply(id string) string {
-	return extmsg.ChangesRequestedReply("the user has questions or changes for edit session " + id +
-		": stop and tell them to switch to this terminal, then ask what they want; do not wait again yet. " +
-		"The session is open for edits again: stage the follow-ups in it, then end it")
-}
-
-func agentEditDeferredReply(id string) string {
-	return "waiting — the user set edit session " + id + " aside for later: still staged, nothing written; wait again to hear their decision"
-}
-
-// askDiscardAgentEdits opens the discard confirm for a pending session.
-func (m Model) askDiscardAgentEdits(id string) Model {
-	record, ok := m.agentEdits.registry.Snapshot(id)
-	if !ok {
-		m.errText = "no edit session " + id + " is pending"
-		return m
-	}
-	m.agentEdits.choiceSession = id
-	m.choice = agentEditDiscardChoice(record)
-	return m
 }

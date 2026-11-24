@@ -77,13 +77,8 @@ func (m Model) renderOpPickBox(width int) string {
 		}
 	}
 
-	visible := min(len(m.opMode.matches), maxRows)
-	selected := input.Clamp(m.opMode.index, 0, max(0, len(m.opMode.matches)-1))
-	start := 0
-	if selected >= visible {
-		start = selected - visible + 1
-	}
-	for index := start; index < start+visible && index < len(m.opMode.matches); index++ {
+	selected, start, end := listWindow(len(m.opMode.matches), m.opMode.index, maxRows)
+	for index := start; index < end; index++ {
 		match := m.opMode.matches[index]
 		command := m.opMode.candidates[match.Index]
 		if index == selected {

@@ -35,8 +35,24 @@ func (r *Registry) Latest(rel string) (content, session string, exists bool, err
 // StagedIn is the pending session holding rel's top layer, "" when rel has
 // no staged edits.
 func (r *Registry) StagedIn(rel string) (string, error) {
+	if !hasUnsettledLayer(r.Pending(), rel) {
+		return "", nil // the common answer, without reading the file
+	}
 	_, session, _, err := r.Latest(rel)
 	return session, err
+}
+
+// hasUnsettledLayer reports whether any pending session stages rel and has
+// not settled it.
+func hasUnsettledLayer(sessions []store.AgentEditSession, rel string) bool {
+	for _, session := range sessions {
+		for _, file := range session.Files {
+			if file.Rel == rel && file.Result == "" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (r *Registry) readDisk(rel string) (content string, exists bool, err error) {
@@ -196,7 +212,7 @@ func (r *Registry) SettleFile(session, rel string, result FileResult) error {
 		}
 	}
 	record.Files = files
-	if err := r.log.SavePendingAgentEdit(record); err != nil {
+	if err := r.log.SavePendingAgentEditFiles(record, []string{rel}); err != nil {
 		return fmt.Errorf("cannot save edit session %s: %w", session, err)
 	}
 	set.publish(record)

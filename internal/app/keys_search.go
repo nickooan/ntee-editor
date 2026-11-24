@@ -1,13 +1,16 @@
 package app
 
 import (
+	"slices"
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/nickooan/ntee-editor/internal/input"
 	"github.com/nickooan/ntee-editor/internal/keymap"
+	"github.com/nickooan/ntee-editor/internal/store"
 	"github.com/nickooan/ntee-editor/internal/syntax"
+	"github.com/nickooan/ntee-editor/internal/view"
 )
 
 // enterSearch opens the in-file search over a frozen copy of content,
@@ -30,10 +33,23 @@ func (m Model) freezeSearchSnapshot(content string) Model {
 	m.searchHl = nil
 	if m.openFile != nil {
 		if kb := m.cfg.Editor.MaxHighlightKB; kb <= 0 || len(content) <= kb*1024 {
-			m.searchHl = syntax.HighlightLines(m.openFile.FileName, content)
+			m.searchHl = m.reusableHighlights(content)
+			if m.searchHl == nil {
+				m.searchHl = syntax.HighlightLines(m.openFile.FileName, content)
+			}
 		}
 	}
 	return m
+}
+
+// reusableHighlights is a copy of hlLines when they are a complete rescan of
+// content — a save or a replace just highlighted it — so search need not
+// tokenize the whole file again; nil otherwise.
+func (m Model) reusableHighlights(content string) [][]view.HighlightSegment {
+	if m.hlLines == nil || m.hlRowsPending || m.hlPath != m.openRel || m.hlHash != store.ContentHash(content) {
+		return nil
+	}
+	return slices.Clone(m.hlLines)
 }
 
 func (m Model) handleSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {

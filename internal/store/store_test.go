@@ -261,3 +261,29 @@ func TestMemoryMaintenanceUnavailable(t *testing.T) {
 		t.Fatalf("RelieveBlobs err = %v, want ErrNoStats", err)
 	}
 }
+
+func TestRecentFilesCacheTracksWritesAfterTheFirstRead(t *testing.T) {
+	s := openTestStore(t)
+	_ = s.TouchOpened(OpenedFile{Path: "a.go", LastOpenedAt: 100})
+	if got := s.RecentFiles(0); len(got) != 1 {
+		t.Fatalf("first read loads the cache: %+v", got)
+	}
+	_ = s.TouchOpened(OpenedFile{Path: "lib/b.go", LastOpenedAt: 300})
+	_ = s.TouchOpened(OpenedFile{Path: "c.go", LastOpenedAt: 200})
+	_ = s.TouchOpened(OpenedFile{Path: "a.go", LastOpenedAt: 400})
+	_ = s.DeleteOpenedUnder("lib")
+	cached := s.RecentFiles(0)
+	fromDisk := s.loadRecentFiles()
+	if len(cached) != 2 || cached[0].Path != "a.go" || cached[1].Path != "c.go" {
+		t.Fatalf("the cache follows touches and deletes: %+v", cached)
+	}
+	for index := range cached {
+		if cached[index] != fromDisk[index] {
+			t.Fatalf("cache %+v ≠ db %+v", cached, fromDisk)
+		}
+	}
+	cached[0].Path = "mutated"
+	if s.RecentFiles(1)[0].Path != "a.go" {
+		t.Fatal("callers get a copy")
+	}
+}

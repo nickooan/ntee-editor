@@ -427,8 +427,8 @@ func TestBlameJumpAndCtrlOReturnsToBlame(t *testing.T) {
 	// Ctrl+O: back to main.go, re-entering blame with a recompute.
 	res, cmd := m.Update(ctrlKey('o'))
 	m = res.(Model)
-	if m.openRel != "main.go" || m.mode != modeBlame || !m.blameLoading || !m.blameHasPending {
-		t.Fatalf("ctrl+o: open=%q mode=%v loading=%v pending=%v", m.openRel, m.mode, m.blameLoading, m.blameHasPending)
+	if m.openRel != "main.go" || m.mode != modeBlame || !m.blameLoading || !m.blamePending.set {
+		t.Fatalf("ctrl+o: open=%q mode=%v loading=%v pending=%v", m.openRel, m.mode, m.blameLoading, m.blamePending.set)
 	}
 	if cmd == nil {
 		t.Fatal("ctrl+o to a blame frame must fire the recompute cmd")

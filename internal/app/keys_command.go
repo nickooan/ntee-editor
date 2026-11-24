@@ -27,18 +27,8 @@ func (m Model) handleCommandKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.mode = m.cmdPrevMode
 	case "enter":
 		return m.executeCommand(strings.TrimSpace(m.cmdInput))
-	case "left":
-		m.cmdCursor = input.MoveCursor(m.cmdInput, m.cmdCursor, -1)
-	case "right":
-		m.cmdCursor = input.MoveCursor(m.cmdInput, m.cmdCursor, 1)
-	case "backspace":
-		m.cmdInput, m.cmdCursor, _ = input.RemoveBeforeCursor(m.cmdInput, m.cmdCursor)
-	case "space":
-		m.cmdInput, m.cmdCursor = input.InsertAtCursor(m.cmdInput, m.cmdCursor, " ")
 	default:
-		if t := keyText(msg); t != "" {
-			m.cmdInput, m.cmdCursor = input.InsertAtCursor(m.cmdInput, m.cmdCursor, t)
-		}
+		m.cmdInput, m.cmdCursor = editLineInput(m.cmdInput, m.cmdCursor, msg)
 	}
 	return m, nil
 }
@@ -132,27 +122,38 @@ const (
 )
 
 // fuzzyGotoCandidates builds the Ctrl+P list: recents first, then the rest of
-// the corpus, directories last so an empty query stays a file list.
-func (m Model) fuzzyGotoCandidates() []string {
-	corpus := m.corpus
-	inCorpus := make(map[string]int, len(corpus))
-	for i, rel := range corpus {
-		inCorpus[rel] = i
+// the corpus, directories last so an empty query stays a file list. It
+// reorders queryPrepared — the corpus already prepared when it landed —
+// rather than preparing 50k paths again on every open.
+func (m Model) fuzzyGotoCandidates() []fuzzy.Prepared {
+	prepared := m.queryPrepared
+	if len(prepared) != len(m.corpus)+len(m.dirCorpus) {
+		prepared = filetree.PrepareCorpus(m.corpus, m.dirCorpus)
 	}
-	ordered := make([]string, 0, len(corpus))
-	used := make(map[string]bool)
-	for _, recent := range m.db.RecentFiles(20) {
-		if _, ok := inCorpus[recent.Path]; ok && !used[recent.Path] {
-			ordered = append(ordered, recent.Path)
-			used[recent.Path] = true
+	recents := m.db.RecentFiles(20)
+	recentRank := make(map[string]int, len(recents))
+	for rank, recent := range recents {
+		if _, seen := recentRank[recent.Path]; !seen {
+			recentRank[recent.Path] = rank
 		}
 	}
-	for _, rel := range corpus {
-		if !used[rel] {
-			ordered = append(ordered, rel)
+	foundRecents := make([]fuzzy.Prepared, len(recents))
+	found := make([]bool, len(recents))
+	ordered := make([]fuzzy.Prepared, 0, len(prepared))
+	for index, candidate := range prepared {
+		if rank, recent := recentRank[candidate.Text]; recent && index < len(m.corpus) {
+			foundRecents[rank], found[rank] = candidate, true
+			continue
+		}
+		ordered = append(ordered, candidate)
+	}
+	front := make([]fuzzy.Prepared, 0, len(recents))
+	for rank, candidate := range foundRecents {
+		if found[rank] {
+			front = append(front, candidate)
 		}
 	}
-	return append(ordered, m.dirCorpus...)
+	return append(front, ordered...)
 }
 
 // fuzzyUncommittedCandidates builds the Ctrl+U list: the corpus ∩ gitDirty
@@ -173,17 +174,21 @@ func (m Model) fuzzyUncommittedCandidates() []string {
 func (m Model) openFuzzy() (Model, tea.Cmd) {
 	m = m.closeCompletion()
 	m, cmd := m.ensureCorpus()
-	return m.showFuzzy(fuzzyPromptGoto, m.fuzzyGotoCandidates()), cmd
+	return m.showFuzzyPrepared(fuzzyPromptGoto, m.fuzzyGotoCandidates()), cmd
 }
 
 // showFuzzy opens the shared finder overlay over candidates; the prompt names
 // the variant (refreshFuzzyCandidates and Enter dispatch on it).
 func (m Model) showFuzzy(prompt string, candidates []string) Model {
+	return m.showFuzzyPrepared(prompt, fuzzy.Prepare(candidates))
+}
+
+func (m Model) showFuzzyPrepared(prompt string, candidates []fuzzy.Prepared) Model {
 	m.fuzzyOpen = true
 	m.fuzzyQuery = ""
 	m.fuzzyIndex = 0
 	m.fuzzyPrompt = prompt
-	m.fuzzyCorpus = fuzzy.Prepare(candidates)
+	m.fuzzyCorpus = candidates
 	m.fuzzyMatches = fuzzy.Filter("", m.fuzzyCorpus)
 	return m
 }
@@ -228,18 +233,18 @@ func (m Model) refreshFuzzyCandidates() Model {
 	}
 	selected := m.fuzzySelectedPath()
 	previousIndex := m.fuzzyIndex
-	var ordered []string
 	switch m.fuzzyPrompt {
 	case fuzzyPromptUncommitted:
-		ordered = m.fuzzyUncommittedCandidates()
+		m.fuzzyCorpus = fuzzy.Prepare(m.fuzzyUncommittedCandidates())
 	case fuzzyPromptRepo:
+		var ordered []string
 		ordered, m.repoRels = m.repoPickerCandidates()
+		m.fuzzyCorpus = fuzzy.Prepare(ordered)
 	case fuzzyPromptReview:
-		ordered = m.reviewFuzzyCandidates()
+		m.fuzzyCorpus = fuzzy.Prepare(m.reviewFuzzyCandidates())
 	default:
-		ordered = m.fuzzyGotoCandidates()
+		m.fuzzyCorpus = m.fuzzyGotoCandidates()
 	}
-	m.fuzzyCorpus = fuzzy.Prepare(ordered)
 	m = m.refreshFuzzy() // re-filters the preserved fuzzyQuery, resets the index
 	for i, match := range m.fuzzyMatches {
 		if m.fuzzyCorpus[match.Index].Text == selected {

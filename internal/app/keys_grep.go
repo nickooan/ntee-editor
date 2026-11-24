@@ -95,7 +95,7 @@ func (m Model) openGrep() (Model, tea.Cmd) {
 	}
 	m, corpusCmd := m.ensureCorpus()
 	m = m.beginGrep(grepTargetOpenFile)
-	return m, tea.Batch(corpusCmd, m.grepLoadBatchCmd(m.grepGen, 0))
+	return m, tea.Batch(corpusCmd, m.grepLoadBatchCmd(m.grep.gen, 0))
 }
 
 // grepTarget says where Enter on a hit goes: the project grep opens the file
@@ -110,22 +110,22 @@ const (
 
 // beginGrep resets the overlay to an empty, loading session.
 func (m Model) beginGrep(target grepTarget) Model {
-	m.grepOpen = true
-	m.grepTarget = target
-	m.grepQuery = ""
-	m.grepCursor = 0
-	m.grepIndex = 0
-	m.grepResults = nil
-	m.grepFiles = nil
-	m.grepFileIndex = nil
-	m.grepHlRel = ""
-	m.grepHl = nil
-	m.grepPrevLines = nil
-	m.grepLoading = true
-	m.grepLoadBytes = 0
-	m.grepGen++
-	m.grepSearchGen++ // invalidates any tick left over from a prior session
-	m.grepResultsGen = m.grepSearchGen
+	m.grep.open = true
+	m.grep.target = target
+	m.grep.query = ""
+	m.grep.cursor = 0
+	m.grep.index = 0
+	m.grep.results = nil
+	m.grep.files = nil
+	m.grep.fileIndex = nil
+	m.grep.hlRel = ""
+	m.grep.hl = nil
+	m.grep.prevLines = nil
+	m.grep.loading = true
+	m.grep.loadBytes = 0
+	m.grep.gen++
+	m.grep.searchGen++ // invalidates any tick left over from a prior session
+	m.grep.resultsGen = m.grep.searchGen
 	return m
 }
 
@@ -135,34 +135,34 @@ func (m Model) beginGrep(target grepTarget) Model {
 func (m Model) openGrepOver(files []grepFile, target grepTarget) Model {
 	m = m.closeCompletion()
 	m = m.beginGrep(target)
-	m.grepLoading = false
-	m.grepFiles = files
-	m.grepFileIndex = make(map[string]int, len(files))
+	m.grep.loading = false
+	m.grep.files = files
+	m.grep.fileIndex = make(map[string]int, len(files))
 	for i, file := range files {
-		m.grepFileIndex[file.rel] = i
-		m.grepLoadBytes += len(file.content)
+		m.grep.fileIndex[file.rel] = i
+		m.grep.loadBytes += len(file.content)
 	}
 	return m
 }
 
-// newGrepFile prepares content for grepFiles: CRLF-normalized with its line
+// newGrepFile prepares content for grep.files: CRLF-normalized with its line
 // starts indexed.
 func newGrepFile(rel, content string) grepFile {
 	content = strings.ReplaceAll(content, "\r\n", "\n")
 	return grepFile{rel: rel, content: content, lineStarts: buildLineStarts(content)}
 }
 
-// closeGrep hides the overlay and releases the snapshot — grepFiles can hold
+// closeGrep hides the overlay and releases the snapshot — grep.files can hold
 // hundreds of MB and nothing keeps it useful between opens.
 func (m Model) closeGrep() Model {
-	m.grepOpen = false
-	m.grepLoading = false
-	m.grepLoadBytes = 0
-	m.grepFiles = nil
-	m.grepFileIndex = nil
-	m.grepHlRel = ""
-	m.grepHl = nil
-	m.grepPrevLines = nil
+	m.grep.open = false
+	m.grep.loading = false
+	m.grep.loadBytes = 0
+	m.grep.files = nil
+	m.grep.fileIndex = nil
+	m.grep.hlRel = ""
+	m.grep.hl = nil
+	m.grep.prevLines = nil
 	return m
 }
 
@@ -208,36 +208,36 @@ func (m Model) grepLoadBatchCmd(gen, start int) tea.Cmd {
 // the debounce or pile up scans. Completion always fires a final search: it is
 // the guarantee that the displayed results cover the whole snapshot.
 func (m Model) handleGrepBatch(msg grepBatchMsg) (tea.Model, tea.Cmd) {
-	if !m.grepOpen || msg.gen != m.grepGen {
+	if !m.grep.open || msg.gen != m.grep.gen {
 		return m, nil // stale: overlay closed or reopened — the chain ends here
 	}
 	truncated := false
-	if m.grepFileIndex == nil {
-		m.grepFileIndex = make(map[string]int, len(msg.files))
+	if m.grep.fileIndex == nil {
+		m.grep.fileIndex = make(map[string]int, len(msg.files))
 	}
 	for _, gf := range msg.files {
-		if len(m.grepFiles) >= maxGrepFiles || m.grepLoadBytes >= maxGrepBytes {
+		if len(m.grep.files) >= maxGrepFiles || m.grep.loadBytes >= maxGrepBytes {
 			truncated = true
 			break
 		}
-		m.grepFileIndex[gf.rel] = len(m.grepFiles)
-		m.grepFiles = append(m.grepFiles, gf)
-		m.grepLoadBytes += len(gf.content)
+		m.grep.fileIndex[gf.rel] = len(m.grep.files)
+		m.grep.files = append(m.grep.files, gf)
+		m.grep.loadBytes += len(gf.content)
 	}
 	done := truncated || msg.nextStart >= len(m.corpus)
 	var cmds []tea.Cmd
 	if done {
-		m.grepLoading = false
+		m.grep.loading = false
 		if truncated {
-			m.notice = fmt.Sprintf("repo search limited to %d files — narrow your root or add ignores", len(m.grepFiles))
+			m.notice = fmt.Sprintf("repo search limited to %d files — narrow your root or add ignores", len(m.grep.files))
 		}
 	} else {
 		cmds = append(cmds, m.grepLoadBatchCmd(msg.gen, msg.nextStart))
 	}
-	if len([]rune(m.grepQuery)) >= 2 {
-		searchIdle := m.grepResultsGen == m.grepSearchGen
+	if len([]rune(m.grep.query)) >= 2 {
+		searchIdle := m.grep.resultsGen == m.grep.searchGen
 		if done || (searchIdle && len(msg.files) > 0) {
-			m.grepSearchGen++
+			m.grep.searchGen++
 			cmds = append(cmds, m.grepSearchCmd())
 		}
 	}
@@ -249,7 +249,7 @@ func (m Model) handleGrepBatch(msg grepBatchMsg) (tea.Model, tea.Cmd) {
 // While indexing, later batches re-search the grown prefix and completion
 // fires the covering search.
 func (m Model) handleGrepTick(msg grepTickMsg) (tea.Model, tea.Cmd) {
-	if !m.grepOpen || msg.gen != m.grepSearchGen {
+	if !m.grep.open || msg.gen != m.grep.searchGen {
 		return m, nil
 	}
 	return m, m.grepSearchCmd()
@@ -257,12 +257,12 @@ func (m Model) handleGrepTick(msg grepTickMsg) (tea.Model, tea.Cmd) {
 
 // handleGrepResults lands a scan's hits, dropping results for outdated queries.
 func (m Model) handleGrepResults(msg grepResultsMsg) (tea.Model, tea.Cmd) {
-	if !m.grepOpen || msg.gen != m.grepSearchGen {
+	if !m.grep.open || msg.gen != m.grep.searchGen {
 		return m, nil
 	}
-	m.grepResults = msg.results
-	m.grepResultsGen = msg.gen
-	m.grepIndex = 0
+	m.grep.results = msg.results
+	m.grep.resultsGen = msg.gen
+	m.grep.index = 0
 	return m.refreshGrepPreview()
 }
 
@@ -271,15 +271,15 @@ func (m Model) handleGrepResults(msg grepResultsMsg) (tea.Model, tea.Cmd) {
 // earlier pending tick, so only the last keystroke's tick fires a search. Old
 // results stay displayed until the new ones land (no flicker).
 func (m Model) queueGrepSearch() (Model, tea.Cmd) {
-	m.grepSearchGen++
-	if len([]rune(m.grepQuery)) < 2 {
-		m.grepResults = nil
-		m.grepIndex = 0
-		m.grepResultsGen = m.grepSearchGen
-		m.grepHlRel, m.grepHl, m.grepPrevLines = "", nil, nil
+	m.grep.searchGen++
+	if len([]rune(m.grep.query)) < 2 {
+		m.grep.results = nil
+		m.grep.index = 0
+		m.grep.resultsGen = m.grep.searchGen
+		m.grep.hlRel, m.grep.hl, m.grep.prevLines = "", nil, nil
 		return m, nil
 	}
-	gen := m.grepSearchGen
+	gen := m.grep.searchGen
 	return m, tea.Tick(grepDebounce, func(time.Time) tea.Msg { return grepTickMsg{gen: gen} })
 }
 
@@ -289,9 +289,9 @@ func (m Model) queueGrepSearch() (Model, tea.Cmd) {
 // scan. The workers share one compiled regex: since Go 1.12 regexp pools its
 // match state internally, so concurrent use scales without Copy.
 func (m Model) grepSearchCmd() tea.Cmd {
-	gen := m.grepSearchGen
-	query := m.grepQuery
-	files := m.grepFiles
+	gen := m.grep.searchGen
+	query := m.grep.query
+	files := m.grep.files
 	return func() tea.Msg {
 		re := view.CreateMultilineSearchRegex(query)
 		if re == nil || len(files) == 0 {
@@ -375,12 +375,12 @@ func appendGrepHits(dst []grepHit, f grepFile, re *regexp.Regexp, limit int) []g
 // from the overlay renderer every frame, so the lookup is a map hit, not a
 // scan over a snapshot of up to maxGrepFiles entries.
 func (m Model) grepSelectedFile() (grepFile, grepHit, bool) {
-	if len(m.grepResults) == 0 {
+	if len(m.grep.results) == 0 {
 		return grepFile{}, grepHit{}, false
 	}
-	hit := m.grepResults[input.Clamp(m.grepIndex, 0, len(m.grepResults)-1)]
-	if i, ok := m.grepFileIndex[hit.rel]; ok {
-		return m.grepFiles[i], hit, true
+	hit := m.grep.results[input.Clamp(m.grep.index, 0, len(m.grep.results)-1)]
+	if i, ok := m.grep.fileIndex[hit.rel]; ok {
+		return m.grep.files[i], hit, true
 	}
 	return grepFile{}, grepHit{}, false
 }
@@ -398,28 +398,28 @@ func (m Model) handleGrepKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m = next
 			break
 		}
-		m.grepIndex = max(0, m.grepIndex-1)
+		m.grep.index = max(0, m.grep.index-1)
 		m, cmd = m.refreshGrepPreview()
 	case "down":
 		if next, ok := m.grepMoveCursorLine(1); ok {
 			m = next
 			break
 		}
-		m.grepIndex = min(max(0, len(m.grepResults)-1), m.grepIndex+1)
+		m.grep.index = min(max(0, len(m.grep.results)-1), m.grep.index+1)
 		m, cmd = m.refreshGrepPreview()
 	case "left":
-		m.grepCursor = input.MoveCursor(m.grepQuery, m.grepCursor, -1)
+		m.grep.cursor = input.MoveCursor(m.grep.query, m.grep.cursor, -1)
 	case "right":
-		m.grepCursor = input.MoveCursor(m.grepQuery, m.grepCursor, 1)
+		m.grep.cursor = input.MoveCursor(m.grep.query, m.grep.cursor, 1)
 	case "home":
-		line, _ := grepLineCol(m.grepQuery, m.grepCursor)
-		m.grepCursor = grepOffsetAt(m.grepQuery, line, 0)
+		line, _ := grepLineCol(m.grep.query, m.grep.cursor)
+		m.grep.cursor = grepOffsetAt(m.grep.query, line, 0)
 	case "end":
-		line, _ := grepLineCol(m.grepQuery, m.grepCursor)
-		m.grepCursor = grepOffsetAt(m.grepQuery, line, -1)
+		line, _ := grepLineCol(m.grep.query, m.grep.cursor)
+		m.grep.cursor = grepOffsetAt(m.grep.query, line, -1)
 	case "enter":
 		_, hit, ok := m.grepSelectedFile()
-		target := m.grepTarget
+		target := m.grep.target
 		m = m.closeGrep()
 		if !ok {
 			break
@@ -435,13 +435,13 @@ func (m Model) handleGrepKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m = m.anchorCursorLine()
 		}
 	case "backspace":
-		if q, at, ok := input.RemoveBeforeCursor(m.grepQuery, m.grepCursor); ok {
-			m.grepQuery, m.grepCursor = q, at
+		if q, at, ok := input.RemoveBeforeCursor(m.grep.query, m.grep.cursor); ok {
+			m.grep.query, m.grep.cursor = q, at
 			m, cmd = m.queueGrepSearch()
 		}
 	case "delete":
-		if runes := []rune(m.grepQuery); m.grepCursor < len(runes) {
-			m.grepQuery = string(runes[:m.grepCursor]) + string(runes[m.grepCursor+1:])
+		if runes := []rune(m.grep.query); m.grep.cursor < len(runes) {
+			m.grep.query = string(runes[:m.grep.cursor]) + string(runes[m.grep.cursor+1:])
 			m, cmd = m.queueGrepSearch()
 		}
 	case "space":
@@ -469,7 +469,7 @@ func (m Model) grepPaste(text string) (Model, tea.Cmd) {
 }
 
 func (m Model) grepInsert(s string) Model {
-	m.grepQuery, m.grepCursor = input.InsertAtCursor(m.grepQuery, m.grepCursor, s)
+	m.grep.query, m.grep.cursor = input.InsertAtCursor(m.grep.query, m.grep.cursor, s)
 	return m
 }
 
@@ -509,12 +509,12 @@ func grepOffsetAt(query string, line, col int) int {
 // cursor is already on the boundary line, so the caller can fall through to
 // result-list navigation.
 func (m Model) grepMoveCursorLine(dy int) (Model, bool) {
-	line, col := grepLineCol(m.grepQuery, m.grepCursor)
+	line, col := grepLineCol(m.grep.query, m.grep.cursor)
 	target := line + dy
-	if target < 0 || target > strings.Count(m.grepQuery, "\n") {
+	if target < 0 || target > strings.Count(m.grep.query, "\n") {
 		return m, false
 	}
-	m.grepCursor = grepOffsetAt(m.grepQuery, target, col)
+	m.grep.cursor = grepOffsetAt(m.grep.query, target, col)
 	return m, true
 }
 
@@ -534,16 +534,16 @@ type grepPreviewMsg struct {
 func (m Model) refreshGrepPreview() (Model, tea.Cmd) {
 	f, _, ok := m.grepSelectedFile()
 	if !ok {
-		m.grepHlRel, m.grepHl, m.grepPrevLines = "", nil, nil
+		m.grep.hlRel, m.grep.hl, m.grep.prevLines = "", nil, nil
 		return m, nil
 	}
-	if f.rel == m.grepHlRel {
+	if f.rel == m.grep.hlRel {
 		return m, nil
 	}
-	m.grepHlRel = f.rel
-	m.grepPrevLines = strings.Split(f.content, "\n") // pre-normalized ⇒ same as NormalizeLines
-	m.grepHl = nil
-	gen, rel, content := m.grepGen, f.rel, f.content
+	m.grep.hlRel = f.rel
+	m.grep.prevLines = strings.Split(f.content, "\n") // pre-normalized ⇒ same as NormalizeLines
+	m.grep.hl = nil
+	gen, rel, content := m.grep.gen, f.rel, f.content
 	return m, func() tea.Msg {
 		return grepPreviewMsg{gen: gen, rel: rel, hl: syntax.HighlightLines(path.Base(rel), content)}
 	}
@@ -551,9 +551,9 @@ func (m Model) refreshGrepPreview() (Model, tea.Cmd) {
 
 // handleGrepPreview lands the async tokenize for the still-selected file.
 func (m Model) handleGrepPreview(msg grepPreviewMsg) (tea.Model, tea.Cmd) {
-	if !m.grepOpen || msg.gen != m.grepGen || msg.rel != m.grepHlRel {
+	if !m.grep.open || msg.gen != m.grep.gen || msg.rel != m.grep.hlRel {
 		return m, nil
 	}
-	m.grepHl = msg.hl
+	m.grep.hl = msg.hl
 	return m, nil
 }

@@ -2,6 +2,7 @@ package app
 
 import (
 	"cmp"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -36,13 +37,53 @@ func (r *ExternalReceiver) WithAgentEdits(registry *staging.Registry) *ExternalR
 }
 
 // notify tells the UI something changed without waiting for it: the sender
-// already has its reply.
+// already has its reply. Notices reach the UI in the order raised, through
+// one dispatcher (dispatchNotices); a change notice already waiting for the
+// same session is not queued twice.
 func (r *ExternalReceiver) notify(msg any) {
 	r.sinkMu.Lock()
-	sink := r.sink
+	hasSink := r.sink != nil
 	r.sinkMu.Unlock()
-	if sink != nil {
-		go sink(msg)
+	if !hasSink {
+		return
+	}
+	r.noticeMu.Lock()
+	if !r.noticeAlreadyWaiting(msg) {
+		r.notices = append(r.notices, msg)
+	}
+	r.noticeMu.Unlock()
+	select {
+	case r.noticeWake <- struct{}{}:
+	default: // the dispatcher is already due to run
+	}
+}
+
+// noticeAlreadyWaiting reports a plain change notice that an identical
+// waiting one covers. r.noticeMu is held.
+func (r *ExternalReceiver) noticeAlreadyWaiting(msg any) bool {
+	changed, ok := msg.(agentEditsChangedMsg)
+	if !ok || changed.started {
+		return false
+	}
+	for _, waiting := range r.notices {
+		if waiting == any(changed) {
+			return true
+		}
+	}
+	return false
+}
+
+// dispatchNotices delivers notices to sink one at a time, so a slow UI
+// holds back only this goroutine, never a socket sender.
+func (r *ExternalReceiver) dispatchNotices(sink func(msg any)) {
+	for range r.noticeWake {
+		r.noticeMu.Lock()
+		batch := r.notices
+		r.notices = nil
+		r.noticeMu.Unlock()
+		for _, notice := range batch {
+			sink(notice)
+		}
 	}
 }
 
@@ -91,10 +132,10 @@ func (r *ExternalReceiver) handleAgentEdit(message extmsg.Message, settings stor
 		case message.Command == extmsg.CommandShow:
 			return extmsg.BodyReply(content)
 		}
-		detail := readDetail(from) + " · version " + r.agentEdits.Remember(content)
+		detail := extmsg.WithVersion(extmsg.ReadSourceDetail(from), r.agentEdits.Remember(content))
 		if from != "" && from == id {
 			if stale := r.agentEdits.StaleNote(id, rel); stale != "" {
-				detail += " · stale: " + stale
+				detail = extmsg.WithStale(detail, stale)
 			}
 		}
 		repo, others := r.agentEdits.SessionsInRepo(rel, id, from)
@@ -107,7 +148,7 @@ func (r *ExternalReceiver) handleAgentEdit(message extmsg.Message, settings stor
 		case session == "":
 			return extmsg.OkReply("not staged")
 		}
-		return extmsg.OkReply("staged · edit session " + session)
+		return extmsg.StagedReply(session)
 	case extmsg.CommandWrite:
 		if line > 0 {
 			return extmsg.ErrorReply("write sets the whole file — leave #L" + strconv.Itoa(line) + " off")
@@ -121,7 +162,7 @@ func (r *ExternalReceiver) handleAgentEdit(message extmsg.Message, settings stor
 		result, err = r.agentEdits.Replace(id, message.Agent, rel, staging.Replacement{Old: payload.Old, New: payload.New, All: payload.All, HintLine: line, Expect: message.Expect})
 	}
 	if err != nil {
-		return extmsg.ErrorReply(err.Error())
+		return extmsg.ErrorReply(agentEditErrorText(err))
 	}
 	r.notify(agentEditsChangedMsg{session: id, started: result.SessionStart, policy: settings.AgentEditPolicy})
 	if result.Reopened {
@@ -147,7 +188,25 @@ func (r *ExternalReceiver) handleAgentEdit(message extmsg.Message, settings stor
 				" — to join it instead, discard this session and edit in session " + others[0].Session
 		}
 	}
-	return extmsg.OkReply(text + " · version " + result.Version)
+	return extmsg.OkReply(extmsg.WithVersion(text, result.Version))
+}
+
+// agentEditErrorText words a refused edit for the socket's agents, who use
+// ntee --msg: staging's typed refusals get its commands and flags (the MCP
+// tools reword those into theirs).
+func agentEditErrorText(err error) string {
+	var stale *staging.StaleReadError
+	var missing *staging.OldTextMissingError
+	var ambiguous *staging.OldTextAmbiguousError
+	switch {
+	case errors.As(err, &stale):
+		return fmt.Sprintf("%s changed since you read it: %s — %s; read it again (ntee --msg read) and stage your change on the current content", stale.Rel, stale.Change, stale.Conflict)
+	case errors.As(err, &missing):
+		return missing.Error() + " (ntee --msg show prints the staged content)"
+	case errors.As(err, &ambiguous):
+		return fmt.Sprintf("the old text matches %d times in %s (lines %s) — add surrounding lines to make it unique, add #L<n> to the path, or replace them all with --msg-replace-all", ambiguous.Count, ambiguous.Rel, ambiguous.Lines)
+	}
+	return err.Error()
 }
 
 // handleSandbox builds, refreshes or drops the session's sandbox, here on
@@ -194,7 +253,7 @@ func repoSessionsDetail(repo string, sessions []staging.RepoSession) string {
 	for index, session := range sessions {
 		parts[index] = session.Session + " (" + staging.AgentNames(session.Editing) + ")"
 	}
-	return " · also editing " + staging.RepoName(repo) + ": " + strings.Join(parts, "; ")
+	return extmsg.WithAlsoEditing("", staging.RepoName(repo), strings.Join(parts, "; "))
 }
 
 func editingText(agents []string) string {
@@ -202,15 +261,6 @@ func editingText(agents []string) string {
 		return ""
 	}
 	return " (still editing: " + staging.AgentNames(agents) + ")"
-}
-
-// readDetail says where a read's content came from, on its reply's first
-// line: "staged · edit session <id> · not written" or "disk".
-func readDetail(session string) string {
-	if session == "" {
-		return "disk"
-	}
-	return "staged · edit session " + session + " · not written"
 }
 
 // agentEditReplyText is what an agent hears after a staged edit.

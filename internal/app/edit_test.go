@@ -1,6 +1,10 @@
 package app
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/nickooan/ntee-editor/internal/store"
+)
 
 func TestEditorInsertAndNewline(t *testing.T) {
 	e := newEditor("hello")
@@ -203,5 +207,24 @@ func TestEditPasteMultiline(t *testing.T) {
 	}
 	if len(m.hlLines) != len(m.edit.lines) {
 		t.Fatalf("highlight rows %d != buffer lines %d", len(m.hlLines), len(m.edit.lines))
+	}
+}
+
+func TestContentJoinedSkipsTheHashUntilAsked(t *testing.T) {
+	e := newEditor("a\nb")
+	if e.contentJoined() != "a\nb" || e.contentHashOK {
+		t.Fatal("joining alone does not hash")
+	}
+	content, hash := e.contentHashed()
+	if content != "a\nb" || hash != store.ContentHash("a\nb") {
+		t.Fatalf("hashed = %q %q", content, hash)
+	}
+	e.lines[0] = "z"
+	e.rev++
+	if e.contentJoined() != "z\nb" || e.contentHashOK {
+		t.Fatal("a new rev re-joins and drops the old hash")
+	}
+	if _, hash := e.contentHashed(); hash != store.ContentHash("z\nb") {
+		t.Fatal("and hashes the new content when asked")
 	}
 }

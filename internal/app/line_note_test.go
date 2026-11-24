@@ -291,7 +291,11 @@ func TestLineNoteFromTheReceiverNeedsALine(t *testing.T) {
 		t.Fatalf("a note without a line is refused: %q", reply)
 	}
 	delivered := make(chan externalMessageMsg, 1)
-	receiver.SetSink(func(msg any) { delivered <- msg.(externalMessageMsg) })
+	receiver.SetSink(func(msg any) {
+		if queued, ok := msg.(externalMessageMsg); ok {
+			delivered <- queued
+		}
+	})
 	go receiver.Handle("open\nmain.go#L3\n---\n# Why\n\n  kept\n")
 	if msg := <-delivered; msg.record.LineNote != "# Why\n\n  kept" {
 		t.Fatalf("the record carries the note: %q", msg.record.LineNote)

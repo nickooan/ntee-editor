@@ -393,7 +393,11 @@ func TestReceiverKeepsReviewSessionsOutOfHistory(t *testing.T) {
 	history := store.NewMemoryExternalHistory()
 	receiver := NewExternalReceiver(root, settings, history)
 	delivered := make(chan externalMessageMsg, 1)
-	receiver.SetSink(func(msg any) { delivered <- msg.(externalMessageMsg) })
+	receiver.SetSink(func(msg any) {
+		if queued, ok := msg.(externalMessageMsg); ok {
+			delivered <- queued
+		}
+	})
 
 	replies := make(chan string, 1)
 	go func() { replies <- receiver.Handle("review --review-session=r\na.go\n---\nno line needed\n") }()

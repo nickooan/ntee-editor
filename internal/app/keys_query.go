@@ -14,8 +14,8 @@ import (
 
 // queryInputSuggestions completes the typed bar text: exact/prefix over the
 // visible tree, fuzzy over the full corpus. Memoized per message via
-// frameCache (like treeEntries) so the key handler and View share one filter
-// pass over the corpus.
+// frameCache (keyed like treeEntries) so the key handler and View share one
+// filter pass over the corpus.
 func (m Model) queryInputSuggestions(entries []filetree.FileTreeEntry) []filetree.InputSuggestion {
 	// The single choke point for the popup: while it is suppressed (mouse
 	// click or Esc) every consumer (render, navigation, Enter) sees "no suggestions",
@@ -24,7 +24,7 @@ func (m Model) queryInputSuggestions(entries []filetree.FileTreeEntry) []filetre
 		return nil
 	}
 	f := m.frames
-	if f != nil && f.sugOk && f.sugSeq == f.seq && f.sugKey == m.command {
+	if f != nil && f.sugOk && f.sugKey == m.command && f.sugTreeBuild == f.treeBuilds && f.sugCorpusAt.Equal(m.corpusBuiltAt) && f.sugCorpusSize == len(m.corpus) {
 		return f.suggestions
 	}
 	// Reads the cached corpus and its precomputed fuzzy data (populated by
@@ -32,7 +32,8 @@ func (m Model) queryInputSuggestions(entries []filetree.FileTreeEntry) []filetre
 	pathText, _ := splitLineAnchor(m.command)
 	suggestions := filetree.BuildInputSuggestions(entries, m.corpus, m.dirCorpus, m.queryPrepared, pathText, filetree.MaxInputSuggestions)
 	if f != nil {
-		f.sugOk, f.sugSeq, f.sugKey, f.suggestions = true, f.seq, m.command, suggestions
+		f.sugOk, f.sugKey, f.sugTreeBuild, f.suggestions = true, m.command, f.treeBuilds, suggestions
+		f.sugCorpusAt, f.sugCorpusSize = m.corpusBuiltAt, len(m.corpus)
 	}
 	return suggestions
 }
@@ -210,7 +211,7 @@ func parseInlineFs(trimmed string) (verb, rel string, ok bool) {
 		rel = base + "/" + arg
 	}
 	rel = path.Clean(rel)
-	if rel == "." || rel == ".." || strings.HasPrefix(rel, "../") || path.IsAbs(rel) {
+	if rel == "." || filetree.IsEscapingRel(rel) || path.IsAbs(rel) {
 		return "", "", false
 	}
 	return verb, rel, true
@@ -319,7 +320,7 @@ func (m Model) dropRemovedPath(rel string) Model {
 	if affected(m.openRel) {
 		m.openFile = nil
 		m.openRel = ""
-		m.fileLines, m.hlLines = nil, nil
+		m.fileLines, m.hlLines, m.hlRowsPending = nil, nil, false
 		m.edit = newEditor("")
 		m.mode = modeQuery
 	} else {

@@ -88,7 +88,8 @@ func (m Model) enterInspect() (tea.Model, tea.Cmd) {
 	m = m.refreshAgentEditsPending()
 	m, loadOpCommands := m.loadOpCommandsCmd()
 	m, loadHistory := m.loadExternalHistoryCmd()
-	return m, tea.Batch(m.fetchDBInfoCmd(), loadOpCommands, m.loadExternalSettingsCmd(), loadHistory, m.loadAgentEditsFinishedCmd())
+	m, loadFinished := m.loadAgentEditsFinishedCmd()
+	return m, tea.Batch(m.fetchDBInfoCmd(), loadOpCommands, m.loadExternalSettingsCmd(), loadHistory, loadFinished)
 }
 
 // handleInspectKey drives the inspection dashboard: Shift+↑/↓ move the left
@@ -162,14 +163,8 @@ func (m Model) handleInspectKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			break
 		}
 		m.inspectCursor = input.MoveCursor(m.inspectInput, m.inspectCursor, 1)
-	case "backspace":
-		m.inspectInput, m.inspectCursor, _ = input.RemoveBeforeCursor(m.inspectInput, m.inspectCursor)
-	case "space":
-		m.inspectInput, m.inspectCursor = input.InsertAtCursor(m.inspectInput, m.inspectCursor, " ")
 	default:
-		if t := keyText(msg); t != "" {
-			m.inspectInput, m.inspectCursor = input.InsertAtCursor(m.inspectInput, m.inspectCursor, t)
-		}
+		m.inspectInput, m.inspectCursor = editLineInput(m.inspectInput, m.inspectCursor, msg)
 	}
 	return m, nil
 }

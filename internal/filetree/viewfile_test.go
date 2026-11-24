@@ -83,7 +83,7 @@ func TestWriteViewFileJailAndAtomicity(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".ntee-save-") {
+		if strings.Contains(e.Name(), ".ntee-") {
 			t.Errorf("leftover temp file %q", e.Name())
 		}
 	}

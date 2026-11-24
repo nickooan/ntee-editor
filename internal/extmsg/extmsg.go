@@ -67,6 +67,20 @@ const (
 	SessionEdit               // --edit-session=: edits are staged, then applied or reviewed at end
 )
 
+// MsgFlag is the ntee --msg flag that sends the kind's requests — what a
+// reply tells an agent to run next.
+func (kind SessionKind) MsgFlag() string {
+	switch kind {
+	case SessionDiff:
+		return "--msg-diff-session"
+	case SessionReview:
+		return "--msg-review-session"
+	case SessionEdit:
+		return "--msg-edit-session"
+	}
+	return "--msg-session"
+}
+
 const (
 	SessionOption       = "--session="
 	DiffSessionOption   = "--diff-session="

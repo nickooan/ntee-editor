@@ -124,7 +124,7 @@ func TestGrepGuardWhileIndexing(t *testing.T) {
 	m := coldModel(t)
 	m.splash = false // user skipped the splash; index still building
 	m, _ = m.openGrep()
-	if m.grepOpen {
+	if m.grep.open {
 		t.Fatal("grep must not open over an empty cold corpus")
 	}
 	if m.errText == "" {

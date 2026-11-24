@@ -42,13 +42,15 @@ type editor struct {
 	selLineMode   bool
 	selLineAnchor int
 
-	// contentHashed's rev-keyed memo: burst boundaries need the joined buffer
-	// plus its hash (dedupe, snapshot write, LSP sync), and without this each
-	// call re-joins the whole file. Value fields — the cache travels with the
-	// Model copy that filled it.
+	// contentJoined's and contentHashed's rev-keyed memo: burst boundaries
+	// need the joined buffer plus its hash (dedupe, snapshot write, LSP
+	// sync), and without this each call re-joins the whole file. The hash is
+	// memoized apart, since a completion sync needs only the join. Value
+	// fields — the cache travels with the Model copy that filled it.
 	contentCacheRev int
 	contentCacheOK  bool
 	contentCache    string
+	contentHashOK   bool
 	contentHash     string
 }
 
@@ -61,15 +63,24 @@ func newEditor(content string) editor {
 
 func (e editor) content() string { return strings.Join(e.lines, "\n") }
 
-// contentHashed returns the buffer's content and its store.ContentHash,
-// joining and hashing at most once per rev (mutators bump rev).
-func (e *editor) contentHashed() (content, hash string) {
+// contentJoined returns the buffer's content, joining at most once per rev
+// (mutators bump rev).
+func (e *editor) contentJoined() string {
 	if !e.contentCacheOK || e.contentCacheRev != e.rev {
 		e.contentCache = strings.Join(e.lines, "\n")
-		e.contentHash = store.ContentHash(e.contentCache)
-		e.contentCacheRev, e.contentCacheOK = e.rev, true
+		e.contentCacheRev, e.contentCacheOK, e.contentHashOK = e.rev, true, false
 	}
-	return e.contentCache, e.contentHash
+	return e.contentCache
+}
+
+// contentHashed returns the buffer's content and its store.ContentHash,
+// joining and hashing at most once per rev.
+func (e *editor) contentHashed() (content, hash string) {
+	content = e.contentJoined()
+	if !e.contentHashOK {
+		e.contentHash, e.contentHashOK = store.ContentHash(content), true
+	}
+	return content, e.contentHash
 }
 
 func (e *editor) line() []rune { return []rune(e.lines[e.cy]) }

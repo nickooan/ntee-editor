@@ -206,23 +206,11 @@ func (tools *editTools) saw(path, version string) {
 	tools.versions[path] = version
 }
 
-var versionWord = regexp.MustCompile(`· version ([0-9a-f]{12})\b`)
-
-// versionIn is the file version a read's detail or an edit's reply names.
-func versionIn(line string) string {
-	if match := versionWord.FindStringSubmatch(line); match != nil {
-		return match[1]
-	}
-	return ""
-}
-
-var staleWord = regexp.MustCompile(` · stale: (.*?)(?: · also editing |$)`)
-
 // overReply reports whether a reply says the session takes no more edits:
 // the user is reviewing it, it finished, or an edit was refused for that.
 func overReply(line string) bool {
-	return strings.Contains(line, "the user is reviewing") || strings.HasPrefix(line, "ok finished") || strings.HasPrefix(line, "ended ") ||
-		strings.HasPrefix(line, "error edit session") && strings.Contains(line, " applied ") || strings.Contains(line, "start a new session")
+	return strings.Contains(line, extmsg.PhraseUserReviewing) || strings.HasPrefix(line, "ok finished") || strings.HasPrefix(line, "ended ") ||
+		strings.HasPrefix(line, "error edit session") && strings.Contains(line, " applied ") || strings.Contains(line, extmsg.PhraseStartNewSession)
 }
 
 func (tools *editTools) call(ctx context.Context, name string, raw json.RawMessage) toolResult {
@@ -315,7 +303,7 @@ func (tools *editTools) call(ctx context.Context, name string, raw json.RawMessa
 	if name == toolEnd || name == toolDiscard {
 		tools.sessionClosed(name, session)
 	}
-	if version := versionIn(line); version != "" && absolutePath != "" && (name == toolRead || name == toolReplace || name == toolWrite) {
+	if version := extmsg.VersionIn(line); version != "" && absolutePath != "" && (name == toolRead || name == toolReplace || name == toolWrite) {
 		tools.saw(absolutePath, version)
 	}
 	if name == toolWait && extmsg.IsChangesRequestedReply(line) {
@@ -324,7 +312,7 @@ func (tools *editTools) call(ctx context.Context, name string, raw json.RawMessa
 	}
 	if overReply(line) {
 		tools.sessionOver(session)
-		if (name == toolReplace || name == toolWrite) && arguments.Session == "" && strings.Contains(line, "start a new session") {
+		if (name == toolReplace || name == toolWrite) && arguments.Session == "" && strings.Contains(line, extmsg.PhraseStartNewSession) {
 			// The session this edit went to is the user's now: the edit
 			// opens a new one (which builds on it) instead.
 			return tools.call(ctx, name, raw)
@@ -337,9 +325,9 @@ func (tools *editTools) call(ctx context.Context, name string, raw json.RawMessa
 		return textResult(forTools(line), extmsg.IsErrorReply(line))
 	case hasBody:
 		return textResult(body+"\nedit session: "+session, false)
-	case name == toolWait && strings.HasPrefix(line, "ok waiting") && (strings.Contains(line, "is finalising") || strings.Contains(line, "back to editing")):
+	case name == toolWait && strings.HasPrefix(line, "ok waiting") && (strings.Contains(line, extmsg.PhraseFinalising) || strings.Contains(line, extmsg.PhraseBackToEditing)):
 		return textResult(forTools(line)+"\nedit session: "+session, false)
-	case name == toolWait && strings.HasPrefix(line, "ok waiting") && strings.Contains(line, "aside for later"):
+	case name == toolWait && strings.HasPrefix(line, "ok waiting") && strings.Contains(line, extmsg.PhraseSetAside):
 		return textResult("the user set edit session "+session+" aside for later — still staged, nothing written; carry on with other work, and call "+toolWait+" when you need their decision", false)
 	case name == toolWait && (strings.HasPrefix(line, "ok waiting") || strings.HasPrefix(line, "waiting")):
 		return textResult(stillWaitingText(session), false)
@@ -439,6 +427,7 @@ var cliSandboxHint = regexp.MustCompile(`run: ntee --msg --msg-edit-session \S+ 
 // hintsForTools rewrites the editor's ntee --msg hints into tool terms.
 var hintsForTools = strings.NewReplacer(
 	"ntee --msg show prints", toolRead+" shows",
+	"read it again (ntee --msg read)", "read it again ("+toolRead+")",
 	"its sandbox (sandbox)", "its sandbox ("+toolSandbox+")",
 	"report with check pass, fail or skip", "report with "+toolCheck+" (pass, fail or skip)",
 	"report with check,", "report with "+toolCheck+",",
@@ -456,18 +445,16 @@ func forTools(reply string) string {
 // are left.
 func readText(arguments toolArguments, session, detail, content string) string {
 	header := arguments.Path + " — on disk, no staged edits"
-	if from, staged := strings.CutPrefix(detail, "staged · edit session "); staged {
-		from, _, _ = strings.Cut(from, " ")
+	if from, staged := extmsg.StagedSessionIn(detail); staged {
 		header = arguments.Path + " — latest staged content from edit session " + from + ", NOT on disk yet (your edits build on it; to add them to that change set instead, pass session=" + from + ")"
 		if from == session {
 			header = arguments.Path + " — your edit session " + from + "'s staged copy, NOT on disk yet"
 		}
 	}
-	if match := staleWord.FindStringSubmatch(detail); match != nil {
-		header += "\n⚠ your copy can no longer be applied as it is: " + match[1] + " — read the file without your session (or after leaving it) to see the latest, and stage your change on that in a new session, or join the session below it"
+	if stale, found := extmsg.StaleIn(detail); found {
+		header += "\n⚠ your copy can no longer be applied as it is: " + stale + " — read the file without your session (or after leaving it) to see the latest, and stage your change on that in a new session, or join the session below it"
 	}
-	if _, others, found := strings.Cut(detail, " · also editing "); found {
-		repo, list, _ := strings.Cut(others, ": ")
+	if repo, list, found := extmsg.AlsoEditingIn(detail); found {
 		header += "\nopen edit sessions changing " + repo + ": " + list + " — if your change belongs with one of theirs, pass session=<its id> on your edits; else your own session builds on theirs"
 	}
 	if content == "" {

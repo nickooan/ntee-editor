@@ -27,6 +27,26 @@ func TestEditReplyPartsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestStagedReplySession(t *testing.T) {
+	for _, line := range []string{
+		ErrorReply("path outside the project: ../notes.md"),
+		OkReply("not staged"),
+		"ok " + stagedMarker,
+		"",
+	} {
+		t.Run("should name no session when the reply is "+line, func(t *testing.T) {
+			if session, staged := StagedReplySession(line); staged || session != "" {
+				t.Fatalf("got %q %v", session, staged)
+			}
+		})
+	}
+	t.Run("should name the session when the reply is a staged reply", func(t *testing.T) {
+		if session, staged := StagedReplySession(StagedReply("A")); !staged || session != "A" {
+			t.Fatalf("got %q %v", session, staged)
+		}
+	})
+}
+
 func TestTheEditorAnswersAnEndBeforeItsSenderGivesUp(t *testing.T) {
 	if EditorEndWait >= EditEndTimeout {
 		t.Fatalf("the editor holds an end %v, the sender waits %v: the sender would time out first", EditorEndWait, EditEndTimeout)

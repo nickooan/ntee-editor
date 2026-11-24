@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/nickooan/ntee-editor/internal/extmsg"
@@ -97,6 +98,42 @@ func TestHookAsksTheRunningEditorAndAllowsWithoutOne(t *testing.T) {
 	}
 	if request := <-requests; request != "staged\n"+filepath.Join(project, "main.go")+"\n" {
 		t.Fatalf("the hook asks staged: %q", request)
+	}
+}
+
+func TestHookWithAnEditorThatHasNotStagedThePath(t *testing.T) {
+	home, err := os.MkdirTemp("/tmp", "nteehook")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(home) })
+	t.Setenv("HOME", home)
+	project := t.TempDir()
+	socketPath, err := store.ExternalSocketPath(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(socketPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var reply atomic.Value
+	server, err := extmsg.Listen(socketPath, func(string) string { return reply.Load().(string) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+
+	for _, testCase := range []struct{ name, reply string }{
+		{"should allow the tool when the editor refuses a path outside the project", extmsg.ErrorReply("path outside the project: ../notes.md")},
+		{"should allow the tool when the editor has no staged edits for the file", extmsg.OkReply("not staged")},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			reply.Store(testCase.reply)
+			var stdout bytes.Buffer
+			if code := runHook(project, bytes.NewReader(hookPayload("Read", filepath.Join(home, "notes.md"), "")), &stdout); code != 0 || stdout.Len() != 0 {
+				t.Fatalf("exit %d, %q", code, stdout.String())
+			}
+		})
 	}
 }
 

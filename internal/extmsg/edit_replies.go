@@ -84,7 +84,10 @@ func StagedReply(session string) string { return OkReply(stagedMarker + session)
 // staged", an error, or anything else.
 func StagedReplySession(line string) (string, bool) {
 	session, staged := strings.CutPrefix(line, "ok "+stagedMarker)
-	return session, staged && session != ""
+	if !staged || session == "" {
+		return "", false
+	}
+	return session, true
 }
 
 // WithStale adds why a session's own copy can no longer be applied.

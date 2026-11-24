@@ -6,6 +6,7 @@
 package store
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -13,8 +14,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
+	"sync"
 
 	nteedb "github.com/nickooan/ntee-db/nteedb-core"
 )
@@ -193,6 +196,14 @@ func scopedKey(projectKey, repoPrefix, scope string) string {
 // Store is the ntee-db-backed Backend.
 type Store struct {
 	db *nteedb.DB
+
+	// recents caches the opened-file records newest first, read from the db
+	// once: this process is the store's only writer, so TouchOpened and
+	// DeleteOpenedUnder keep it current and RecentFiles never re-decodes
+	// every record.
+	recentsMu     sync.Mutex
+	recentsLoaded bool
+	recents       []OpenedFile
 }
 
 // Dir returns the store directory for a project root.
@@ -261,35 +272,43 @@ func (s *Store) TouchOpened(f OpenedFile) error {
 	if err != nil {
 		return err
 	}
-	return s.db.Put(openedPrefix+f.Path, data)
+	if err := s.db.Put(openedPrefix+f.Path, data); err != nil {
+		return err
+	}
+	s.recentsMu.Lock()
+	if s.recentsLoaded {
+		s.recents = slices.DeleteFunc(s.recents, func(opened OpenedFile) bool { return opened.Path == f.Path })
+		at, _ := slices.BinarySearchFunc(s.recents, f, func(cached, target OpenedFile) int { return cmp.Compare(target.LastOpenedAt, cached.LastOpenedAt) })
+		s.recents = slices.Insert(s.recents, at, f)
+	}
+	s.recentsMu.Unlock()
+	return nil
 }
 
-// RecentFiles returns opened-file records, most recent first. It prefix-scans
-// rather than relying on secondary-index recency semantics: the record count is
-// bounded by the project's file count, and sorting in memory is unambiguous.
+// RecentFiles returns opened-file records, most recent first (limit 0 = all),
+// from the cache the first call fills.
 func (s *Store) RecentFiles(limit int) []OpenedFile {
-	keys, err := s.db.PrefixScan(openedPrefix)
-	if err != nil || len(keys) == 0 {
-		return nil
+	s.recentsMu.Lock()
+	defer s.recentsMu.Unlock()
+	if !s.recentsLoaded {
+		s.recents, s.recentsLoaded = s.loadRecentFiles(), true
 	}
-	values, found, err := s.db.GetMany(keys)
+	count := len(s.recents)
+	if limit > 0 {
+		count = min(count, limit)
+	}
+	return slices.Clone(s.recents[:count])
+}
+
+// loadRecentFiles prefix-scans the opened-file records rather than relying on
+// secondary-index recency semantics: the record count is bounded by the
+// project's file count, and sorting in memory is unambiguous.
+func (s *Store) loadRecentFiles() []OpenedFile {
+	out, err := decodePrefix[OpenedFile](s.db, openedPrefix)
 	if err != nil {
 		return nil
 	}
-	out := make([]OpenedFile, 0, len(keys))
-	for i := range keys {
-		if !found[i] {
-			continue
-		}
-		var f OpenedFile
-		if json.Unmarshal(values[i], &f) == nil {
-			out = append(out, f)
-		}
-	}
-	sort.Slice(out, func(a, b int) bool { return out[a].LastOpenedAt > out[b].LastOpenedAt })
-	if limit > 0 && len(out) > limit {
-		out = out[:limit]
-	}
+	sort.SliceStable(out, func(a, b int) bool { return out[a].LastOpenedAt > out[b].LastOpenedAt })
 	return out
 }
 
@@ -308,6 +327,11 @@ func (s *Store) DeleteOpenedUnder(rel string) error {
 			_ = s.db.Delete(k)
 		}
 	}
+	s.recentsMu.Lock()
+	s.recents = slices.DeleteFunc(s.recents, func(opened OpenedFile) bool {
+		return opened.Path == rel || strings.HasPrefix(opened.Path, rel+"/")
+	})
+	s.recentsMu.Unlock()
 	return nil
 }
 

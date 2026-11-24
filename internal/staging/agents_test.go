@@ -318,3 +318,45 @@ func mustSnapshot(t *testing.T, registry *Registry, session string) store.AgentE
 	}
 	return record
 }
+
+func TestNoEditLandsWhileASessionIsBeingApplied(t *testing.T) {
+	registry, _, _ := newTestRegistry(t)
+	_, err := registry.Write("S", "agent-a", "a.go", "a\n")
+	must(t, err)
+	if _, err := registry.BeginApply("S"); err == nil || !strings.Contains(err.Error(), "went back to editing") {
+		t.Fatalf("a session still being edited cannot be applied: %v", err)
+	}
+	_, _, err = registry.MarkAgentEnded("S", "agent-a")
+	must(t, err)
+	record, err := registry.BeginApply("S")
+	must(t, err)
+	if _, err := registry.BeginApply("S"); err == nil || !strings.Contains(err.Error(), "already being applied") {
+		t.Fatalf("one apply at a time: %v", err)
+	}
+	if _, err := registry.Write("S", "agent-a", "a.go", "fix\n"); err == nil || !strings.Contains(err.Error(), "is being applied") {
+		t.Fatalf("a fix edit on a finalising session waits out the apply: %v", err)
+	}
+	if content := stagedContent(t, registry, "S", "a.go"); content != "a\n" {
+		t.Fatalf("the record being written is unchanged: %q", content)
+	}
+	results := registry.ApplyFiles("S", record.Files, nil)
+	finished, err := registry.Finish("S", "", "", results, 10)
+	must(t, err)
+	if finished.Status != store.AgentEditApplied {
+		t.Fatalf("the applied record finishes: %+v", finished)
+	}
+}
+
+func TestEndApplyReopensASessionForEdits(t *testing.T) {
+	registry, _, _ := newTestRegistry(t)
+	_, err := registry.Write("S", "agent-a", "a.go", "a\n")
+	must(t, err)
+	_, _, err = registry.MarkAgentEnded("S", "agent-a")
+	must(t, err)
+	_, err = registry.BeginApply("S")
+	must(t, err)
+	registry.EndApply("S")
+	if _, err := registry.Write("S", "agent-a", "a.go", "fix\n"); err != nil {
+		t.Fatalf("once released, its agent may fix it again: %v", err)
+	}
+}

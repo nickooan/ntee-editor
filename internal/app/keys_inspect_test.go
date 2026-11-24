@@ -110,7 +110,7 @@ func TestInspectBlocksGlobalChords(t *testing.T) {
 		t.Fatal("Ctrl+P must not open the finder in inspection mode")
 	}
 	m = key(m, ctrlKey('g'))
-	if m.grepOpen {
+	if m.grep.open {
 		t.Fatal("Ctrl+G must not open grep in inspection mode")
 	}
 }
@@ -438,7 +438,7 @@ func TestInspectSyscolorPersistsAndApplies(t *testing.T) {
 		t.Fatal("main.go should have highlight rows")
 	}
 	before := hlColors(m.hlLines[0]) // "package main" keyword colors
-	m.grepHlRel, m.grepHl = "main.go", m.hlLines
+	m.grep.hlRel, m.grep.hl = "main.go", m.hlLines
 
 	m = key(m, ctrlKey('t'))
 	m = runes(m, "syscolor dracula")
@@ -453,7 +453,7 @@ func TestInspectSyscolorPersistsAndApplies(t *testing.T) {
 	if !strings.Contains(m.notice, "dracula") {
 		t.Fatalf("notice = %q", m.notice)
 	}
-	if m.grepHlRel != "" || m.grepHl != nil {
+	if m.grep.hlRel != "" || m.grep.hl != nil {
 		t.Fatal("grep preview highlight cache should be dropped")
 	}
 	if after := hlColors(m.hlLines[0]); after == before {

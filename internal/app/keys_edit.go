@@ -241,7 +241,7 @@ func (m Model) handleEditAction(action keymap.Action) (next tea.Model, cmd tea.C
 		return m.redo().sigUnpin(), nil, true
 	case keymap.Find:
 		m = m.flushBurst()
-		return m.enterSearch(modeEdit, m.edit.content()), nil, true
+		return m.enterSearch(modeEdit, m.edit.contentJoined()), nil, true
 	case keymap.JumpToReference:
 		next, cmd = m.jumpToReference()
 		return next, cmd, true
@@ -317,13 +317,14 @@ func (m Model) moveEditCursor(dx, dy int) Model {
 // saveEdit writes the buffer to disk, checkpoints a "save" snapshot, and syncs
 // the open-file record. Shared by Ctrl+S and :w.
 func (m Model) saveEdit() Model {
-	content := m.edit.content()
+	content := m.edit.contentJoined()
 	if err := filetree.WriteViewFile(m.root, m.openRel, content); err != nil {
 		m.errText = "save failed: " + err.Error()
 		return m
 	}
 	m.openFile.Content = content
 	m.edit.dirty = false
+	m.invalidateTreeEntries() // a first save creates the file
 	m = m.pushSnapshot("save")
 	_ = m.db.DeleteDraft(m.openRel) // saved — the stashed draft is obsolete
 	delete(m.draftSet, m.openRel)

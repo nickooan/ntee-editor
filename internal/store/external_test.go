@@ -250,3 +250,39 @@ func TestExternalPathsShareTheProjectHash(t *testing.T) {
 		t.Fatalf("store=%s external=%s socket=%s", storeDir, externalDir, socket)
 	}
 }
+
+// countingSettings counts the loads that reach the store behind the cache.
+type countingSettings struct {
+	*MemoryExternalSettings
+	loads int
+}
+
+func (c *countingSettings) LoadExternalSettings() (ExternalSettings, error) {
+	c.loads++
+	return c.MemoryExternalSettings.LoadExternalSettings()
+}
+
+func TestCachedExternalSettingsSkipsTheStoreForAWhile(t *testing.T) {
+	inner := &countingSettings{MemoryExternalSettings: NewMemoryExternalSettings(DefaultExternalSettings)}
+	cached := NewCachedExternalSettings(inner)
+	for range 5 {
+		if _, err := cached.LoadExternalSettings(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if inner.loads != 1 {
+		t.Fatalf("one load reaches the store: %d", inner.loads)
+	}
+	saved := DefaultExternalSettings
+	saved.Enabled = !saved.Enabled
+	if err := cached.SaveExternalSettings(saved); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := cached.LoadExternalSettings(); got.Enabled != saved.Enabled || inner.loads != 1 {
+		t.Fatalf("a save refreshes the cache: %+v (%d loads)", got, inner.loads)
+	}
+	cached.maxAge = 0
+	if _, err := cached.LoadExternalSettings(); err != nil || inner.loads != 2 {
+		t.Fatalf("an aged cache reads the store again (another window may have changed it): %d", inner.loads)
+	}
+}

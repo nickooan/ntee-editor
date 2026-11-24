@@ -136,3 +136,39 @@ func TestLinesLargeUnchanged(t *testing.T) {
 		t.Fatalf("changed ops = %d, want 2", changed)
 	}
 }
+
+// A rewrite past maxD edits still keeps the lines it did not touch: the
+// middle is split at lines unique to both sides instead of turning into a
+// whole-file delete and insert.
+func TestLinesBigRewriteKeepsItsUnchangedLines(t *testing.T) {
+	const n = 4 * maxD
+	a := make([]string, n)
+	b := make([]string, n)
+	for i := range a {
+		a[i] = fmt.Sprintf("line %d", i)
+		b[i] = a[i]
+		if i%2 == 1 {
+			b[i] = fmt.Sprintf("changed %d", i) // 2 edits each: D = 2n/2 = 4096 > maxD
+		}
+	}
+	ops := Lines(a, b)
+	checkScript(t, a, b, ops)
+	equal := 0
+	for _, op := range ops {
+		if op.Kind == Equal {
+			equal++
+		}
+	}
+	if equal != n/2 {
+		t.Fatalf("every untouched line stays equal: %d of %d", equal, n/2)
+	}
+}
+
+func TestLongestRisingInBPicksTheLongestOrderedRun(t *testing.T) {
+	pairs := []linePair{{0, 3}, {1, 0}, {2, 1}, {3, 5}, {4, 2}, {5, 6}}
+	got := longestRisingInB(pairs)
+	want := []linePair{{1, 0}, {2, 1}, {4, 2}, {5, 6}}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("longest run rising in b = %v, want %v", got, want)
+	}
+}

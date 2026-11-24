@@ -83,21 +83,12 @@ func (g *GlobalOpCommands) withDB(run func(db *nteedb.DB) error) error {
 func (g *GlobalOpCommands) LoadOpCommands() ([]OpCommand, error) {
 	var commands []OpCommand
 	err := g.withDB(func(db *nteedb.DB) error {
-		keys, err := db.PrefixScan(opCommandPrefix)
-		if err != nil || len(keys) == 0 {
-			return err
+		var err error
+		commands, err = decodePrefix[OpCommand](db, opCommandPrefix)
+		for index := range commands {
+			commands[index] = commands[index].withDefaults()
 		}
-		values, found, err := db.GetMany(keys)
-		if err != nil {
-			return err
-		}
-		for index := range keys {
-			var command OpCommand
-			if found[index] && json.Unmarshal(values[index], &command) == nil {
-				commands = append(commands, command.withDefaults())
-			}
-		}
-		return nil
+		return err
 	})
 	sortOpCommands(commands)
 	return commands, err

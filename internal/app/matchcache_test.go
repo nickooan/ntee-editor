@@ -4,6 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	tea "charm.land/bubbletea/v2"
 )
 
 func TestMatchCacheMemoizes(t *testing.T) {
@@ -40,7 +43,7 @@ func TestMatchCacheNilReceiverFallsBack(t *testing.T) {
 	}
 }
 
-func TestTreeEntriesMemoizedPerMessage(t *testing.T) {
+func TestTreeEntriesMemoizedUntilTheirInputsChange(t *testing.T) {
 	m, root := newTestModel(t, nil)
 	must(t, os.WriteFile(filepath.Join(root, "a.go"), []byte("x"), 0o644))
 
@@ -48,27 +51,25 @@ func TestTreeEntriesMemoizedPerMessage(t *testing.T) {
 	if len(first) == 0 {
 		t.Fatal("fixture tree should have entries")
 	}
-	second := m.treeEntries()
-	if &first[0] != &second[0] {
-		t.Fatal("same message: second call should return the memoized slice")
+	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	m = next.(Model)
+	m.selectedCommand = ""
+	m.command = ""
+	if second := m.treeEntries(); &first[0] != &second[0] {
+		t.Fatal("a message that changes no tree input must not rebuild the tree")
 	}
 
-	// A new message (seq bump, as Update does) recomputes.
-	m.frames.seq++
-	third := m.treeEntries()
-	if len(third) != len(first) {
-		t.Fatalf("recompute changed results: %d vs %d", len(third), len(first))
-	}
-	if &first[0] == &third[0] {
-		t.Fatal("new message: entries should be rebuilt")
-	}
-
-	// Explicit invalidation forces a rebuild within the same message.
-	before := m.treeEntries()
+	// Explicit invalidation (root, corpus, git, focus, :touch…) rebuilds.
 	m.invalidateTreeEntries()
-	after := m.treeEntries()
-	if &before[0] == &after[0] {
-		t.Fatal("invalidateTreeEntries should force a rebuild")
+	rebuilt := m.treeEntries()
+	if &first[0] == &rebuilt[0] || len(rebuilt) != len(first) {
+		t.Fatal("invalidateTreeEntries should force an identical rebuild")
+	}
+
+	// So does age: changes nothing reports still show up.
+	m.frames.treeBuiltAt = time.Now().Add(-treeEntriesMaxAge)
+	if aged := m.treeEntries(); &aged[0] == &rebuilt[0] {
+		t.Fatal("an old memo is rebuilt")
 	}
 
 	// A nil frames pointer (zero-value Model in tests) still works.

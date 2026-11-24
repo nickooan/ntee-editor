@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // Test geometry (newTestModel: width=100, height=30, main.go fixture opened):
@@ -659,5 +660,21 @@ func TestStatusRowCountMatchesRenderStatusLine(t *testing.T) {
 		alt := edit
 		alt.mode = md
 		check(name, alt)
+	}
+}
+
+func TestTheOverlayDrawnIsTheOneTheKeysReach(t *testing.T) {
+	m, _ := newTestModel(t, nil)
+	m, _ = m.openFuzzy()
+	m.messageOverlay = "main.bin looks like a binary file."
+	if m.topOverlay() != overlayMessage {
+		t.Fatalf("a message sits on top of the finder: %v", m.topOverlay())
+	}
+	if view := ansi.Strip(m.View().Content); !strings.Contains(view, "looks like a binary file") {
+		t.Fatalf("the message is what is drawn:\n%s", view)
+	}
+	m = key(m, keyPress(tea.KeyEnter))
+	if m.messageOverlay != "" || !m.fuzzyOpen {
+		t.Fatal("Enter closes the message it shows, and the finder is back")
 	}
 }

@@ -31,6 +31,7 @@ type agentEditReviewPreparedMsg struct {
 	gen    int
 	files  []reviewFile
 	newest string // the file edited last: the live view follows from it
+	err    error  // the trace's whole record could not be read
 }
 
 // agentEditReviewRefreshedMsg delivers the files of a live review again,
@@ -72,6 +73,17 @@ func (m Model) enterAgentEditReview(record store.AgentEditSession, trace bool) (
 	m.mode = modeReview
 	gen, registry := m.review.gen, m.agentEdits.registry
 	return m, func() tea.Msg {
+		if trace {
+			// The panel lists summaries: the trace needs the whole record.
+			whole, found, err := registry.Log().LoadFinishedAgentEdit(record.Session)
+			switch {
+			case err != nil:
+				return agentEditReviewPreparedMsg{gen: gen, err: err}
+			case !found:
+				return agentEditReviewPreparedMsg{gen: gen, err: fmt.Errorf("edit session %s is no longer in the log", record.Session)}
+			}
+			record = whole
+		}
 		files, newest := agentEditReviewFiles(registry, record, trace)
 		return agentEditReviewPreparedMsg{gen: gen, files: inTreeOrder(files), newest: newest}
 	}
@@ -113,6 +125,11 @@ func (m Model) handleAgentEditReviewPrepared(msg agentEditReviewPreparedMsg) (te
 	if msg.gen != m.review.gen || m.mode != modeReview {
 		return m, nil
 	}
+	if msg.err != nil {
+		m = m.exitReview()
+		m.errText = "agent edits: " + msg.err.Error()
+		return m, nil
+	}
 	files := make([]reviewFile, len(msg.files))
 	for index, file := range msg.files {
 		files[index] = m.addReviewNote(file, reviewRequest{workspaceRel: file.workspaceRel, note: file.staged.note})
@@ -128,10 +145,15 @@ func (m Model) refreshAgentEditReview(id string) (Model, tea.Cmd) {
 	if m.mode != modeReview || m.review.agentEdits != id || !m.review.agentEditsLive || m.review.preparing {
 		return m, nil
 	}
+	if m.review.agentEditsRefreshing {
+		m.review.agentEditsRefreshDue = true
+		return m, nil
+	}
 	record, ok := m.agentEdits.registry.Snapshot(id)
 	if !ok || len(record.Files) == 0 {
 		return m, nil
 	}
+	m.review.agentEditsRefreshing, m.review.agentEditsRefreshDue = true, false
 	m.review.agentEditsRefreshGen++
 	gen, refreshGen, registry := m.review.gen, m.review.agentEditsRefreshGen, m.agentEdits.registry
 	return m, func() tea.Msg {
@@ -147,6 +169,17 @@ func (m Model) handleAgentEditReviewRefreshed(msg agentEditReviewRefreshedMsg) (
 	if msg.gen != m.review.gen || msg.refreshGen != m.review.agentEditsRefreshGen || m.mode != modeReview || m.review.preparing {
 		return m, nil
 	}
+	m.review.agentEditsRefreshing = false
+	next, cmd := m.landAgentEditReviewRefresh(msg)
+	m = next.(Model)
+	if !m.review.agentEditsRefreshDue {
+		return m, cmd
+	}
+	m, again := m.refreshAgentEditReview(m.review.agentEdits)
+	return m, tea.Batch(cmd, again)
+}
+
+func (m Model) landAgentEditReviewRefresh(msg agentEditReviewRefreshedMsg) (tea.Model, tea.Cmd) {
 	selectedPath := ""
 	if file, ok := m.selectedReviewFile(); ok {
 		selectedPath = file.workspaceRel
@@ -155,14 +188,16 @@ func (m Model) handleAgentEditReviewRefreshed(msg agentEditReviewRefreshedMsg) (
 	var changed []string
 	added := false
 	for _, file := range msg.files {
-		file = m.addReviewNote(file, reviewRequest{workspaceRel: file.workspaceRel, note: file.staged.note})
 		index, listed := m.review.fileByPath[file.workspaceRel]
+		if listed {
+			if previous := files[index].staged; previous != nil && *previous == *file.staged {
+				continue // unchanged: no note to lay out again
+			}
+		}
+		file = m.addReviewNote(file, reviewRequest{workspaceRel: file.workspaceRel, note: file.staged.note})
 		if !listed {
 			files, added = append(files, file), true
 			changed = append(changed, file.workspaceRel)
-			continue
-		}
-		if previous := files[index].staged; previous != nil && *previous == *file.staged {
 			continue
 		}
 		file.loadGen = files[index].loadGen + 1

@@ -160,7 +160,7 @@ func runEditor(absRoot, startFile string, startLine int) int {
 		db = store.NewMemory()
 		warnings = append(warnings, "persistence disabled: "+firstLine(err.Error()))
 	} else {
-		db = s
+		db = store.NewAsyncWrites(s) // undo snapshots and the corpus are written off the UI goroutine
 	}
 	defer db.Close()
 	// Agent edit sessions belong to a folder window; single-file mode never
@@ -196,7 +196,7 @@ func runEditor(absRoot, startFile string, startLine int) int {
 	var settingsStore store.ExternalSettingsStore = store.NewMemoryExternalSettings(store.DefaultExternalSettings)
 	if globalDir, err := store.GlobalDir(); err == nil {
 		model = model.WithOpCommandStore(store.NewGlobalOpCommands(globalDir))
-		settingsStore = store.NewGlobalExternalSettings(globalDir)
+		settingsStore = store.NewCachedExternalSettings(store.NewGlobalExternalSettings(globalDir))
 	}
 
 	var historyStore store.ExternalHistoryStore = store.NewMemoryExternalHistory()

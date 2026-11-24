@@ -448,20 +448,7 @@ func sessionFromOptions(options msgOptions) (msgSession, error) {
 	return msgSession{}, errors.New("use one of --msg-session, --msg-diff-session, --msg-review-session or --msg-edit-session")
 }
 
-// sessionFlag is the CLI flag naming a session of kind.
-func sessionFlag(kind extmsg.SessionKind) string {
-	switch kind {
-	case extmsg.SessionDiff:
-		return "--msg-diff-session"
-	case extmsg.SessionReview:
-		return "--msg-review-session"
-	case extmsg.SessionEdit:
-		return "--msg-edit-session"
-	}
-	return "--msg-session"
-}
-
-func (session msgSession) flag() string { return sessionFlag(session.kind) }
+func (session msgSession) flag() string { return session.kind.MsgFlag() }
 
 // option is the session's first-line wire option, "" for none.
 func (session msgSession) option() string {

@@ -72,6 +72,16 @@ For `write` and `replace` (`carriesPayload`), the text after the first separator
 
 *Plus: `writeRequest` (write + half-close), `isLive` — the liveness probe, `trimReply`.*
 
+### edit_replies.go
+
+Edit session replies are written for people, but the MCP tools and the Claude Code hook act on a few of their parts. This file is the one home of those parts, so the editor writing a reply and a client reading it cannot drift apart.
+
+- The phrases a client branches on: `PhraseUserReviewing`, `PhraseStartNewSession` (the session takes no more edits; staging's `ErrClosedForEdits` carries it, pinned by a test in app), `PhraseFinalising`, `PhraseBackToEditing` and `PhraseSetAside` (what a `wait` answered "waiting" for).
+- Builders and their parsers: `WithVersion`/`VersionIn` (`· version <v>`), `ReadSourceDetail`/`StagedSessionIn` (where a read came from), `WithStale`/`StaleIn`, `WithAlsoEditing`/`AlsoEditingIn`, and `StagedReply`/`StagedReplySession` for the `staged` request.
+- The send timeouts shared by `ntee --msg` and the MCP tools: `EditRequestTimeout` (10 s), `EditEndTimeout` (45 s — the editor may apply the files first), `EditSandboxTimeout` (60 s), and `EditorEndWait` (40 s), how long the editor holds an end, kept under the sender's (a test pins it).
+
+`SessionKind.MsgFlag` (extmsg.go) is the `ntee --msg` flag of a session kind, which both the CLI and the editor's replies name.
+
 ### edit_client.go
 
 The sending side of edit sessions and reads, shared by `ntee --msg --msg-edit-session` / `ntee --msg read|staged` (cmd/ntee/msg_edit.go), the Claude Code hook (cmd/ntee/hook.go) and the MCP tools (`internal/mcpserver`), so both put the same bytes on the wire.

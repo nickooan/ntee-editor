@@ -32,18 +32,8 @@ func (m Model) handleSearchExecKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		// TrimLeft only: trailing spaces belong to the replacement text.
 		return m.runSearchExecCommand(strings.TrimLeft(m.searchExecInput, " "))
-	case "left":
-		m.searchExecCursor = input.MoveCursor(m.searchExecInput, m.searchExecCursor, -1)
-	case "right":
-		m.searchExecCursor = input.MoveCursor(m.searchExecInput, m.searchExecCursor, 1)
-	case "backspace":
-		m.searchExecInput, m.searchExecCursor, _ = input.RemoveBeforeCursor(m.searchExecInput, m.searchExecCursor)
-	case "space":
-		m.searchExecInput, m.searchExecCursor = input.InsertAtCursor(m.searchExecInput, m.searchExecCursor, " ")
 	default:
-		if t := keyText(msg); t != "" {
-			m.searchExecInput, m.searchExecCursor = input.InsertAtCursor(m.searchExecInput, m.searchExecCursor, t)
-		}
+		m.searchExecInput, m.searchExecCursor = editLineInput(m.searchExecInput, m.searchExecCursor, msg)
 	}
 	return m, nil
 }
@@ -161,7 +151,7 @@ func (m Model) searchReplace(all bool, repl string) Model {
 	m = m.pushSnapshot("edit")
 	m.mode = modeSearch // before refreshFileHighlights, which reads the mode
 	m = m.refreshFileHighlights()
-	m = m.freezeSearchSnapshot(m.edit.content())
+	m = m.freezeSearchSnapshot(m.edit.contentJoined())
 
 	if all {
 		m.searchFocused = 0

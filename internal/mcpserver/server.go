@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/nickooan/ntee-editor/internal/extmsg"
 )
 
 // Config is what the server needs from its host.
@@ -90,13 +92,13 @@ func Serve(ctx context.Context, input io.Reader, output io.Writer, config Config
 		config.Now = time.Now
 	}
 	if config.RequestTimeout == 0 {
-		config.RequestTimeout = 10 * time.Second
+		config.RequestTimeout = extmsg.EditRequestTimeout
 	}
 	if config.SandboxTimeout == 0 {
-		config.SandboxTimeout = 60 * time.Second
+		config.SandboxTimeout = extmsg.EditSandboxTimeout
 	}
 	if config.EndTimeout == 0 {
-		config.EndTimeout = 45 * time.Second
+		config.EndTimeout = extmsg.EditEndTimeout
 	}
 	if config.WorkingDir == "" {
 		workingDir, err := os.Getwd()

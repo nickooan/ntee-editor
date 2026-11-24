@@ -39,7 +39,42 @@ func (m Model) sidebarInnerHeight() int {
 // overlayOpen reports whether a whole-pane overlay owns the screen — overlays
 // run their own navigation, so mouse routing and the tab strip both yield.
 func (m Model) overlayOpen() bool {
-	return m.fuzzyOpen || m.messageOverlay != "" || m.defPickOpen || m.grepOpen || m.choice.open() || m.opMode.open
+	return m.topOverlay() != overlayNone
+}
+
+// overlayKind names the whole-pane overlays.
+type overlayKind int
+
+const (
+	overlayNone overlayKind = iota
+	overlayChoice
+	overlayMessage
+	overlayFuzzy
+	overlayDefinitionPicker
+	overlayGrep
+	overlayOpCommands
+)
+
+// topOverlay is the overlay that owns the screen when several are open, in
+// one order for keys, rendering, paste and the mouse — so the overlay drawn
+// is always the one the keys reach. A question or a message sits on top of
+// the finder that led to it.
+func (m Model) topOverlay() overlayKind {
+	switch {
+	case m.choice.open():
+		return overlayChoice
+	case m.messageOverlay != "":
+		return overlayMessage
+	case m.fuzzyOpen:
+		return overlayFuzzy
+	case m.defPickOpen:
+		return overlayDefinitionPicker
+	case m.grep.open:
+		return overlayGrep
+	case m.opMode.open:
+		return overlayOpCommands
+	}
+	return overlayNone
 }
 
 // tabStripVisible mirrors render()'s decision to draw the tab strip.

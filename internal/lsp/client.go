@@ -79,14 +79,15 @@ const (
 	opChange
 	opSave
 	opClose
+	opReply // a tsserver/response to the Vue server's bridge request
 	opFolder
 )
 
 // maxQueuedOps bounds the writer queue. With per-path didChange coalescing
 // the queue only grows past a handful of entries when the server has stopped
-// consuming stdin entirely; at the cap, change/save ops are dropped (with one
-// notice) while open/close/folder — protocol-state critical and bounded by
-// user actions — always append.
+// consuming stdin entirely; at the cap, change/save ops and bridge replies
+// are dropped (with one notice) while open/close/folder — protocol-state
+// critical and bounded by user actions — always append.
 const maxQueuedOps = 1024
 
 // maxInflightBridge bounds concurrent tsserver/request relay goroutines.
@@ -420,7 +421,7 @@ func (c *serverClient) enqueue(op queuedOp) {
 			}
 		}
 	}
-	if len(c.queue) >= maxQueuedOps && (op.kind == opChange || op.kind == opSave) {
+	if len(c.queue) >= maxQueuedOps && (op.kind == opChange || op.kind == opSave || op.kind == opReply) {
 		notify := !c.queueFull
 		c.queueFull = true
 		c.mu.Unlock()
@@ -738,15 +739,14 @@ func (c *serverClient) handleTsserverRequest(params json.RawMessage) {
 				// null now rather than pile up more 12s waits.
 			}
 		}
-		c.mu.Lock()
-		conn := c.conn
-		c.mu.Unlock()
-		if conn != nil {
+		// Through the writer queue like doc sync: a server that stopped
+		// reading parks the one writer, not a goroutine per reply.
+		c.enqueue(queuedOp{kind: opReply, do: func(conn *Conn) {
 			// vscode-jsonrpc spreads array params into the handler and Volar's
 			// handler is `([id,res]) => …` (one arg), so the payload must be
 			// wrapped: wire [[id, result]] → spread → handler([id, result]).
 			_ = conn.Notify("tsserver/response", []any{[]any{id, result}})
-		}
+		}})
 	}()
 }
 

@@ -62,9 +62,9 @@ func (m Model) requestCompletion() (tea.Model, tea.Cmd) {
 	}
 	// The server must see the just-typed prefix. Sync directly rather than
 	// flushBurst so completion doesn't snapshot (fragment) the undo history
-	// mid-word; the burst still flushes at its normal boundary. contentHashed
-	// shares the rev-keyed join with pushSnapshot instead of re-joining.
-	content, _ := m.edit.contentHashed()
+	// mid-word; the burst still flushes at its normal boundary. contentJoined
+	// shares the rev-keyed join with pushSnapshot, and does not hash.
+	content := m.edit.contentJoined()
 	client.DidChange(m.openFile.Path, content, m.edit.rev)
 	line := m.edit.cy
 	start := identStart(m.edit.line(), m.edit.cx)

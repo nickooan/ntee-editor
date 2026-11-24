@@ -1,10 +1,12 @@
 package app
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -484,5 +486,157 @@ func TestAgentEditTraceEscJustLeaves(t *testing.T) {
 	m = key(m, keyPress(tea.KeyEscape))
 	if m.mode == modeReview || m.choice.open() {
 		t.Fatal("Esc leaves a trace at once")
+	}
+}
+
+func TestAgentEditApplyKeepsADraftItCouldNotReplace(t *testing.T) {
+	m, root, receiver, _, _ := agentEditsModel(t, store.AgentEditPolicyReview)
+	receiver.Handle("write --edit-session=e1\ndrift.go\n---\npackage main // agent\n")
+	must(t, m.db.SaveDraft(store.Draft{Path: "drift.go", Content: "package main // my draft\n"}))
+	m.draftSet["drift.go"] = true
+	must(t, os.WriteFile(filepath.Join(root, "drift.go"), []byte("package main // someone else\n"), 0o644))
+	_, _, err := receiver.agentEdits.MarkAgentEnded("e1", "")
+	must(t, err)
+
+	m, cmd := m.startAgentEditApply("e1", store.AgentEditPolicyReview, true, store.GitFollowUpNone, 10, nil)
+	m = settleAgentEdits(m, cmd)
+	if _, ok := m.db.LoadDraft("drift.go"); !ok || !m.draftSet["drift.go"] {
+		t.Fatal("the apply was refused (drift on disk), so the draft it would have replaced stays")
+	}
+}
+
+func TestAgentEditApplyDropsADraftItReplaced(t *testing.T) {
+	m, _, receiver, _, _ := agentEditsModel(t, store.AgentEditPolicyReview)
+	receiver.Handle("write --edit-session=e1\nfresh.go\n---\npackage main // agent\n")
+	must(t, m.db.SaveDraft(store.Draft{Path: "fresh.go", Content: "package main // my draft\n"}))
+	m.draftSet["fresh.go"] = true
+	_, _, err := receiver.agentEdits.MarkAgentEnded("e1", "")
+	must(t, err)
+
+	m, cmd := m.startAgentEditApply("e1", store.AgentEditPolicyReview, true, store.GitFollowUpNone, 10, nil)
+	m = settleAgentEdits(m, cmd)
+	if _, ok := m.db.LoadDraft("fresh.go"); ok || m.draftSet["fresh.go"] {
+		t.Fatal("the written file replaced the draft")
+	}
+}
+
+func TestAgentEditNoticesReachTheUIInOrderAndCoalesced(t *testing.T) {
+	_, _, receiver, _, _ := agentEditsModel(t, store.AgentEditPolicyReview)
+	release := make(chan struct{})
+	delivered := make(chan any, 16)
+	receiver.SetSink(func(msg any) {
+		if _, isRequest := msg.(externalMessageMsg); isRequest {
+			return
+		}
+		<-release // a busy UI
+		delivered <- msg
+	})
+	receiver.notify(agentEditsChangedMsg{session: "a"})
+	time.Sleep(20 * time.Millisecond) // the dispatcher holds the first notice
+	receiver.notify(agentEditsChangedMsg{session: "b"})
+	receiver.notify(agentEditsChangedMsg{session: "b"})
+	receiver.notify(agentEditsReopenedMsg{session: "a", agent: "x"})
+	close(release)
+	var sessions []string
+	timeout := time.After(2 * time.Second)
+	for len(sessions) < 3 {
+		select {
+		case msg := <-delivered:
+			switch msg := msg.(type) {
+			case agentEditsChangedMsg:
+				sessions = append(sessions, "changed:"+msg.session)
+			case agentEditsReopenedMsg:
+				sessions = append(sessions, "reopened:"+msg.session)
+			}
+		case <-timeout:
+			t.Fatalf("notices delivered: %v", sessions)
+		}
+	}
+	if got := strings.Join(sessions, ","); got != "changed:a,changed:b,reopened:a" {
+		t.Fatalf("notices arrive in order, a repeated change once: %s", got)
+	}
+	select {
+	case extra := <-delivered:
+		t.Fatalf("no extra notice: %+v", extra)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestAnExpiredAgentEditWaitIsForgotten(t *testing.T) {
+	m, _, receiver, _, settings := agentEditsModel(t, store.AgentEditPolicyReview)
+	receiver.Handle("write --edit-session=e1\nmain.go\n---\nreplaced\n")
+	current, _ := settings.LoadExternalSettings()
+	m, _ = sendAgentEditControl(t, m, receiver, extmsg.CommandEnd, "e1", current)
+	m, first := sendAgentEditControl(t, m, receiver, extmsg.CommandWait, "e1", current)
+	m, second := sendAgentEditControl(t, m, receiver, extmsg.CommandWait, "e1", current)
+	if len(m.agentEdits.waiters["e1"]) != 2 {
+		t.Fatalf("two waits are held: %d", len(m.agentEdits.waiters["e1"]))
+	}
+	m, _ = deliver(m, sessionWaitExpiredMsg{reply: first})
+	if waiters := m.agentEdits.waiters["e1"]; len(waiters) != 1 || waiters[0] != (chan<- string)(second) {
+		t.Fatalf("the expired wait is dropped, the live one kept: %v", waiters)
+	}
+	m, _ = deliver(m, sessionWaitExpiredMsg{reply: second})
+	if _, held := m.agentEdits.waiters["e1"]; held {
+		t.Fatal("no wait left for the session")
+	}
+}
+
+func TestTheAgentEditLabelStopsAnimatingForAQuietSession(t *testing.T) {
+	m, _, receiver, _, _ := agentEditsModel(t, store.AgentEditPolicyReview)
+	receiver.Handle("write --edit-session=e1\nmain.go\n---\nreplaced\n")
+	m = m.refreshAgentEditsPending()
+	if !m.agentsAnimating() {
+		t.Fatal("an agent that just edited animates the label")
+	}
+	m.agentEdits.lastActivityAt = time.Now().Add(-agentEditsAnimationIdle)
+	if !m.agentsWorking() || m.agentsAnimating() {
+		t.Fatal("a quiet session still shows as editing, without the animation")
+	}
+	m.agentEdits.ticking = true
+	next, cmd := m.handleAgentEditsTick()
+	if cmd != nil || next.(Model).agentEdits.ticking {
+		t.Fatal("the tick chain stops")
+	}
+}
+
+func TestAStaleFinishedListLoadIsDropped(t *testing.T) {
+	m, _, _, _, _ := agentEditsModel(t, store.AgentEditPolicyReview)
+	m, _ = m.loadAgentEditsFinishedCmd()
+	older := m.agentEdits.finishedGen
+	m, _ = m.loadAgentEditsFinishedCmd()
+	next, _ := m.handleAgentEditsFinishedList(agentEditsFinishedListMsg{gen: older, sessions: []store.AgentEditSession{{Session: "stale"}}})
+	if m = next.(Model); len(m.agentEdits.finished) != 0 {
+		t.Fatal("an older load's answer does not overwrite the newer one")
+	}
+	next, _ = m.handleAgentEditsFinishedList(agentEditsFinishedListMsg{gen: m.agentEdits.finishedGen, sessions: []store.AgentEditSession{{Session: "fresh"}}})
+	if m = next.(Model); len(m.agentEdits.finished) != 1 || m.agentEdits.finished[0].Session != "fresh" {
+		t.Fatalf("the newest lands: %+v", m.agentEdits.finished)
+	}
+}
+
+func TestAClosedSessionsRefusalCarriesThePhraseTheToolsActOn(t *testing.T) {
+	if !strings.Contains(staging.ErrClosedForEdits.Error(), extmsg.PhraseStartNewSession) {
+		t.Fatalf("the MCP tools open a new session on %q; staging's refusal says %q", extmsg.PhraseStartNewSession, staging.ErrClosedForEdits)
+	}
+	_, _, receiver, registry, _ := agentEditsModel(t, store.AgentEditPolicyReview)
+	receiver.Handle("write --edit-session=e1\nmain.go\n---\nx\n")
+	_, _, err := registry.MarkAgentEnded("e1", "")
+	must(t, err)
+	_, err = registry.BeginApply("e1")
+	must(t, err)
+	_, err = registry.Write("e1", "", "main.go", "y\n")
+	if !errors.Is(err, staging.ErrClosedForEdits) {
+		t.Fatalf("a refused edit wraps ErrClosedForEdits: %v", err)
+	}
+}
+
+func TestAStaleReadRefusalIsWordedForTheCommandLine(t *testing.T) {
+	text := agentEditErrorText(&staging.StaleReadError{Rel: "a.go", Change: "agent a's replace L1", Conflict: "a whole-file write would undo that"})
+	if text != "a.go changed since you read it: agent a's replace L1 — a whole-file write would undo that; read it again (ntee --msg read) and stage your change on the current content" {
+		t.Fatalf("stale: %q", text)
+	}
+	if text := agentEditErrorText(&staging.OldTextAmbiguousError{Rel: "a.go", Count: 2, Lines: "2, 4"}); !strings.Contains(text, "add #L<n> to the path") || !strings.Contains(text, "--msg-replace-all") {
+		t.Fatalf("ambiguous: %q", text)
 	}
 }

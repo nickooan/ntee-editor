@@ -112,6 +112,10 @@ type stagedSet struct {
 	saveMu sync.Mutex
 	mu     sync.Mutex
 	record store.AgentEditSession
+	// applying is set (under saveMu) from BeginApply until the session
+	// finishes: the files being written must be the record that finishes,
+	// so no edit or change request may land in between.
+	applying bool
 }
 
 func NewRegistry(workspaceRoot string, log store.AgentEditLogStore) *Registry {
@@ -225,6 +229,9 @@ func (r *Registry) edit(session, agent, rel, expect string, apply func(current s
 		return EditResult{}, err
 	}
 	defer set.saveMu.Unlock()
+	if set.applying {
+		return EditResult{}, fmt.Errorf("edit session %s is being applied — %w", session, ErrClosedForEdits)
+	}
 	record := set.snapshot()
 	agents := slices.Clone(record.Agents)
 	at := slices.IndexFunc(agents, func(participant store.AgentEditParticipant) bool { return participant.Agent == agent })
@@ -232,9 +239,9 @@ func (r *Registry) edit(session, agent, rel, expect string, apply func(current s
 	switch record.Phase() {
 	case store.PhaseReady:
 		if stoppedAgents(record) {
-			return EditResult{}, fmt.Errorf("the user stopped waiting for agents in edit session %s — start a new session for more edits", session)
+			return EditResult{}, fmt.Errorf("the user stopped waiting for agents in edit session %s — %w", session, ErrClosedForEdits)
 		}
-		return EditResult{}, fmt.Errorf("edit session %s is ready for the user's review — start a new session for more edits", session)
+		return EditResult{}, fmt.Errorf("edit session %s is ready for the user's review — %w", session, ErrClosedForEdits)
 	case store.PhaseFinalising:
 		if at < 0 {
 			return EditResult{}, fmt.Errorf("edit session %s is finalising (its agents are checking it) — it is no longer open to join; edit in your own session, which builds on its staged edits", session)
@@ -289,7 +296,7 @@ func (r *Registry) edit(session, agent, rel, expect string, apply func(current s
 			if edit.Op == OpWrite {
 				what = "a whole-file write would undo that"
 			}
-			return EditResult{}, fmt.Errorf("%s changed since you read it: %s%s — %s; read it again (read_file) and stage your change on the current content", rel, stale.by, stale.where(), what)
+			return EditResult{}, &StaleReadError{Rel: rel, Change: stale.by + stale.where(), Conflict: what}
 		}
 		result.Notes = append(result.Notes, rel+" changed since you read it ("+stale.by+stale.where()+") — your edit does not touch those lines; check it still fits")
 	}
@@ -305,7 +312,7 @@ func (r *Registry) edit(session, agent, rel, expect string, apply func(current s
 	record.Files = files
 	record.Agents = agents
 	record.ChangeRequests = answerChangeRequest(record.ChangeRequests, agent, edit.At)
-	if err := r.log.SavePendingAgentEdit(record); err != nil {
+	if err := r.log.SavePendingAgentEditFiles(record, []string{rel}); err != nil {
 		r.dropIfEmpty(session, set)
 		return EditResult{}, fmt.Errorf("cannot save the staged edit: %w", err)
 	}
@@ -342,7 +349,7 @@ func (r *Registry) setFor(session string) (*stagedSet, bool, error) {
 		return set, false, nil
 	}
 	if finished, ok := r.finished[session]; ok {
-		return nil, false, fmt.Errorf("edit session %s already finished (%s) — start a new session id", session, finished.Status)
+		return nil, false, fmt.Errorf("edit session %s already finished (%s) — %w", session, finished.Status, ErrClosedForEdits)
 	}
 	set := &stagedSet{record: store.AgentEditSession{Session: session, Status: store.AgentEditPending, StartedAt: r.now(), Files: []store.AgentEditFile{}, Checks: true, ChangeRequests: []store.AgentEditChangeRequest{}, GitFollowUp: store.GitFollowUpNone}}
 	r.pending[session] = set
@@ -489,7 +496,7 @@ func (r *Registry) MarkAgentEnded(session, agent string) (record store.AgentEdit
 	if allEnded {
 		record.AgentEndedAt = now
 	}
-	if err := r.log.SavePendingAgentEdit(record); err != nil {
+	if err := r.log.SavePendingAgentEditFiles(record, nil); err != nil {
 		return store.AgentEditSession{}, false, fmt.Errorf("cannot save the session: %w", err)
 	}
 	set.publish(record)
@@ -528,7 +535,7 @@ func (r *Registry) ForceEnd(session string) (record store.AgentEditSession, wait
 	if record.AgentEndedAt.IsZero() {
 		record.AgentEndedAt = now
 	}
-	if err := r.log.SavePendingAgentEdit(record); err != nil {
+	if err := r.log.SavePendingAgentEditFiles(record, nil); err != nil {
 		return store.AgentEditSession{}, nil, fmt.Errorf("cannot save the session: %w", err)
 	}
 	set.publish(record)
@@ -547,6 +554,9 @@ func (r *Registry) RequestChanges(session string) (record store.AgentEditSession
 	}
 	set.saveMu.Lock()
 	defer set.saveMu.Unlock()
+	if set.applying {
+		return store.AgentEditSession{}, nil, fmt.Errorf("edit session %s is being applied", session)
+	}
 	record = set.snapshot().WithAgents()
 	if phase := record.Phase(); phase != store.PhaseReady {
 		return record, nil, fmt.Errorf("edit session %s is still %s — ask for changes once its agents finish", session, phase)
@@ -566,7 +576,7 @@ func (r *Registry) RequestChanges(session string) (record store.AgentEditSession
 	record.Agents = agents
 	record.AgentEndedAt, record.ReadyAt = time.Time{}, time.Time{}
 	record.ChangeRequests = append(slices.Clip(record.WithStoredDefaults().ChangeRequests), store.AgentEditChangeRequest{At: r.now()})
-	if err := r.log.SavePendingAgentEdit(record); err != nil {
+	if err := r.log.SavePendingAgentEditFiles(record, nil); err != nil {
 		return store.AgentEditSession{}, nil, fmt.Errorf("cannot save the session: %w", err)
 	}
 	set.publish(record)
@@ -614,7 +624,7 @@ func (r *Registry) RecordCheck(session, agent string, result store.AgentEditChec
 	if allChecked {
 		record.ReadyAt = now
 	}
-	if err := r.log.SavePendingAgentEdit(record); err != nil {
+	if err := r.log.SavePendingAgentEditFiles(record, nil); err != nil {
 		return store.AgentEditSession{}, false, fmt.Errorf("cannot save the session: %w", err)
 	}
 	set.publish(record)
@@ -655,6 +665,36 @@ func (r *Registry) noSession(session string) error {
 		return fmt.Errorf("edit session %s already finished (%s)", session, finished.Status)
 	}
 	return fmt.Errorf("no edit session %s — nothing was staged", session)
+}
+
+// BeginApply marks a session whose agents all ended as being applied and
+// returns the record to write: from here until Finish (or EndApply) no edit
+// or change request lands on it, so what is written is what finishes.
+func (r *Registry) BeginApply(session string) (store.AgentEditSession, error) {
+	set, ok := r.pendingSet(session)
+	if !ok {
+		return store.AgentEditSession{}, r.noSession(session)
+	}
+	set.saveMu.Lock()
+	defer set.saveMu.Unlock()
+	record := set.snapshot()
+	switch {
+	case set.applying:
+		return record, fmt.Errorf("edit session %s is already being applied", session)
+	case record.AgentEndedAt.IsZero():
+		return record, fmt.Errorf("edit session %s went back to editing — apply it once its agents end", session)
+	}
+	set.applying = true
+	return record, nil
+}
+
+// EndApply releases a BeginApply that will not reach Finish.
+func (r *Registry) EndApply(session string) {
+	if set, ok := r.pendingSet(session); ok {
+		set.saveMu.Lock()
+		set.applying = false
+		set.saveMu.Unlock()
+	}
 }
 
 // Finish records how applying went — each file's result, the session's
@@ -721,6 +761,7 @@ func (r *Registry) finish(session string, keep int, update func(store.AgentEditS
 	record := update(set.snapshot())
 	record.EndedAt = r.now()
 	if err := r.log.FinishAgentEdit(record, keep); err != nil {
+		set.applying = false
 		return store.AgentEditSession{}, fmt.Errorf("cannot save the finished session: %w", err)
 	}
 	summary := record
@@ -760,10 +801,9 @@ func replaceText(content, rel string, replacement Replacement) (string, store.Ag
 	offsets := matchOffsets(content, replacement.Old)
 	switch {
 	case len(offsets) == 0:
-		return "", edit, 0, fmt.Errorf("the old text is not in %s — copy it exactly, whitespace included (ntee --msg show prints the staged content)", rel)
+		return "", edit, 0, &OldTextMissingError{Rel: rel}
 	case len(offsets) > 1 && !replacement.All && replacement.HintLine == 0:
-		return "", edit, 0, fmt.Errorf("the old text matches %d times in %s (lines %s) — add surrounding lines to make it unique, add #L<n> to the path, or replace them all with --msg-replace-all",
-			len(offsets), rel, matchLinesText(content, offsets))
+		return "", edit, 0, &OldTextAmbiguousError{Rel: rel, Count: len(offsets), Lines: matchLinesText(content, offsets)}
 	}
 	if !replacement.All {
 		offsets = []int{offsets[pickMatch(content, offsets, replacement.Old, replacement.HintLine)]}

@@ -8,22 +8,16 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/nickooan/ntee-editor/internal/extmsg"
 )
 
-// editEndTimeout is how long an edit session's end waits: when the editor
-// applies the staged files at once, the reply comes after they are written.
-const editEndTimeout = 45 * time.Second
-
-// editSandboxTimeout is how long a sandbox request waits: the editor may be
-// copying whole repos.
-const editSandboxTimeout = 60 * time.Second
-
-// editRequestTimeout is how long a staging request (write, replace, show,
-// status, discard) waits for its reply.
-const editRequestTimeout = 10 * time.Second
+// The waits come from extmsg, shared with the MCP tools.
+const (
+	editEndTimeout     = extmsg.EditEndTimeout
+	editSandboxTimeout = extmsg.EditSandboxTimeout
+	editRequestTimeout = extmsg.EditRequestTimeout
+)
 
 // checkEditCommand checks an edit session's command and paths: write,
 // replace and show name one file, the rest none; no base revision.

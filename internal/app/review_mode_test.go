@@ -205,16 +205,16 @@ func TestReviewScopedFinderAndGrep(t *testing.T) {
 	// Ctrl+G searches the reviewed rows — removed lines included — and lands
 	// on the row.
 	m = key(m, ctrlKey('g'))
-	if !m.grepOpen || m.grepTarget != grepTargetReview || m.grepLoading {
-		t.Fatalf("grep open=%v target=%v loading=%v", m.grepOpen, m.grepTarget, m.grepLoading)
+	if !m.grep.open || m.grep.target != grepTargetReview || m.grep.loading {
+		t.Fatalf("grep open=%v target=%v loading=%v", m.grep.open, m.grep.target, m.grep.loading)
 	}
 	m = runes(m, "var X")
-	m, cmd := deliver(m, grepTickMsg{gen: m.grepSearchGen})
+	m, cmd := deliver(m, grepTickMsg{gen: m.grep.searchGen})
 	for _, msg := range execCmds(cmd) {
 		m, _ = deliver(m, msg)
 	}
-	if len(m.grepResults) != 1 || m.grepResults[0].rel != "libs/core/lib.go" {
-		t.Fatalf("grep results = %+v", m.grepResults)
+	if len(m.grep.results) != 1 || m.grep.results[0].rel != "libs/core/lib.go" {
+		t.Fatalf("grep results = %+v", m.grep.results)
 	}
 	m = key(m, keyPress(tea.KeyEnter))
 	if m.mode != modeReview || m.review.selection.index != 2 || m.review.position.row != 2 {

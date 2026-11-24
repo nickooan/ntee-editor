@@ -55,8 +55,8 @@ func (m Model) clearDiffState() Model {
 	m.diffPosition = rowCursor{}
 	m.diffBase = ""
 	m.diffLoading = false
-	m.diffHasPending = false
-	m.diffPendingCursor, m.diffPendingScroll = 0, 0
+	m.diffPending.set = false
+	m.diffPending.cursor, m.diffPending.scroll = 0, 0
 	return m
 }
 
@@ -116,12 +116,12 @@ func (m Model) handleDiffReady(msg diffReadyMsg) (tea.Model, tea.Cmd) {
 	m.diffDocument = msg.document
 	rows := m.diffDocument.rows
 	h := m.contentHeight() + 1 // rendered rows: single-line status, like edit mode
-	if m.diffHasPending {
+	if m.diffPending.set {
 		// Ctrl+O return: restore the remembered review position, clamped —
 		// the re-derived diff may have fewer rows than when we left.
-		m.diffHasPending = false
-		m.diffPosition.row = input.Clamp(m.diffPendingCursor, 0, len(rows)-1)
-		m.diffPosition.scrollY = input.Clamp(m.diffPendingScroll, 0, max(0, len(rows)-h))
+		m.diffPending.set = false
+		m.diffPosition.row = input.Clamp(m.diffPending.cursor, 0, len(rows)-1)
+		m.diffPosition.scrollY = input.Clamp(m.diffPending.scroll, 0, max(0, len(rows)-h))
 	} else {
 		// Fresh entry: stay at the current place — same buffer line, same
 		// on-screen row. The exact inverse of the Esc mapping in exitDiff.

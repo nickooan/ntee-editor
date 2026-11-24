@@ -282,7 +282,7 @@ func (session externalSession) requestsName() string {
 }
 
 // flag is the --msg flag that sends the session's requests.
-func (session externalSession) flag() string { return sessionFlag(session.kind) }
+func (session externalSession) flag() string { return session.kind.MsgFlag() }
 
 // handleSessionStepKey walks a visible step: Enter next, Backspace back,
 // Esc ends the session. Moving and scrolling pass through (handled=false);

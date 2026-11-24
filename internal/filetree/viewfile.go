@@ -99,11 +99,19 @@ func WriteViewFile(root, rel, content string) error {
 	if absRoot, err := filepath.Abs(root); err != nil || lexical == absRoot {
 		return os.ErrInvalid
 	}
-	mode := fs.FileMode(0o644)
+	return WriteFileAtomic(target, content, 0o644)
+}
+
+// WriteFileAtomic replaces target's content in one step: written beside it,
+// then renamed over it, so a reader never sees half a file. An existing
+// file keeps its permissions (an executable stays one); a new one gets
+// newMode. It does no jailing — callers resolve target first.
+func WriteFileAtomic(target, content string, newMode fs.FileMode) error {
+	mode := newMode
 	if info, err := os.Stat(target); err == nil {
 		mode = info.Mode().Perm()
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(target), ".ntee-save-*")
+	tmp, err := os.CreateTemp(filepath.Dir(target), "."+filepath.Base(target)+".ntee-*")
 	if err != nil {
 		return err
 	}

@@ -7,7 +7,7 @@
 Three design constraints shape the package:
 
 - **Everything is jailed to the root.** Every file operation resolves through `containedPath`, which checks containment both lexically and after symlink resolution. A symlink inside the root that points outside it is refused — read, write, and delete alike.
-- **The tree rebuilds constantly, so walking must be cheap.** The sidebar is rebuilt on every keystroke/frame. Directory listings (`dirCache`) and compiled `.gitignore` matchers (`gitignoreCache`) are cached keyed by mtime, so a steady-state walk does almost no disk I/O.
+- **The tree rebuilds constantly, so walking must be cheap.** The sidebar is rebuilt on every keystroke/frame. Directory listings (`dirCache`) and compiled `.gitignore` matchers (`gitignoreCache`) are cached keyed by mtime, so a steady-state walk does almost no disk I/O. Both are keyed by absolute path and bounded (`maxCachedDirs`, 50 000): past it one is dropped whole and refills by mtime, so visiting many roots cannot grow them forever. (The app memoizes the built tree too, so it rebuilds only when an input changes.)
 - **Saves are atomic.** `WriteViewFile` writes to a temp file in the target's directory and renames it over the target, so a crash mid-save can never leave a truncated file.
 
 Beyond the tree itself, the package handles gitignore matching (including nested, per-directory `.gitignore` files), a git-status "dirty set" that turns changed paths yellow in the sidebar, and the query-bar suggestion popup.
@@ -16,7 +16,7 @@ Beyond the tree itself, the package handles gitignore matching (including nested
 
 The central type is `FileTreeEntry` — one visible row of the sidebar, carrying its depth, type, and two render flags: `Dimmed` (gitignored or soft-ignored, shown gray and excluded from search) and `Uncommitted` (in the git dirty set, shown yellow). Its `CommandValue` is the path as typed in the query bar: `rel+"/"` for directories, `rel` for files.
 
-Two walks share the same machinery but serve different needs. `BuildFileTreeEntries` walks only *expanded* directories and produces the visible tree. `BuildAllEntries` walks *everything* (depth-capped at 16 as a symlink-loop guard) and produces the search corpus — matching must find files inside collapsed directories, so a full walk is unavoidable. Both walks read directories through `readDirectorySorted`, which serves from `dirCache` when the directory's mtime hasn't changed, and both thread a chain of directory-scoped gitignore matchers (`scopedGitignore`) down the recursion so nested `.gitignore` files apply with git's last-match-wins semantics. Compiled matchers live in `gitignoreCache`, keyed by the `.gitignore` file's own mtime — content edits don't bump the parent directory's mtime, so the file gets its own key.
+Two walks share the same machinery but serve different needs. `BuildFileTreeEntries` walks only *expanded* directories and produces the visible tree. `BuildAllEntries` walks *everything* (depth-capped at `maxScanDepth`, 48 — the walks never follow a symlinked directory, so the cap only stops a pathological tree) and produces the search corpus — matching must find files inside collapsed directories, so a full walk is unavoidable. Both walks read directories through `readDirectorySorted`, which serves from `dirCache` when the directory's mtime hasn't changed, and both thread a chain of directory-scoped gitignore matchers (`scopedGitignore`) down the recursion so nested `.gitignore` files apply with git's last-match-wins semantics. Compiled matchers live in `gitignoreCache`, keyed by the `.gitignore` file's own mtime — content edits don't bump the parent directory's mtime, so the file gets its own key.
 
 Ignoring comes in two strengths. Hard-ignored names (`.git`, plus config `tree.ignore`) never appear anywhere. Soft-ignored names (`node_modules`) show up dimmed in the tree but stay out of the corpus — one workspace had 1200+ `node_modules` directories, so this is load-bearing.
 
@@ -51,6 +51,8 @@ The files divide the work cleanly:
 
 `BuildFileTreeViewport` windows the entry list to the visible height, centering the highlighted row.
 
+- `IsEscapingRel` — whether a `filepath.Rel` result climbs out of its base (`..` or a `../` prefix), not a name that merely starts with `..`; `isInsideRoot` uses it.
+
 *Plus small helpers: `isInsideRoot`, `hardIgnored`, `softIgnored`, `IsGitRepo`, `DirsFromMtimes`, `ResolveNextFileTreeSelectionIndex`, `ResolveSidebarCommand`, `ResolveParentDirectoryCommand`, `FormatFileTreeEntryLabel`, `splitNonEmpty`, `padRight` — containment/ignore predicates, walk-signature formatting, selection movement, and label rendering.*
 
 ### create.go
@@ -65,7 +67,7 @@ The files divide the work cleanly:
 
 `ReadViewFile` loads a file for viewing/editing through the jail. Read errors surface *as the file content* (the caller just displays them), and `looksBinary` — the classic NUL-byte-in-the-first-8KB heuristic — flags native files so the editor doesn't render garbage. `ReadContainedFile` is the same jailed read for callers that must tell outcomes apart — review mode treats a missing file as a deletion — so it returns the error instead (`fs.ErrNotExist` for a missing file, `fs.ErrInvalid` for a jail escape). `IsContained` is the jail check alone, for paths named by outside callers (external messages) whether or not they exist yet.
 
-`WriteViewFile` is the atomic save: temp file in the target's directory, content written, permissions copied from the existing file (0644 for new ones), then a rename over the target. Saving through an in-root symlink replaces the resolved file and leaves the link intact.
+`WriteViewFile` is the jailed atomic save; the write itself is `WriteFileAtomic` (shared with the staging sandbox): temp file in the target's directory, content written, permissions copied from the existing file (the given mode for new ones), then a rename over the target. Saving through an in-root symlink replaces the resolved file and leaves the link intact.
 
 `ListDirFiles` lists the non-directory names in one jailed directory, in `os.ReadDir`'s sorted order.
 
@@ -73,7 +75,7 @@ The files divide the work cleanly:
 
 `Gitignore` matches directory-relative slash paths against one `.gitignore` file — a pragmatic subset of the spec covering comments, negation (`!`), directory-only trailing `/`, anchoring, and `*`/`?`/`**` globs, with last-match-wins ordering. Note it drives a visual cue and a search filter, not a hard exclusion from the tree.
 
-`MatchState` is the chaining-friendly matcher: it distinguishes "no rule applied" from "matched, and here's the verdict," so a deeper `.gitignore`'s opinion only overrides when it actually has one. `Match` is the plain boolean wrapper.
+`MatchState` is the chaining-friendly matcher (it walks the rules last→first and stops at the first that matches, since the last match wins): it distinguishes "no rule applied" from "matched, and here's the verdict," so a deeper `.gitignore`'s opinion only overrides when it actually has one. `Match` is the plain boolean wrapper.
 
 `compileGitRule` parses one line into a regexp-backed rule, and `globToRegexp` does the glob translation — `**` spans segments (with the trailing-slash collapse for `**/`), `*` stays within one segment, `?` is a single non-slash rune.
 
@@ -83,7 +85,7 @@ The files divide the work cleanly:
 
 `GitDirtySet` shells out to `git status --porcelain -z --untracked-files=all` (via `gitcmd`, so it can't hang) and returns every dirty path *plus every ancestor directory* as a set — that pre-marking is what lets a collapsed directory render yellow with a plain O(1) lookup at walk time. `ok=false` means "not a repo or git failed"; callers treat it as feature-off. Run it off the UI goroutine.
 
-`parsePorcelain` extracts repo-relative paths from the NUL-separated porcelain records, handling the extra origin-path record that rename/copy entries carry (both sides count as changes). It's a pure function, unit-tested without git. `markDirty` inserts one path and all its ancestors into the set. `MergeRepoDirty` runs `GitDirtySet` in each nested repo of a workspace and prefixes the paths so they match the workspace-rooted tree; ancestors above each repo are marked too.
+`parsePorcelain` extracts repo-relative paths from the NUL-separated porcelain records, handling the extra origin-path record that rename/copy entries carry (both sides count as changes). It's a pure function, unit-tested without git. `markDirty` inserts one path and all its ancestors into the set. `MergeRepoDirty` runs `GitDirtySet` in each nested repo of a workspace and prefixes the paths so they match the workspace-rooted tree; ancestors above each repo are marked too. It runs each nested repo's `git status` in parallel (NumCPU at a time) and merges them in repo order.
 
 ### inputsuggest.go
 

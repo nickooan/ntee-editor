@@ -7,14 +7,12 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/nickooan/ntee-editor/internal/filetree"
 	"github.com/nickooan/ntee-editor/internal/input"
 	"github.com/nickooan/ntee-editor/internal/lsp"
-	"github.com/nickooan/ntee-editor/internal/store"
 	"github.com/nickooan/ntee-editor/internal/syntax"
 	"github.com/nickooan/ntee-editor/internal/view"
 )
@@ -113,7 +111,7 @@ func (m Model) resolveJumpPath(token string) (string, bool) {
 		filepath.Clean(filepath.Join(m.root, token)),
 	} {
 		rel, err := filepath.Rel(m.root, abs)
-		if err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
+		if err != nil || filetree.IsEscapingRel(rel) {
 			continue // outside the project root
 		}
 		if statRegular(abs) {
@@ -277,7 +275,7 @@ func (m Model) collectInRootCandidates(locs []lsp.Location) []defCandidate {
 			continue
 		}
 		rel, err := filepath.Rel(m.root, abs)
-		if err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
+		if err != nil || filetree.IsEscapingRel(rel) {
 			continue // outside the project
 		}
 		c := defCandidate{
@@ -604,11 +602,11 @@ func (m Model) jumpBack() (tea.Model, tea.Cmd) {
 	}
 	if frame.inDiff {
 		// The origin was a diff review: re-enter it. The diff is re-derived
-		// (the buffer may have changed at the jump target); diffPending*
+		// (the buffer may have changed at the jump target); diffPending
 		// restore the review position when the recomputed rows land.
 		next.diffBase = frame.diffBase
-		next.diffPendingCursor, next.diffPendingScroll = frame.diffPosition.row, frame.diffPosition.scrollY
-		next.diffHasPending = true
+		next.diffPending.cursor, next.diffPending.scroll = frame.diffPosition.row, frame.diffPosition.scrollY
+		next.diffPending.set = true
 		next.diffGen++
 		next.diffLoading = true
 		next.mode = modeDiff
@@ -616,8 +614,8 @@ func (m Model) jumpBack() (tea.Model, tea.Cmd) {
 	}
 	if frame.inBlame {
 		// The origin was a blame view: same re-entry story.
-		next.blamePendingCursor, next.blamePendingScroll = frame.blamePosition.row, frame.blamePosition.scrollY
-		next.blameHasPending = true
+		next.blamePending.cursor, next.blamePending.scroll = frame.blamePosition.row, frame.blamePosition.scrollY
+		next.blamePending.set = true
 		next.blameGen++
 		next.blameLoading = true
 		next.mode = modeBlame
@@ -640,24 +638,5 @@ func (m Model) openJumpFile(rel string, cy, cx, scrollY int) (Model, bool) {
 		m.errText = "cannot open " + rel
 		return m, false
 	}
-	m = m.recordCursor()
-	m = m.stashDraftIfDirty()
-	m = m.sigUnpin() // the pin belongs to the buffer being left
-	m.openFile = &f
-	m.openRel = rel
-	m.selectedCommand = rel
-	m = m.beginEditSession(f.Content) // does not touch the jump stack
-	if d, ok := m.db.LoadDraft(rel); ok {
-		m = m.restoreDraft(d)
-	}
-	m = m.addTab(rel)
-	m.mode = modeEdit
-	m.edit.cy, m.edit.cx = cy, cx
-	m.edit.clampCursor()
-	m.fileScrollY = scrollY
-	_ = m.db.TouchOpened(store.OpenedFile{Path: rel, LastOpenedAt: time.Now().UnixMilli()})
-	if client, ok := m.lsp.ClientFor(f.Path); ok {
-		client.DidOpen(f.Path, f.Content)
-	}
-	return m, true
+	return m.showFile(rel, f, &jumpLanding{cy: cy, cx: cx, scrollY: scrollY}), true
 }

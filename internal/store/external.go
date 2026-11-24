@@ -282,21 +282,12 @@ func (h *ExternalHistory) AppendExternal(record ExternalRecord, limit int) error
 func (h *ExternalHistory) LoadExternal() ([]ExternalRecord, error) {
 	var records []ExternalRecord
 	err := h.withDB(MaxExternalHistoryLimit, func(db *nteedb.DB) error {
-		keys, err := db.PrefixScan(externalRecordPrefix)
-		if err != nil || len(keys) == 0 {
-			return err
+		var err error
+		records, err = decodePrefix[ExternalRecord](db, externalRecordPrefix)
+		for index := range records {
+			records[index] = records[index].withDefaults()
 		}
-		values, found, err := db.GetMany(keys)
-		if err != nil {
-			return err
-		}
-		for index := range keys {
-			var record ExternalRecord
-			if found[index] && json.Unmarshal(values[index], &record) == nil {
-				records = append(records, record.withDefaults())
-			}
-		}
-		return nil
+		return err
 	})
 	sortExternalNewestFirst(records)
 	return records, err
@@ -399,4 +390,58 @@ func (m *MemoryExternalHistory) trimLocked(limit int) {
 
 func sortExternalNewestFirst(records []ExternalRecord) {
 	sort.Slice(records, func(a, b int) bool { return strings.Compare(records[a].Key, records[b].Key) > 0 })
+}
+
+// externalSettingsCacheAge is how long CachedExternalSettings answers from
+// memory. The settings are global, so another window's toggle shows here
+// within it.
+const externalSettingsCacheAge = 2 * time.Second
+
+// CachedExternalSettings answers loads from memory for a short while: every
+// socket request reads the settings, and the global db is opened (with its
+// lock retries) per call. Saves go straight through and refresh the cache.
+type CachedExternalSettings struct {
+	inner    ExternalSettingsStore
+	maxAge   time.Duration
+	mu       sync.Mutex
+	cached   ExternalSettings
+	loadedAt time.Time
+	valid    bool
+}
+
+func NewCachedExternalSettings(inner ExternalSettingsStore) *CachedExternalSettings {
+	return &CachedExternalSettings{inner: inner, maxAge: externalSettingsCacheAge}
+}
+
+func (c *CachedExternalSettings) LoadExternalSettings() (ExternalSettings, error) {
+	c.mu.Lock()
+	if c.valid && time.Since(c.loadedAt) < c.maxAge {
+		settings := c.cached
+		c.mu.Unlock()
+		return settings, nil
+	}
+	c.mu.Unlock()
+	settings, err := c.inner.LoadExternalSettings()
+	if err != nil {
+		return settings, err
+	}
+	c.remember(settings)
+	return settings, nil
+}
+
+func (c *CachedExternalSettings) SaveExternalSettings(settings ExternalSettings) error {
+	if err := c.inner.SaveExternalSettings(settings); err != nil {
+		c.mu.Lock()
+		c.valid = false
+		c.mu.Unlock()
+		return err
+	}
+	c.remember(settings.withDefaults()) // what a load of it would answer
+	return nil
+}
+
+func (c *CachedExternalSettings) remember(settings ExternalSettings) {
+	c.mu.Lock()
+	c.cached, c.loadedAt, c.valid = settings, time.Now(), true
+	c.mu.Unlock()
 }

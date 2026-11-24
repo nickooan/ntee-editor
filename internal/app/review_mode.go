@@ -112,6 +112,11 @@ type reviewState struct {
 	// (refreshAgentEditReview); refreshGen drops all but the newest refresh.
 	agentEditsLive       bool
 	agentEditsRefreshGen int
+	// agentEditsRefreshing: a live refresh is in flight; agentEditsRefreshDue
+	// asks for one more when it lands, so a burst of edits runs one reload
+	// (with its disk reads) at a time instead of one per edit.
+	agentEditsRefreshing bool
+	agentEditsRefreshDue bool
 }
 
 const (
@@ -153,7 +158,7 @@ func (m Model) leaveToEditOrQuery() Model {
 	if m.fuzzyOpen {
 		m = m.closeFuzzy()
 	}
-	if m.grepOpen {
+	if m.grep.open {
 		m = m.closeGrep()
 	}
 	if m.opMode.open {
@@ -500,7 +505,7 @@ func loadReviewFile(workspaceRoot string, revision diffRevision, file reviewFile
 	} else {
 		errText := revision.problem
 		if errText == "" {
-			document, errText = diffAgainstRevision(file.repoRoot, revision, file.repoRel, current, exists)
+			document, errText = diffAgainstRevision(file.repoRoot, revision, file.repoRel, current, exists, maxReviewFileBytes)
 		}
 		if errText != "" {
 			file.status, file.problem = reviewFailed, errText

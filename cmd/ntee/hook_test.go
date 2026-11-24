@@ -99,3 +99,17 @@ func TestHookAsksTheRunningEditorAndAllowsWithoutOne(t *testing.T) {
 		t.Fatalf("the hook asks staged: %q", request)
 	}
 }
+
+func TestHookDeniesAWriteLargerThanASocketMessage(t *testing.T) {
+	payload, _ := json.Marshal(map[string]any{
+		"hook_event_name": "PreToolUse", "tool_name": "Write", "cwd": "/work/p",
+		"tool_input": map[string]any{"file_path": "main.go", "content": strings.Repeat("x", 2*extmsg.MaxMessageBytes)},
+	})
+	read, err := readHookPayload(bytes.NewReader(payload))
+	if err != nil || len(read) != len(payload) {
+		t.Fatalf("the whole payload is read: %d of %d bytes, %v", len(read), len(payload), err)
+	}
+	if output := hookDecision(read, func(string) string { return "A" }); !strings.Contains(output, `"deny"`) {
+		t.Fatalf("a big Write to a staged file is still denied: %q", output)
+	}
+}

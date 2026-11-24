@@ -24,7 +24,7 @@ The agent's own Read, Edit and Write tools only see the disk. To keep Claude Cod
 }
 ```
 
-Before each matched call the hook asks the running editor whether the file has staged edits (`staged`). If it has, the call is denied with a reason pointing at `mcp__ntee__read_file` / `edit_replace` / `edit_write`; otherwise — and whenever there is no editor to ask — it is allowed silently. The user may also deny the built-in `Edit` and `Write` tools outright in the project's permissions. Both are the user's choice; ntee configures nothing.
+Before each matched call the hook asks the running editor whether the file has staged edits (`staged`). If it has, the call is denied with a reason pointing at `mcp__ntee__read_file` / `edit_replace` / `edit_write`; otherwise — and whenever there is no editor to ask — it is allowed silently. The hook reads a payload of up to 64 MiB (`maxHookPayloadBytes`), since a Write carries the file's whole content. The user may also deny the built-in `Edit` and `Write` tools outright in the project's permissions. Both are the user's choice; ntee configures nothing.
 
 **Architecture**
 
@@ -53,9 +53,12 @@ Sessions are automatic: one generated id per server process (`mcp-<start time>-<
 
 ### tools.go
 
+Every part of a reply the tools act on — the phrases `overReply` and the `edit_wait` cases match, the version a read or an edit names, where a read came from, its stale note and the other sessions changing its repo — is read with extmsg's edit-reply helpers (edit_replies.go), never by matching wording of its own. The timeouts default to extmsg's shared ones.
+
+
 - `editTools.call` — one tool call: checks the arguments (`commandFor`), resolves a relative path against the working directory, finds the editor, picks the session, builds the request (`extmsg.EditRequest`, or `EditWaitRequest` with the call's budget, default 300 s, at most 1 h), and sends it with `extmsg.SendEdit`. An `error …` reply, a refused argument or a missing editor is an `isError` result with a sentence saying how to fix it. `edit_end` waits up to 45 s, since the editor may be writing every staged file. A wait the editor answers `ok waiting`, or one that runs out first, says to call `edit_wait` again. When the user set the session aside for later (Esc → Keep for later, or Later on the ready prompt), the reply says so: the edits are still staged and unwritten, and the agent may carry on and wait again when it needs the outcome. A finished outcome may carry the git work the user asked for with applying: commit the listed files on the current branch, or open a pull request on a new branch whose name the agent agrees with the user first. The instructions tell the agent to do just that, and to leave git alone when nothing is asked. When the user requests changes, `changesRequestedText` tells the agent to stop and ask the user in its reply, not to wait again, and then to stage the follow-ups in the same session and end it again; the instructions carry the same rule. An editor that hangs up without answering (`extmsg.ErrNoReply`, e.g. restarted mid-wait) is an `isError` result telling the agent to check `edit_status` and call again: a pending session survives the restart.
 - `readText` — `read_file`'s output: a header saying where the content came from ("on disk, no staged edits", "latest staged content from edit session A, NOT on disk yet", or the caller's own staged copy), then the lines numbered like `cat -n` from `offset` for `limit` lines (default 2000; a line over 2000 characters is cut, saying so), and a footer naming the next offset when lines are left.
-- `forTools` — rewrites the editor's `ntee --msg` hints into tool terms (`call edit_wait`, `read_file shows`, `pass line`, `with replace_all`), so the agent is never told to run a command it does not use.
+- `forTools` — rewrites the editor's `ntee --msg` hints into tool terms (`call edit_wait`, `read_file shows`, `read it again (read_file)`, `pass line`, `with replace_all`), so the agent is never told to run a command it does not use.
 - `sessionFor` / `sessionClosed` / `sessionOver` (with `overReply`) — the automatic session id, as described under Architecture. `sessionReopened` undoes `sessionOver` when an `edit_wait` hears `ok changes requested`: the user asked for changes from the review and the session is open for edits again, so the agent's next edit without a session goes back to it.
 
 *Plus: `newEditTools`, `textResult`, `noEditorText`, `stillWaitingText`, `needsPath`, `knownTool`.*

@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"fmt"
 	"sort"
 	"unicode/utf8"
 
@@ -152,7 +153,7 @@ func computeDiffDocument(repoRoot, base, repoRel string, current []string, curre
 	if revision.problem != "" {
 		return diffDocument{}, revision.problem
 	}
-	return diffAgainstRevision(repoRoot, revision, repoRel, current, currentExists)
+	return diffAgainstRevision(repoRoot, revision, repoRel, current, currentExists, 0)
 }
 
 // diffRevision is base resolved in one repo: name is what git show reads
@@ -184,7 +185,9 @@ func resolveDiffRevision(repoRoot, base string) diffRevision {
 }
 
 // diffAgainstRevision is computeDiffDocument past the revision check.
-func diffAgainstRevision(repoRoot string, revision diffRevision, repoRel string, current []string, currentExists bool) (diffDocument, string) {
+// maxBaseBytes > 0 refuses an old version larger than it, as the caller
+// refuses a current one.
+func diffAgainstRevision(repoRoot string, revision diffRevision, repoRel string, current []string, currentExists bool, maxBaseBytes int) (diffDocument, string) {
 	doc := diffDocument{lines: current}
 	rev, revisionExists := revision.name, revision.exists
 	var old []string
@@ -196,6 +199,8 @@ func diffAgainstRevision(repoRoot string, revision diffRevision, repoRel string,
 			// path absent in that revision: a new file
 		case bytes.IndexByte(out, 0) >= 0:
 			return diffDocument{}, "old version is binary"
+		case maxBaseBytes > 0 && len(out) > maxBaseBytes:
+			return diffDocument{}, fmt.Sprintf("old version is larger than %d MB — not shown", maxBaseBytes>>20)
 		default:
 			old, inBase = splitBufferLines(string(out)), true
 		}

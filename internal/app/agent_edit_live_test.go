@@ -278,3 +278,39 @@ func TestAChangeRequestReachesTheSenderAsItsOwnReply(t *testing.T) {
 		t.Fatalf("the wire reply is not wrapped twice: %q", line)
 	}
 }
+
+func TestALiveReviewRunsOneRefreshAtATime(t *testing.T) {
+	m, _, receiver, _, _ := agentEditsModel(t, store.AgentEditPolicyReview)
+	receiver.Handle("write --edit-session=e1\nmain.go\n---\none\n")
+	m, prepare := m.enterAgentEditReview(mustSnapshotOf(t, m, "e1"), false)
+	m = settleAgentEdits(m, prepare)
+
+	receiver.Handle("write --edit-session=e1\nmain.go\n---\ntwo\n")
+	m, first := m.refreshAgentEditReview("e1")
+	if first == nil || !m.review.agentEditsRefreshing {
+		t.Fatal("the first refresh runs")
+	}
+	receiver.Handle("write --edit-session=e1\nmain.go\n---\nthree\n")
+	m, second := m.refreshAgentEditReview("e1")
+	if second != nil || !m.review.agentEditsRefreshDue {
+		t.Fatal("a refresh asked for while one runs waits for it")
+	}
+	next, again := m.Update(first())
+	m = next.(Model)
+	if again == nil || !m.review.agentEditsRefreshing || m.review.agentEditsRefreshDue {
+		t.Fatal("when it lands, one more runs for the edits since")
+	}
+	m = settleAgentEdits(m, again)
+	if file, ok := m.selectedReviewFile(); !ok || file.staged.content != "three\n" {
+		t.Fatalf("the review shows the latest staged content: %+v", file.staged)
+	}
+}
+
+func mustSnapshotOf(t *testing.T, m Model, session string) store.AgentEditSession {
+	t.Helper()
+	record, ok := m.agentEdits.registry.Snapshot(session)
+	if !ok {
+		t.Fatalf("no session %s", session)
+	}
+	return record
+}

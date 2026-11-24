@@ -57,18 +57,19 @@ func (m Model) render() string {
 	}
 
 	var mainBody string
+	overlay := m.topOverlay()
 	switch {
-	case m.choice.open():
+	case overlay == overlayChoice:
 		mainBody = m.choice.render(mainWidth-4, bodyHeight-2)
-	case m.fuzzyOpen:
-		mainBody = m.renderFuzzyOverlay(mainWidth-4, bodyHeight-2)
-	case m.messageOverlay != "":
+	case overlay == overlayMessage:
 		mainBody = m.renderMessageOverlay(mainWidth-4, bodyHeight-2)
-	case m.defPickOpen:
+	case overlay == overlayFuzzy:
+		mainBody = m.renderFuzzyOverlay(mainWidth-4, bodyHeight-2)
+	case overlay == overlayDefinitionPicker:
 		mainBody = m.renderDefPickOverlay(mainWidth-4, bodyHeight-2)
-	case m.grepOpen:
+	case overlay == overlayGrep:
 		mainBody = m.renderGrepOverlay(mainWidth-4, bodyHeight-2)
-	case m.opMode.open:
+	case overlay == overlayOpCommands:
 		mainBody = m.renderOpOverlay(mainWidth-4, bodyHeight-2)
 	case m.mode == modeInspect:
 		mainBody = m.renderInspectMain(mainWidth-4, innerH)
@@ -316,16 +317,35 @@ func (m Model) actionHints(hints ...actionHint) string {
 	return strings.Join(parts, " · ")
 }
 
-// diagSummary renders "✗N ⚠M " counts for the open file ("" when clean).
-func (m Model) diagSummary() string {
-	errs, warns := 0, 0
-	for _, d := range m.diags[m.openRel] {
-		if d.Severity == 1 {
-			errs++
+// diagnosticIndex summarizes one file's diagnostics: the error and warning
+// counts, and per line the worst severity and the first diagnostic.
+type diagnosticIndex struct {
+	errors, warnings int
+	worstSeverity    map[int]int
+	firstAtLine      map[int]lsp.Diagnostic
+}
+
+func indexDiagnostics(items []lsp.Diagnostic) diagnosticIndex {
+	index := diagnosticIndex{worstSeverity: make(map[int]int, len(items)), firstAtLine: make(map[int]lsp.Diagnostic, len(items))}
+	for _, diagnostic := range items {
+		if diagnostic.Severity == 1 {
+			index.errors++
 		} else {
-			warns++
+			index.warnings++
+		}
+		if worst, ok := index.worstSeverity[diagnostic.Line]; !ok || diagnostic.Severity < worst {
+			index.worstSeverity[diagnostic.Line] = diagnostic.Severity
+		}
+		if _, ok := index.firstAtLine[diagnostic.Line]; !ok {
+			index.firstAtLine[diagnostic.Line] = diagnostic
 		}
 	}
+	return index
+}
+
+// diagSummary renders "✗N ⚠M " counts for the open file ("" when clean).
+func (m Model) diagSummary() string {
+	errs, warns := m.diagIndex[m.openRel].errors, m.diagIndex[m.openRel].warnings
 	out := ""
 	if errs > 0 {
 		out += statusTextStyle.Render("   ") + errStyle.Render(fmt.Sprintf("✗%d", errs))
@@ -338,12 +358,8 @@ func (m Model) diagSummary() string {
 
 // diagAtLine returns the first diagnostic on a line of the open file.
 func (m Model) diagAtLine(line int) (lsp.Diagnostic, bool) {
-	for _, d := range m.diags[m.openRel] {
-		if d.Line == line {
-			return d, true
-		}
-	}
-	return lsp.Diagnostic{}, false
+	diagnostic, ok := m.diagIndex[m.openRel].firstAtLine[line]
+	return diagnostic, ok
 }
 
 func withNotice(m Model, line string) string {
@@ -413,12 +429,7 @@ func (m Model) renderQuerySuggestions(width int) []string {
 		return nil
 	}
 	const maxVisible = 6
-	selected := input.Clamp(m.inputSuggestIndex, 0, len(suggestions)-1)
-	start := 0
-	if selected >= maxVisible {
-		start = selected - maxVisible + 1
-	}
-	end := min(start+maxVisible, len(suggestions))
+	selected, start, end := listWindow(len(suggestions), m.inputSuggestIndex, maxVisible)
 
 	rows := make([]string, 0, end-start)
 	for i := start; i < end; i++ {
@@ -528,13 +539,7 @@ func (m Model) renderFile(width, height int) string {
 	contentWidth := max(1, width-gutterWidth-3)
 	tabWidth := m.tabWidthFor(m.openRel)
 
-	// Worst diagnostic severity per line for the gutter markers.
-	lineSev := map[int]int{}
-	for _, d := range m.diags[m.openRel] {
-		if cur, ok := lineSev[d.Line]; !ok || d.Severity < cur {
-			lineSev[d.Line] = d.Severity
-		}
-	}
+	lineSev := m.diagIndex[m.openRel].worstSeverity // gutter markers
 
 	start := input.Clamp(m.fileScrollY, 0, max(0, len(lines)-height))
 	if editing {
@@ -569,7 +574,7 @@ func (m Model) renderFile(width, height int) string {
 		case editing && m.edit.inLineSelection(i):
 			content = renderSelectedLine(lines[i], contentWidth, tabWidth)
 		default:
-			content = m.renderContentLine(i, lines[i], scrollX, contentWidth)
+			content = m.renderContentLine(i, lines[i], scrollX, contentWidth, tabWidth)
 		}
 		rows = append(rows, number+content)
 	}
@@ -736,8 +741,7 @@ func completionRow(it lsp.CompletionItem, labelW, detW, originW int, selected bo
 // renderContentLine draws one non-cursor line: styled from the highlight cache
 // when a row is available, plain otherwise (nil rows cover un-lexed files,
 // oversized files, and lines edited since the last rescan).
-func (m Model) renderContentLine(i int, line string, off, width int) string {
-	tabWidth := m.tabWidthFor(m.openRel)
+func (m Model) renderContentLine(i int, line string, off, width, tabWidth int) string {
 	if segments := m.lineSegments(i); segments != nil {
 		return renderSegments(segments, off, width, tabWidth)
 	}
@@ -798,7 +802,7 @@ func renderSegmentsBg(segs []view.HighlightSegment, off, width int, bg string, p
 			skipped = off
 		}
 		take := min(len(runes)-i, width-rendered)
-		b.WriteString(renderRun(segStyleWithBg(seg, bg), string(runes[i:i+take]), tabWidth))
+		b.WriteString(renderSegmentRun(seg, bg, string(runes[i:i+take]), tabWidth))
 		rendered += take
 	}
 	if pad := width - rendered; pad > 0 {
@@ -1322,15 +1326,55 @@ type segStyleKey struct {
 
 var segStyles = map[segStyleKey]lipgloss.Style{}
 
-func segStyleFor(segment view.HighlightSegment) lipgloss.Style {
-	return segStyleWithBg(segment, hexBg)
+// segRunEnds memoizes, per segment style, the escape sequences lipgloss
+// writes before and after a run of plain text, taken from its own output.
+// A visible row renders a run per token every frame, and lipgloss's Render
+// re-measures, re-wraps and re-borders each one; wrapping the text in the
+// cached ends writes the same bytes for a fraction of the cost.
+var segRunEnds = map[segStyleKey]runEnds{}
+
+// runEnds is a style's opening and closing sequences; ok is false when
+// lipgloss styles a run in a way plain wrapping would not reproduce (spaces
+// styled apart, as underline and strikethrough do), and such a style keeps
+// going through Render.
+type runEnds struct {
+	open, close string
+	ok          bool
 }
 
-// segStyleWithBg is segStyleFor with the row's background threaded in: every
-// emitted run must carry its own background (see the palette comment), so a
-// diff row's tint has to be baked into the segment style itself.
-func segStyleWithBg(segment view.HighlightSegment, bg string) lipgloss.Style {
-	key := segStyleKey{
+// renderSegmentRun is renderRun(segStyleWithBg(segment, bg), text, tabWidth)
+// through the cached ends.
+func renderSegmentRun(segment view.HighlightSegment, bg, text string, tabWidth int) string {
+	key := segmentStyleKey(segment, bg)
+	ends, known := segRunEnds[key]
+	if !known {
+		ends = runEndsOf(segStyleWithBg(segment, bg), key)
+		segRunEnds[key] = ends
+	}
+	if !ends.ok || tabWidth < 1 || strings.ContainsAny(text, "\n\r") {
+		return renderRun(segStyleWithBg(segment, bg), text, tabWidth)
+	}
+	if strings.IndexByte(text, '\t') >= 0 {
+		text = strings.ReplaceAll(text, "\t", strings.Repeat(" ", tabWidth)) // as lipgloss's TabWidth does
+	}
+	return ends.open + text + ends.close
+}
+
+func runEndsOf(style lipgloss.Style, key segStyleKey) runEnds {
+	if key.underline || key.strike {
+		return runEnds{}
+	}
+	const sentinel = "X"
+	rendered := style.Render(sentinel)
+	if strings.Count(rendered, sentinel) != 1 {
+		return runEnds{}
+	}
+	open, close, _ := strings.Cut(rendered, sentinel)
+	return runEnds{open: open, close: close, ok: true}
+}
+
+func segmentStyleKey(segment view.HighlightSegment, bg string) segStyleKey {
+	return segStyleKey{
 		color:     segment.Color,
 		bg:        bg,
 		bold:      segment.Bold,
@@ -1339,6 +1383,17 @@ func segStyleWithBg(segment view.HighlightSegment, bg string) lipgloss.Style {
 		italic:    segment.Italic,
 		strike:    segment.Strike,
 	}
+}
+
+func segStyleFor(segment view.HighlightSegment) lipgloss.Style {
+	return segStyleWithBg(segment, hexBg)
+}
+
+// segStyleWithBg is segStyleFor with the row's background threaded in: every
+// emitted run must carry its own background (see the palette comment), so a
+// diff row's tint has to be baked into the segment style itself.
+func segStyleWithBg(segment view.HighlightSegment, bg string) lipgloss.Style {
+	key := segmentStyleKey(segment, bg)
 	if style, ok := segStyles[key]; ok {
 		return style
 	}

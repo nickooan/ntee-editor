@@ -1,8 +1,6 @@
 package staging
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"strconv"
 	"strings"
@@ -16,8 +14,7 @@ import (
 // An edit sent with the version it was made against is checked against the
 // content it lands on (Replacement.Expect, WriteExpecting).
 func Version(content string) string {
-	sum := sha256.Sum256([]byte(content))
-	return hex.EncodeToString(sum[:6])
+	return store.ContentHash(content)[:12] // the content hash, cut to what a person can quote
 }
 
 // maxVersionCacheBytes bounds the contents kept to show what changed since
@@ -284,7 +281,7 @@ func (r *Registry) rebase(session, rel, lowerContent string) RebaseResult {
 	file.BaseContent, file.Content, file.Edits = lowerContent, content, replayed
 	files[index] = file
 	record.Files = files
-	if err := r.log.SavePendingAgentEdit(record); err != nil {
+	if err := r.log.SavePendingAgentEditFiles(record, []string{rel}); err != nil {
 		result.Reason = "cannot save it: " + err.Error()
 		return result
 	}

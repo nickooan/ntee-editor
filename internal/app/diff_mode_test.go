@@ -331,8 +331,8 @@ func TestDiffJumpAndCtrlOReturnsToDiff(t *testing.T) {
 	// Ctrl+O: back to main.go, re-entering diff review with a recompute.
 	res, cmd := m.Update(ctrlKey('o'))
 	m = res.(Model)
-	if m.openRel != "main.go" || m.mode != modeDiff || !m.diffLoading || !m.diffHasPending {
-		t.Fatalf("ctrl+o: open=%q mode=%v loading=%v pending=%v", m.openRel, m.mode, m.diffLoading, m.diffHasPending)
+	if m.openRel != "main.go" || m.mode != modeDiff || !m.diffLoading || !m.diffPending.set {
+		t.Fatalf("ctrl+o: open=%q mode=%v loading=%v pending=%v", m.openRel, m.mode, m.diffLoading, m.diffPending.set)
 	}
 	if cmd == nil {
 		t.Fatal("ctrl+o to a diff frame must fire the recompute cmd")
@@ -550,5 +550,32 @@ func TestEnterDiffRejectsDashRevision(t *testing.T) {
 	}
 	if !strings.Contains(m.errText, "bad revision") {
 		t.Fatalf("errText = %q, want a bad-revision message", m.errText)
+	}
+}
+
+func TestAReviewRefusesAnOldVersionPastItsSizeCap(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	_, root := newTestModel(t, nil)
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", root, "-c", "user.email=t@t", "-c", "user.name=t"}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	big := strings.Repeat("x\n", 64<<10) // 128 KiB
+	must(t, os.WriteFile(filepath.Join(root, "big.txt"), []byte(big), 0o644))
+	git("init", "-q")
+	git("add", "big.txt")
+	git("commit", "-q", "-m", "init")
+	revision := resolveDiffRevision(root, "")
+
+	if _, problem := diffAgainstRevision(root, revision, "big.txt", []string{"small"}, true, 64<<10); !strings.Contains(problem, "old version is larger than") {
+		t.Fatalf("an old version over the cap is not diffed: %q", problem)
+	}
+	if document, problem := diffAgainstRevision(root, revision, "big.txt", []string{"small"}, true, 0); problem != "" || document.dels == 0 {
+		t.Fatalf("no cap: diffed as usual (%q, -%d)", problem, document.dels)
 	}
 }

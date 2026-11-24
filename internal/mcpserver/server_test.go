@@ -719,6 +719,7 @@ func TestToolTermsReplaceCLIHints(t *testing.T) {
 		"ok edit session e1 ended — the user is reviewing 2 staged files; to hear the outcome run: ntee --msg --msg-edit-session e1 wait": "ok edit session e1 ended — the user is reviewing 2 staged files; to hear the outcome call edit_wait",
 		"error the old text is not in a.go — copy it exactly, whitespace included (ntee --msg show prints the staged content)":            "error the old text is not in a.go — copy it exactly, whitespace included (read_file shows the staged content)",
 		"ok replaced a.go L1–L2 · edit 1 · 1 file staged":                                                                                 "ok replaced a.go L1–L2 · edit 1 · 1 file staged",
+		"error a.go changed since you read it: x — y; read it again (ntee --msg read) and stage your change on the current content":       "error a.go changed since you read it: x — y; read it again (read_file) and stage your change on the current content",
 	}
 	for reply, want := range cases {
 		if got := forTools(reply); got != want {

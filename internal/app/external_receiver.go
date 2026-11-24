@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -62,12 +61,18 @@ type ExternalReceiver struct {
 
 	sinkMu sync.Mutex
 	sink   func(msg any)
+
+	// notices are the UI notifications (notify) waiting for the notice
+	// dispatcher, in the order they were raised; noticeWake signals it.
+	noticeMu   sync.Mutex
+	notices    []any
+	noticeWake chan struct{}
 }
 
 // agentEditEndWait bounds how long an edit session's end waits for the UI:
 // when the editor applies the staged files at once, the reply comes after
-// they are written.
-const agentEditEndWait = 40 * time.Second
+// they are written. It stays under the sender's extmsg.EditEndTimeout.
+const agentEditEndWait = extmsg.EditorEndWait
 
 // waitReplyMargin is how much earlier than the sender's --wait= budget a
 // wait is answered, so the reply lands before the sender gives up and no
@@ -80,6 +85,7 @@ func NewExternalReceiver(workspaceRoot string, settings store.ExternalSettingsSt
 		settings:      settings,
 		history:       history,
 		queue:         make(chan externalMessageMsg, externalQueueSize),
+		noticeWake:    make(chan struct{}, 1),
 		replyWait:     externalReplyWait,
 		sessionWait:   extmsg.MaxSessionWait,
 	}
@@ -97,6 +103,7 @@ func (r *ExternalReceiver) SetSink(sink func(msg any)) {
 			sink(message)
 		}
 	}()
+	go r.dispatchNotices(sink)
 }
 
 // Handle is the extmsg.Handler.
@@ -194,9 +201,12 @@ func (r *ExternalReceiver) Handle(text string) string {
 	// A session's end/wait is no request to replay, and a review session is
 	// saved whole by the editor once it is over.
 	control := message.Command == extmsg.CommandEnd || message.Command == extmsg.CommandWait
+	recorded := false
 	if !control && message.SessionKind != extmsg.SessionReview {
 		if err := r.history.AppendExternal(record, settings.HistoryLimit); err != nil {
 			historyWarning = " (not saved to history: " + err.Error() + ")"
+		} else {
+			recorded = true
 		}
 	}
 
@@ -208,7 +218,11 @@ func (r *ExternalReceiver) Handle(text string) string {
 	select {
 	case r.queue <- queued:
 	default:
-		return extmsg.ErrorReply("the editor is busy — try again shortly")
+		const busy = "the editor is busy — try again shortly"
+		if recorded {
+			_ = r.history.UpdateExternalStatus(record.Key, store.ExternalFailed, busy)
+		}
+		return extmsg.ErrorReply(busy)
 	}
 	// Only a session's wait is answered by the user (when the session is
 	// over); every other request, session steps included, gets the UI's
@@ -227,11 +241,23 @@ func (r *ExternalReceiver) Handle(text string) string {
 	case outcome := <-reply:
 		return replyFromOutcome(outcome) + historyWarning
 	case <-timer.C:
+		select {
+		case outcome := <-reply: // answered just as the wait ran out
+			return replyFromOutcome(outcome) + historyWarning
+		default:
+		}
 		if isWait {
+			r.notify(sessionWaitExpiredMsg{reply: reply})
 			return extmsg.OkReply(sessionWaitingReply(message.Session, message.SessionKind))
 		}
 		return extmsg.OkReply("delivered" + historyWarning)
 	}
+}
+
+// sessionWaitExpiredMsg tells the UI a session's wait gave up: its reply
+// channel is no longer anyone's to answer.
+type sessionWaitExpiredMsg struct {
+	reply chan<- string
 }
 
 // waitFor is how long a wait is held: up to sessionWait, and short of the
@@ -250,20 +276,7 @@ func (r *ExternalReceiver) waitFor(budget time.Duration) time.Duration {
 // sessionWaitingReply tells a session's agent the user hasn't answered yet
 // and how to keep waiting.
 func sessionWaitingReply(session string, kind extmsg.SessionKind) string {
-	return "waiting — the user hasn't answered yet; run: ntee --msg " + sessionFlag(kind) + " " + session + " wait"
-}
-
-// sessionFlag is the --msg flag that sends a session's requests.
-func sessionFlag(kind extmsg.SessionKind) string {
-	switch kind {
-	case extmsg.SessionDiff:
-		return "--msg-diff-session"
-	case extmsg.SessionReview:
-		return "--msg-review-session"
-	case extmsg.SessionEdit:
-		return "--msg-edit-session"
-	}
-	return "--msg-session"
+	return "waiting — the user hasn't answered yet; run: ntee --msg " + kind.MsgFlag() + " " + session + " wait"
 }
 
 // replyFromOutcome turns the UI's outcome into the sender's reply line: an
@@ -281,7 +294,7 @@ func replyFromOutcome(outcome string) string {
 // /private/var), so a lexical miss retries with symlinks resolved. A path
 // outside the workspace comes back starting with "..".
 func (r *ExternalReceiver) relativeToWorkspace(absolute string) string {
-	if rel, err := filepath.Rel(r.workspaceRoot, absolute); err == nil && !strings.HasPrefix(rel, "..") {
+	if rel, err := filepath.Rel(r.workspaceRoot, absolute); err == nil && !filetree.IsEscapingRel(rel) {
 		return rel
 	}
 	realRoot, err := filepath.EvalSymlinks(r.workspaceRoot)
@@ -320,7 +333,7 @@ func (r *ExternalReceiver) resolvePath(raw string, mustExist bool) (string, erro
 		rel = r.relativeToWorkspace(rel)
 	}
 	rel = filepath.ToSlash(filepath.Clean(rel))
-	if rel == "." || rel == ".." || strings.HasPrefix(rel, "../") || !filetree.IsContained(r.workspaceRoot, rel) {
+	if rel == "." || filetree.IsEscapingRel(rel) || !filetree.IsContained(r.workspaceRoot, rel) {
 		return "", fmt.Errorf("path outside the project: %s", pathText)
 	}
 	if mustExist {

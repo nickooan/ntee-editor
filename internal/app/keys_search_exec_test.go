@@ -176,7 +176,7 @@ func TestSearchExecBlocksOverlays(t *testing.T) {
 		t.Fatal("Ctrl+P must not open the finder in the search-exec bar")
 	}
 	m = key(m, ctrlKey('g'))
-	if m.grepOpen {
+	if m.grep.open {
 		t.Fatal("Ctrl+G must not open grep in the search-exec bar")
 	}
 }

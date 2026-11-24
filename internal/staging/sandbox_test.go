@@ -2,6 +2,7 @@ package staging
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -308,8 +309,69 @@ func TestAChangedStagedFileIsSwappedInWhole(t *testing.T) {
 	}
 	entries, _ := os.ReadDir(filepath.Join(result.Path, "repoA"))
 	for _, entry := range entries {
-		if strings.Contains(entry.Name(), ".placing-") {
+		if strings.Contains(entry.Name(), ".ntee-") {
 			t.Fatalf("no temporary file is left behind: %s", entry.Name())
 		}
+	}
+}
+
+func TestDropSandboxNeverWaitsForABuild(t *testing.T) {
+	registry, _, boxes, _ := sandboxWorkspace(t)
+	readySession(t, registry, "repoA/a.go", "repoB/b.go")
+	if _, err := registry.Sandbox("S", false, nil); err != nil {
+		t.Fatal(err)
+	}
+	state := registry.sandboxStateFor("S")
+	state.mu.Lock() // a build in progress
+	dropped := make(chan struct{})
+	go func() {
+		registry.DropSandbox("S")
+		close(dropped)
+	}()
+	select {
+	case <-dropped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the drop waited on the build")
+	}
+	box := filepath.Join(boxes, "S")
+	if _, err := os.Stat(box); err != nil {
+		t.Fatalf("the box stays until the build lets go: %v", err)
+	}
+	state.mu.Unlock()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(box); errors.Is(err, fs.ErrNotExist) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the stale box is trashed once the build ends")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestSandboxOfAnUnknownSessionLeavesNoState(t *testing.T) {
+	registry, _, _, _ := sandboxWorkspace(t)
+	if _, err := registry.Sandbox("nope", false, nil); err == nil {
+		t.Fatal("no session, no sandbox")
+	}
+	if _, ok := registry.sandboxes["nope"]; ok {
+		t.Fatal("a refused sandbox leaves no build state behind")
+	}
+}
+
+func TestPlacingAStagedFileKeepsItsMode(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "run.sh")
+	must(t, os.WriteFile(target, []byte("#!/bin/sh\n"), 0o755))
+	must(t, placeFile(target, "#!/bin/sh\necho staged\n"))
+	info, err := os.Stat(target)
+	must(t, err)
+	if info.Mode().Perm() != 0o755 {
+		t.Fatalf("a staged script stays executable in the sandbox: %v", info.Mode().Perm())
+	}
+	fresh := filepath.Join(filepath.Dir(target), "new.go")
+	must(t, placeFile(fresh, "package x\n"))
+	if info, _ := os.Stat(fresh); info.Mode().Perm() != 0o644 {
+		t.Fatalf("a new file gets 0644: %v", info.Mode().Perm())
 	}
 }

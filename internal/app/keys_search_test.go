@@ -74,3 +74,26 @@ func TestSearchNearestMatchWrapsToTop(t *testing.T) {
 		t.Fatalf("searchFocused = %d, want 0 (wrap to the line-5 match)", m.searchFocused)
 	}
 }
+
+func TestSearchReusesACompleteHighlightOfTheSameContent(t *testing.T) {
+	m, _ := newTestModel(t, nil)
+	m = m.openFileAt("main.go")
+	m = key(m, ctrlKey('s')) // a save highlights the whole buffer
+	if m.hlLines == nil {
+		t.Fatal("fixture is highlighted")
+	}
+	reused := m.reusableHighlights(m.edit.contentJoined())
+	if len(reused) != len(m.hlLines) || &reused[0] == &m.hlLines[0] {
+		t.Fatal("search gets its own copy of the current highlight")
+	}
+	if m.reusableHighlights(m.edit.contentJoined()+"x") != nil {
+		t.Fatal("other content is tokenized afresh")
+	}
+	m = m.hlMarkLine(0)
+	if m.reusableHighlights(m.edit.contentJoined()) != nil {
+		t.Fatal("a highlight with rows awaiting a rescan is not reused")
+	}
+	if m = m.refreshFileHighlights(); m.hlRowsPending {
+		t.Fatal("the same content is rescanned when rows are pending")
+	}
+}

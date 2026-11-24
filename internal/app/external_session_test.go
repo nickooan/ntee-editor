@@ -277,7 +277,11 @@ func TestReceiverWaitsForASessionToEnd(t *testing.T) {
 	receiver := NewExternalReceiver(root, settings, history)
 	receiver.sessionWait = 50 * time.Millisecond
 	delivered := make(chan externalMessageMsg, 2)
-	receiver.SetSink(func(msg any) { delivered <- msg.(externalMessageMsg) })
+	receiver.SetSink(func(msg any) {
+		if queued, ok := msg.(externalMessageMsg); ok {
+			delivered <- queued
+		}
+	})
 
 	replies := make(chan string, 1)
 	go func() { replies <- receiver.Handle("wait --session=w\n") }()
@@ -316,7 +320,11 @@ func TestReceiverHoldsOnlyWaitAndWithinTheSenderBudget(t *testing.T) {
 	receiver.replyWait = 20 * time.Millisecond
 	receiver.sessionWait = time.Hour
 	delivered := make(chan externalMessageMsg, 4)
-	receiver.SetSink(func(msg any) { delivered <- msg.(externalMessageMsg) })
+	receiver.SetSink(func(msg any) {
+		if queued, ok := msg.(externalMessageMsg); ok {
+			delivered <- queued
+		}
+	})
 
 	// A step the UI hasn't answered yet comes back after the plain reply
 	// wait, not the hour a wait may take.

@@ -248,3 +248,16 @@ func TestConcurrentFirstStagingsNeverFork(t *testing.T) {
 		t.Fatal("one session is the root, built on the disk")
 	}
 }
+
+func TestStagedInAnswersAnUnstagedFileWithoutReadingIt(t *testing.T) {
+	registry, root, _ := newTestRegistry(t)
+	must(t, os.WriteFile(filepath.Join(root, "blob.bin"), []byte{0, 1, 2, 0}, 0o644))
+	if session, err := registry.StagedIn("blob.bin"); session != "" || err != nil {
+		t.Fatalf("nothing staged: no session, and the (binary) file is never read: %q %v", session, err)
+	}
+	_, err := registry.Write("A", "", "a.go", "x\n")
+	must(t, err)
+	if session, err := registry.StagedIn("a.go"); session != "A" || err != nil {
+		t.Fatalf("a staged file still names its session: %q %v", session, err)
+	}
+}

@@ -50,6 +50,12 @@ var (
 	gitignoreCache   = map[string]cachedGitignore{}
 )
 
+// maxCachedDirs bounds both caches. They are keyed by absolute path, so
+// every root the editor visits adds to them; past the bound one is dropped
+// whole and refills from disk on the next walk (its mtime check makes a
+// refill cost what a cold walk does).
+var maxCachedDirs = 50_000
+
 // ClearDirCache drops all cached directory listings and compiled nested
 // .gitignore matchers so the next walk re-reads from disk. Used by the manual
 // :refresh to pick up changes that mtime comparison would miss (e.g. a
@@ -117,6 +123,9 @@ func loadNestedGitignore(absDir string) *Gitignore {
 	gi := CompileGitignore(strings.Split(string(data), "\n"))
 
 	gitignoreCacheMu.Lock()
+	if len(gitignoreCache) >= maxCachedDirs {
+		gitignoreCache = map[string]cachedGitignore{}
+	}
 	gitignoreCache[p] = cachedGitignore{mtime: mtime, gi: gi}
 	gitignoreCacheMu.Unlock()
 	return gi
@@ -187,6 +196,9 @@ func readDirectorySorted(path string) ([]dirChild, time.Time, error) {
 	})
 
 	dirCacheMu.Lock()
+	if len(dirCache) >= maxCachedDirs {
+		dirCache = map[string]cachedDir{}
+	}
 	dirCache[path] = cachedDir{mtime: mtime, entries: entries}
 	dirCacheMu.Unlock()
 	return entries, mtime, nil
@@ -197,7 +209,14 @@ func isInsideRoot(root, target string) bool {
 	if err != nil {
 		return false
 	}
-	return rel == "." || (!strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel))
+	return !IsEscapingRel(rel) && !filepath.IsAbs(rel)
+}
+
+// IsEscapingRel reports whether a relative path (a filepath.Rel result, OS
+// or slash separated) climbs out of its base: ".." or a "../" prefix — not
+// a name that merely starts with "..".
+func IsEscapingRel(rel string) bool {
+	return rel == ".." || strings.HasPrefix(rel, "../") || strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // hardIgnore names are dropped by every walk — never shown in the tree and
@@ -530,8 +549,11 @@ func BuildPathTreeEntries(paths []string, collapsed map[string]bool) []FileTreeE
 	return entries
 }
 
-// maxScanDepth bounds the BuildAllEntries walk (symlink-loop guard).
-const maxScanDepth = 16
+// maxScanDepth bounds how deep the walks go. They never follow a symlinked
+// directory, so there is no loop to guard against: this only stops a
+// pathological tree, and sits well past real nesting (deep Java packages
+// reach the high teens).
+const maxScanDepth = 48
 
 // BuildAllEntries walks the whole root regardless of expansion state and
 // returns every regular file's relative path. This is the fuzzy-search corpus:

@@ -1,6 +1,8 @@
 package filetree
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -128,5 +130,42 @@ func TestBuildPathTreeEntries(t *testing.T) {
 	}
 	if entries := BuildPathTreeEntries([]string{"/a//b.go", "", "."}, nil); len(entries) != 2 || entries[1].RelativePath != "a/b.go" {
 		t.Fatalf("paths are cleaned and blanks dropped: %+v", entries)
+	}
+}
+
+func TestIsEscapingRelOnlyClimbsOnARealParentStep(t *testing.T) {
+	for rel, escaping := range map[string]bool{
+		"..": true, "../a": true, "../../a": true,
+		".": false, "a": false, "..foo": false, "..foo/bar": false, "a/../b": false,
+	} {
+		if got := IsEscapingRel(filepath.FromSlash(rel)); got != escaping {
+			t.Errorf("IsEscapingRel(%q) = %v, want %v", rel, got, escaping)
+		}
+	}
+	if !isInsideRoot("/work", "/work/..foo") || isInsideRoot("/work", "/other") {
+		t.Fatal("a name starting with .. is inside; a sibling is not")
+	}
+}
+
+func TestTheDirectoryCacheStaysBounded(t *testing.T) {
+	previous := maxCachedDirs
+	maxCachedDirs = 3
+	t.Cleanup(func() { maxCachedDirs = previous; ClearDirCache() })
+	ClearDirCache()
+	root := t.TempDir()
+	for _, name := range []string{"a", "b", "c", "d", "e"} {
+		dir := filepath.Join(root, name)
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := readDirectorySorted(dir); err != nil {
+			t.Fatal(err)
+		}
+		dirCacheMu.Lock()
+		size := len(dirCache)
+		dirCacheMu.Unlock()
+		if size > maxCachedDirs {
+			t.Fatalf("the cache holds %d directories, past its bound of %d", size, maxCachedDirs)
+		}
 	}
 }

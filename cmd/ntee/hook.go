@@ -109,7 +109,10 @@ func stagedSession(editorRoot, path string) string {
 	if err != nil {
 		return ""
 	}
-	session, _ := extmsg.StagedReplySession(line)
+	session, staged := extmsg.StagedReplySession(line)
+	if !staged {
+		return ""
+	}
 	return session
 }
 

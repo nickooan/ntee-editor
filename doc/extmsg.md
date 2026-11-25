@@ -70,6 +70,8 @@ For `write` and `replace` (`carriesPayload`), the text after the first separator
 - `SendForBody` — `SendWithTimeout` for a request whose reply may carry a body (`show`, `read`, `status`): it reads up to `MaxBodyBytes` and splits the reply with `SplitBodyReply`, keeping the body byte for byte.
 - `exchange` — the one dial–write–read all senders share. It takes a context whose cancellation closes the connection, so an MCP client cancelling a pending `edit_wait` frees it at once. A connection the editor closes without a reply line is `ErrNoReply`, never an empty "success": the editor always answers, so silence means it quit or restarted while holding the request (typically a `wait`). The CLI reports it with exit 1, plus a hint for a session to wait again.
 
+- `BuildRequest` — a request's wire text: the command, its session option and base revision on the first line, one path per line, then the note after `---`. The `ntee --msg` client and the MCP show tools (`show_code`, the walkthrough) both build their requests with it, so the two can never drift apart.
+
 *Plus: `writeRequest` (write + half-close), `isLive` — the liveness probe, `trimReply`.*
 
 ### edit_replies.go

@@ -426,3 +426,20 @@ func TestHistoryDetailShowsEachFilesNote(t *testing.T) {
 		t.Fatalf("the detail shows the file's note:\n%s", plain)
 	}
 }
+
+func TestAWalkthroughStopOnUnchangedCodeShowsTheCodeAndItsNote(t *testing.T) {
+	m := diffSessionWorkspace(t)
+	m, outcome := sendReviewFile(t, m, "w1", "apps/web/same.go#L3", "**same** is the shared value")
+	if !strings.Contains(outcome, "queued") || !m.choice.open() {
+		t.Fatalf("the first stop asks to start: %q", outcome)
+	}
+	m = keySettled(m, keyPress(tea.KeyEnter))
+	file, _ := m.selectedReviewFile()
+	if file.status != reviewUnchanged || m.review.position.row != 2 {
+		t.Fatalf("an unchanged file lands on its note's line: status=%v row=%d", file.status, m.review.position.row)
+	}
+	plain := ansi.Strip(m.View().Content)
+	if !strings.Contains(plain, "var same = 1") || !strings.Contains(plain, "same is the shared value") || strings.Contains(plain, "no changes against") {
+		t.Fatalf("the code shows with its note, not a no-changes placeholder:\n%s", plain)
+	}
+}

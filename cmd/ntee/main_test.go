@@ -87,14 +87,14 @@ func TestBuildRequestCarriesTheBaseOnTheFirstLine(t *testing.T) {
 		{"review", "HEAD~2", []string{"/p/a.go", "/p/b.go"}, "review HEAD~2\n/p/a.go\n/p/b.go\n"},
 	}
 	for _, c := range cases {
-		if got := buildRequest(c.command, c.base, "", c.paths, ""); got != c.want {
-			t.Errorf("buildRequest(%q, %q) = %q, want %q", c.command, c.base, got, c.want)
+		if got := extmsg.BuildRequest(c.command, c.base, "", c.paths, ""); got != c.want {
+			t.Errorf("extmsg.BuildRequest(%q, %q) = %q, want %q", c.command, c.base, got, c.want)
 		}
 	}
 }
 
 func TestBuildRequestPutsTheNoteAfterTheSeparator(t *testing.T) {
-	got := buildRequest("open", "v1", "", []string{"/p/a.go#L3"}, "# Why\n\n  - kept")
+	got := extmsg.BuildRequest("open", "v1", "", []string{"/p/a.go#L3"}, "# Why\n\n  - kept")
 	if want := "open v1\n/p/a.go#L3\n---\n# Why\n\n  - kept\n"; got != want {
 		t.Fatalf("buildRequest = %q, want %q", got, want)
 	}
@@ -149,23 +149,23 @@ func TestReadNoteFromStdinKeepsTheText(t *testing.T) {
 
 func TestBuildRequestCarriesTheSession(t *testing.T) {
 	note, diff := msgSession{id: "walk1", kind: extmsg.SessionNote}, msgSession{id: "walk1", kind: extmsg.SessionDiff}
-	if got, want := buildRequest("open", "", note.option(), []string{"/p/a.go#L3"}, "why"), "open --session=walk1\n/p/a.go#L3\n---\nwhy\n"; got != want {
+	if got, want := extmsg.BuildRequest("open", "", note.option(), []string{"/p/a.go#L3"}, "why"), "open --session=walk1\n/p/a.go#L3\n---\nwhy\n"; got != want {
 		t.Fatalf("note step = %q, want %q", got, want)
 	}
-	if got, want := buildRequest("open", "v1", diff.option(), []string{"/p/a.go#L3"}, "why"), "open --diff-session=walk1 v1\n/p/a.go#L3\n---\nwhy\n"; got != want {
+	if got, want := extmsg.BuildRequest("open", "v1", diff.option(), []string{"/p/a.go#L3"}, "why"), "open --diff-session=walk1 v1\n/p/a.go#L3\n---\nwhy\n"; got != want {
 		t.Fatalf("diff step = %q, want %q", got, want)
 	}
-	if got, want := buildRequest("wait", "", note.option(), nil, ""), "wait --session=walk1\n"; got != want {
+	if got, want := extmsg.BuildRequest("wait", "", note.option(), nil, ""), "wait --session=walk1\n"; got != want {
 		t.Fatalf("wait = %q, want %q", got, want)
 	}
 	for _, c := range []struct {
 		request  string
 		wantDiff bool
 	}{
-		{buildRequest("open", "", note.option(), []string{"/p/a.go#L3"}, "why"), false},
-		{buildRequest("end", "", note.option(), nil, ""), false},
-		{buildRequest("open", "v1", diff.option(), []string{"/p/a.go#L3"}, "why"), true},
-		{buildRequest("end", "", diff.option(), nil, ""), true},
+		{extmsg.BuildRequest("open", "", note.option(), []string{"/p/a.go#L3"}, "why"), false},
+		{extmsg.BuildRequest("end", "", note.option(), nil, ""), false},
+		{extmsg.BuildRequest("open", "v1", diff.option(), []string{"/p/a.go#L3"}, "why"), true},
+		{extmsg.BuildRequest("end", "", diff.option(), nil, ""), true},
 	} {
 		wantKind := extmsg.SessionNote
 		if c.wantDiff {
@@ -179,7 +179,7 @@ func TestBuildRequestCarriesTheSession(t *testing.T) {
 
 func TestBuildRequestForAReviewSession(t *testing.T) {
 	review := msgSession{id: "r1", kind: extmsg.SessionReview}
-	request := buildRequest("review", "main", review.option(), []string{"/p/a.go"}, "why")
+	request := extmsg.BuildRequest("review", "main", review.option(), []string{"/p/a.go"}, "why")
 	if want := "review --review-session=r1 main\n/p/a.go\n---\nwhy\n"; request != want {
 		t.Fatalf("review session request = %q, want %q", request, want)
 	}

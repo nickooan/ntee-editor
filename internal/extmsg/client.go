@@ -128,3 +128,25 @@ func isLive(socketPath string) bool {
 	conn.Close()
 	return true
 }
+
+// BuildRequest is a request's wire text: the command, the optional session
+// option (SessionKind.Option + id) and base revision on the first line, then
+// one path per line, then the optional note after the separator line. The
+// --msg client and the MCP show tools both send it.
+func BuildRequest(command, base, sessionOption string, paths []string, note string) string {
+	header := command
+	if sessionOption != "" {
+		header += " " + sessionOption
+	}
+	if base != "" {
+		header += " " + base
+	}
+	request := header + "\n"
+	if len(paths) > 0 {
+		request += strings.Join(paths, "\n") + "\n"
+	}
+	if note != "" {
+		request += LineNoteSeparator + "\n" + note + "\n"
+	}
+	return request
+}

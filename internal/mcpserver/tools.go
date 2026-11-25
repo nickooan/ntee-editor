@@ -61,6 +61,7 @@ type toolArguments struct {
 	WorkingDir     string   `json:"working_dir"`
 	Commit         string   `json:"commit"`
 	PullRequest    string   `json:"pull_request"`
+	Base           string   `json:"base"`
 }
 
 type textContent struct {
@@ -101,6 +102,12 @@ type editTools struct {
 	// workingDir resolves relative paths: the launch folder until the agent
 	// names another with working_dir. Changing it never touches the session.
 	workingDir string
+	// walkthrough is the show tools' live review session (show_tools.go):
+	// started by the first walkthrough_step, let go once it ends;
+	// lastWalkthrough is the one walkthrough_wait waits on after that.
+	walkthrough      string
+	walkthroughCount int
+	lastWalkthrough  string
 }
 
 func newEditTools(config Config) *editTools {
@@ -271,8 +278,13 @@ func (tools *editTools) call(ctx context.Context, name string, raw json.RawMessa
 			workingDirNote = "working_dir now " + tools.currentWorkingDir() + " (relative paths resolve against it; your edit session is unchanged)\n"
 		}
 	}
-	result := tools.callEditor(ctx, name, arguments)
-	if result.IsError && needsPath(name) && !filepath.IsAbs(arguments.Path) && strings.Contains(result.Content[0].Text, "no such file") {
+	var result toolResult
+	if isShowTool(name) {
+		result = tools.callShow(ctx, name, arguments)
+	} else {
+		result = tools.callEditor(ctx, name, arguments)
+	}
+	if result.IsError && (needsPath(name) || showNeedsPath(name)) && !filepath.IsAbs(arguments.Path) && strings.Contains(result.Content[0].Text, "no such file") {
 		result.Content[0].Text += "\n(" + arguments.Path + " resolved against " + tools.currentWorkingDir() +
 			" — if your current folder is elsewhere, pass working_dir or an absolute path)"
 	}
@@ -477,7 +489,7 @@ func needsPath(name string) bool {
 }
 
 func takesWorkingDir(name string) bool {
-	return needsPath(name) || name == toolSandbox
+	return needsPath(name) || showNeedsPath(name) || name == toolSandbox
 }
 
 func knownTool(name string) bool {

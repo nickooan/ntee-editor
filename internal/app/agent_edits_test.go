@@ -227,9 +227,9 @@ func TestAgentEditReviewThenApply(t *testing.T) {
 		t.Fatalf("diff before → staged with the edit log: +%d −%d notes=%+v", file.document.adds, file.document.dels, file.notes)
 	}
 	plain := ansi.Strip(m.View().Content)
-	decision, navigation := strings.Index(plain, "a apply all to disk · x discard all · r request changes · Esc decide"), strings.Index(plain, "↑/↓ move")
-	if !strings.Contains(plain, "edit session e1 · staged, not written") || decision < 0 || navigation < decision {
-		t.Fatalf("the decision leads the status bar:\n%s", plain)
+	if !strings.Contains(plain, "edit session e1 · staged, not written") || !strings.Contains(plain, "╭─ ⏳ agent waiting for you") || !strings.Contains(plain, "discard all") ||
+		strings.Contains(ansi.Strip(m.renderStatusLine()), "a apply all to disk") {
+		t.Fatalf("the decision floats over the code, not in the status bar:\n%s", plain)
 	}
 
 	m = key(m, typeRune('A'))

@@ -3,8 +3,9 @@ package mcpserver
 import "fmt"
 
 // instructions is sent at initialize: it teaches the agent when and how to
-// use the edit tools instead of writing files itself.
-const instructions = `ntee stages your file edits in the user's running ntee editor instead of writing them to disk.
+// use the edit tools instead of writing files itself, and the show tools to
+// put code in front of the user.
+const instructions = `ntee stages your file edits in the user's running ntee editor instead of writing them to disk, and shows the user code in that editor.
 
 When an ntee editor is open on the project, read and change files with these tools instead of your own Read/Edit/Write tools or shell reads and writes:
 1. read_file before you edit a file: it shows the latest content — edits staged by you or by another agent that are not on disk yet. Your own Read, cat and editors see only the disk. Grep and Glob search the disk too: re-read their matches with read_file before editing them.
@@ -26,7 +27,14 @@ Rules:
 - Git after applying: when edit_wait's outcome says the user asks you to commit, commit only the files it lists, on the current branch, with a message you write from the change. When it asks for a pull request, it names the current branch: use it if the user already agreed on it for this change, else ask the user for the branch name (suggest one) and create it; then commit those files, push and open the pull request. When it asks neither, do not touch git.
 - The outcome reaches you as a tool result, so your harness may ask the user to confirm the git steps: if it does, or refuses them, say so in your reply and wait for the user. Then call edit_report: done (with commit or pull_request), blocked (it needs the user) or declined, with a note — the user sees it in the editor.
 - "set aside for later": the edits stay staged and unwritten until the user decides; carry on, and call edit_wait again when you need the outcome.
-- If a tool says no ntee editor is running, nothing was staged: make the edit with your usual file tools.`
+- If a tool says no ntee editor is running, nothing was staged: make the edit with your usual file tools.
+
+Showing code (nothing is changed): when the user asks you to show, explain, point out or walk them through code, show it in their editor instead of pasting it:
+- One place — a key point, "where is X", "show me the bug": show_code with the file, the line, and a short note on why it matters.
+- Several places — "walk me through", "explain how X works", a tour of a change: a walkthrough. Read the code first (read_file, Grep), plan the stops in the order a reader should take them, then send each with walkthrough_step (file, line, note); the editor follows you from stop to stop (auto-drive) and the user can browse back. Call walkthrough_end after the last stop. If the user should finish before you go on, call walkthrough_wait (again while it says still waiting).
+- Notes are read in a small box beside the code (8 lines shown, about 100 columns): write a few short, friendly lines — what this code does and why it matters here — one point per stop. Light markdown works: **bold**, ` + "`code`" + `, - bullets. No long paragraphs, logs or big code blocks; more to say goes into another stop.
+- Line numbers are those read_file shows. A walkthrough shows each file's diff against HEAD (unchanged code reads as plain context); pass base on the first stop to compare against another revision.
+- "the user closed the walkthrough": stop sending stops. The first stop may ask the user to start; carry on sending — the stops queue until they do.`
 
 type toolDefinition struct {
 	Name        string         `json:"name"`
@@ -66,7 +74,83 @@ func objectSchema(properties map[string]any, required ...string) map[string]any 
 	return schema
 }
 
-var toolDefinitions = []toolDefinition{
+var notePathProperty = map[string]any{
+	"type":        "string",
+	"description": "The file to show, absolute or relative to working_dir.",
+}
+
+var noteProperty = map[string]any{
+	"type":        "string",
+	"description": "A few short, friendly lines shown in a box beside the line: what this code does and why it matters. Light markdown (**bold**, `code`, - bullets). Max 16 KiB; keep it far shorter.",
+}
+
+// showToolDefinitions are the show tools (show_tools.go): no edit session,
+// so no session property.
+var showToolDefinitions = []toolDefinition{
+	{
+		Name:  toolShow,
+		Title: "Show the user one place in the code",
+		Description: "Open a file at a line in the user's running ntee editor, with an optional note beside it — to point out a key place. Nothing is changed. " +
+			"If the user is busy in the editor they are asked first.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"path":        notePathProperty,
+				"line":        map[string]any{"type": "integer", "minimum": 1, "description": "The line to show (as read_file numbers it)."},
+				"note":        noteProperty,
+				"working_dir": workingDirProperty,
+			},
+			"required":             []string{"path", "line"},
+			"additionalProperties": false,
+		},
+		Annotations: map[string]any{"readOnlyHint": true},
+	},
+	{
+		Name:  toolWalkthrough,
+		Title: "Add a stop to a code walkthrough",
+		Description: "Walk the user through code in their ntee editor: each call adds one stop — a file, a line and a note — to a live review the editor follows as you send them. " +
+			"The first call starts the walkthrough. Nothing is changed. Send the stops in reading order, then call walkthrough_end.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"path":        notePathProperty,
+				"line":        map[string]any{"type": "integer", "minimum": 1, "description": "The line the note sits on (as read_file numbers it). Leave it out: the file's first change."},
+				"note":        noteProperty,
+				"base":        map[string]any{"type": "string", "description": "First stop only: the revision every file is compared against (default HEAD)."},
+				"working_dir": workingDirProperty,
+			},
+			"required":             []string{"path"},
+			"additionalProperties": false,
+		},
+		Annotations: map[string]any{"readOnlyHint": true},
+	},
+	{
+		Name:        toolWalkthroughEnd,
+		Title:       "Finish sending the walkthrough",
+		Description: "Say the walkthrough has all its stops: the user finishes it at their own pace. Call walkthrough_wait to hear when they are done.",
+		InputSchema: map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
+		Annotations: map[string]any{"readOnlyHint": true},
+	},
+	{
+		Name:        toolWalkthroughWait,
+		Title:       "Wait for the user to finish the walkthrough",
+		Description: "Wait until the user finishes or closes the walkthrough (default: the current one, else the one ended last). If it says still waiting, call it again.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"timeout_seconds": map[string]any{"type": "integer", "minimum": 1, "maximum": maxWaitSeconds, "description": "How long to wait this call (default 300)."},
+			},
+			"additionalProperties": false,
+		},
+		Annotations: map[string]any{"readOnlyHint": true},
+	},
+}
+
+// toolDefinitions is every tool tools/list offers: the edit tools, then the
+// show tools.
+var toolDefinitions = append(editToolDefinitions[:len(editToolDefinitions):len(editToolDefinitions)], showToolDefinitions...)
+
+var editToolDefinitions = []toolDefinition{
 	{
 		Name:  toolReplace,
 		Title: "Stage a text replacement",

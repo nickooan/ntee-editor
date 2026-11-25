@@ -182,3 +182,23 @@ func TestBindingsListsEveryAction(t *testing.T) {
 		t.Error("Bindings must return a fresh map")
 	}
 }
+
+func TestLegacyTerminalFormOfCtrlBacktickMatches(t *testing.T) {
+	keymap := Default()
+	if !keymap.Matches(AutoDrive, "ctrl+`") || !keymap.Matches(AutoDrive, "ctrl+space") {
+		t.Fatal("auto-drive fires on ctrl+` and on the NUL legacy terminals send for it")
+	}
+	if action, ok := keymap.ActionFor("ctrl+space"); !ok || action != AutoDrive {
+		t.Fatalf("ctrl+space resolves to auto-drive: %v %v", action, ok)
+	}
+	rebound, err := keymap.With(Exec, "ctrl+space")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if action, _ := rebound.ActionFor("ctrl+space"); action != Exec {
+		t.Fatalf("an exact binding wins over a legacy form: %v", action)
+	}
+	if keymap.Matches(Find, "ctrl+space") {
+		t.Fatal("only the chords that share the NUL byte take it")
+	}
+}

@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -19,7 +20,7 @@ func (m Model) renderDiff(width, height int) string {
 	if m.diffLoading {
 		return baseStyle.Render("computing diff…")
 	}
-	body := renderDiffDocument(m.liveDiffDocument(), m.diffPosition, diffSearchOverlay{}, nil, width, height, m.tabWidthFor(m.openRel))
+	body := renderDiffDocument(m.liveDiffDocument(), m.diffPosition, diffSearchOverlay{}, nil, diffMotionFrame{}, width, height, m.tabWidthFor(m.openRel))
 	if !m.lineNoteVisibleInDiff() {
 		return body
 	}
@@ -43,8 +44,9 @@ type diffSearchOverlay struct {
 // ctx/add rows; del rows show a blank red gutter. Only the visible window of
 // rows is rendered, and ctx/add rows use the document's highlight cache.
 // noteRows marks rows holding a note not on screen (review mode): a ◆ takes
-// the +/- marker column.
-func renderDiffDocument(document diffDocument, position rowCursor, search diffSearchOverlay, noteRows map[int]bool, width, height, tabWidth int) string {
+// the +/- marker column. motion draws a frame of a review file's change
+// animation (see drawDiffMotionRows); the zero value draws the rows as is.
+func renderDiffDocument(document diffDocument, position rowCursor, search diffSearchOverlay, noteRows map[int]bool, motion diffMotionFrame, width, height, tabWidth int) string {
 	total := len(document.rows)
 	if total == 0 {
 		return ""
@@ -55,6 +57,12 @@ func renderDiffDocument(document diffDocument, position rowCursor, search diffSe
 	gutterWidth := diffGutterWidth(document, height)
 	contentWidth := max(1, width-gutterWidth-3)
 	start := fileViewportTop(position.row, position.scrollY, height, total)
+	draw := func(i, glow int) string {
+		return renderDiffRow(document, i, position, search, noteRows[i], motion, glow, gutterWidth, contentWidth, tabWidth)
+	}
+	if motion.active() {
+		return strings.Join(drawDiffMotionRows(document, position, motion, start, gutterWidth, contentWidth, height, tabWidth, draw), "\n")
+	}
 
 	out := make([]string, 0, height)
 	for i := start; i < start+height; i++ {
@@ -62,52 +70,133 @@ func renderDiffDocument(document diffDocument, position rowCursor, search diffSe
 			out = append(out, "")
 			continue
 		}
-		row := document.rows[i]
-		text := document.rowText(i)
-
-		// The +/- marker sits in the spacer column after the number ("117+│ "),
-		// keeping the gutter exactly gutterWidth+3 columns like renderFile.
-		var number string
-		noted := noteRows[i]
-		switch row.kind {
-		case diffAdd:
-			mark := diffMarkAddStyle.Render("+")
-			if noted {
-				mark = diffNoteMarkAddStyle.Render("◆")
-			}
-			number = diffGutterAddStyle.Render(pad(strconv.Itoa(row.bufLine+1), gutterWidth)) + mark + diffGutterAddStyle.Render("│ ")
-		case diffDel:
-			mark := diffMarkDelStyle.Render("-")
-			if noted {
-				mark = diffNoteMarkDelStyle.Render("◆")
-			}
-			number = diffGutterDelStyle.Render(pad("", gutterWidth)) + mark + diffGutterDelStyle.Render("│ ")
-		default:
-			if noted {
-				number = gutterStyle.Render(pad(strconv.Itoa(row.bufLine+1), gutterWidth)) + diffNoteMarkStyle.Render("◆") + gutterStyle.Render("│ ")
-			} else {
-				number = gutterStyle.Render(pad(strconv.Itoa(row.bufLine+1), gutterWidth) + " │ ")
-			}
-		}
-
-		var content string
-		if matches := search.byLine[i]; len(matches) > 0 {
-			content = renderSearchLine(text, document.rowHighlights(i), matches, nil, search.focused, 0, contentWidth, tabWidth)
-		} else if i == position.row {
-			content = renderDiffCursorLine(text, position.column, contentWidth, diffCursorRowStyle(row.kind), tabWidth)
-		} else {
-			switch row.kind {
-			case diffAdd:
-				content = renderHighlightedLine(document.highlights, row.bufLine, text, contentWidth, hexDiffAddBg, diffAddTextStyle, tabWidth)
-			case diffDel:
-				content = plainWindowStyled(text, 0, contentWidth, diffDelTextStyle, tabWidth)
-			default:
-				content = renderHighlightedLine(document.highlights, row.bufLine, text, contentWidth, hexBg, baseStyle, tabWidth)
-			}
-		}
-		out = append(out, number+content)
+		out = append(out, draw(i, 0))
 	}
 	return strings.Join(out, "\n")
+}
+
+// drawDiffMotionRows draws one animation frame of the window from start:
+// an inserted block grows a row at a time, paced to what fits the window
+// (so a big add is as quick as a small one), with later rows moving up into
+// the room it has not taken yet; a removed block collapses from up to
+// maxGhostRows rows; new and recolored rows glow and fade to their color.
+// The cursor's row always shows.
+func drawDiffMotionRows(document diffDocument, position rowCursor, motion diffMotionFrame, start, gutterWidth, contentWidth, height, tabWidth int, draw func(i, glow int) string) []string {
+	rows, total := motion.rows, len(document.rows)
+	eased := easeOut(motion.progress)
+	inserted := func(i int) bool { return i < len(rows.inserted) && rows.inserted[i] }
+	out := make([]string, 0, height)
+	blockStart, blockEnd, visible := -1, -1, 0
+	for i := start; len(out) < height && i <= total; i++ {
+		if ghosts := rows.ghosts[i]; len(ghosts) > 0 {
+			shown := int(math.Ceil((1 - eased) * float64(min(len(ghosts), maxGhostRows))))
+			for _, text := range ghosts[:shown] {
+				if len(out) == height {
+					break
+				}
+				out = append(out, renderGhostRow(text, eased, gutterWidth, contentWidth, tabWidth))
+			}
+		}
+		if i == total || len(out) == height {
+			break
+		}
+		if !inserted(i) {
+			blockStart = -1
+			glow := 0
+			if i < len(rows.recolored) && rows.recolored[i] {
+				glow = 1
+			}
+			out = append(out, draw(i, glow))
+			continue
+		}
+		if blockStart < 0 {
+			blockStart, blockEnd = i, i
+			for blockEnd < total && blockEnd-blockStart < height && inserted(blockEnd) {
+				blockEnd++
+			}
+			visible = max(1, int(math.Ceil(eased*float64(blockEnd-blockStart))))
+		}
+		if i-blockStart < visible || i == position.row {
+			out = append(out, draw(i, 1))
+		}
+	}
+	for len(out) < height {
+		out = append(out, "")
+	}
+	return out
+}
+
+var diffGhostMarkStyle = lipgloss.NewStyle().Foreground(colRed).Bold(true)
+
+// renderGhostRow draws a row the newest load removed, while it collapses
+// out: struck through, its red fading into the editor background.
+func renderGhostRow(text string, progress float64, gutterWidth, contentWidth, tabWidth int) string {
+	background := lipgloss.Color(blendHex(hexDiffDelBg, hexBg, progress))
+	gutter := lipgloss.NewStyle().Foreground(colGutter).Background(background)
+	textStyle := lipgloss.NewStyle().Foreground(colComment).Strikethrough(true).Background(background)
+	return gutter.Render(pad("", gutterWidth)) + diffGhostMarkStyle.Background(background).Render("×") + gutter.Render("│ ") +
+		plainWindowStyled(text, 0, contentWidth, textStyle, tabWidth)
+}
+
+// Glow backgrounds a new or recolored row starts from before it fades to
+// its own (add / del / context) color.
+const (
+	hexDiffAddGlow = "#56661e"
+	hexDiffDelGlow = "#6a2c26"
+	hexCtxGlow     = "#504945"
+)
+
+// renderDiffRow draws row i of a diff document. glow > 0 lights the row's
+// background for the motion frame, fading to its resting color.
+func renderDiffRow(document diffDocument, i int, position rowCursor, search diffSearchOverlay, noted bool, motion diffMotionFrame, glow, gutterWidth, contentWidth, tabWidth int) string {
+	row := document.rows[i]
+	text := document.rowText(i)
+
+	// The +/- marker sits in the spacer column after the number ("117+│ "),
+	// keeping the gutter exactly gutterWidth+3 columns like renderFile.
+	var number string
+	switch row.kind {
+	case diffAdd:
+		mark := diffMarkAddStyle.Render("+")
+		if noted {
+			mark = diffNoteMarkAddStyle.Render("◆")
+		}
+		number = diffGutterAddStyle.Render(pad(strconv.Itoa(row.bufLine+1), gutterWidth)) + mark + diffGutterAddStyle.Render("│ ")
+	case diffDel:
+		mark := diffMarkDelStyle.Render("-")
+		if noted {
+			mark = diffNoteMarkDelStyle.Render("◆")
+		}
+		number = diffGutterDelStyle.Render(pad("", gutterWidth)) + mark + diffGutterDelStyle.Render("│ ")
+	default:
+		if noted {
+			number = gutterStyle.Render(pad(strconv.Itoa(row.bufLine+1), gutterWidth)) + diffNoteMarkStyle.Render("◆") + gutterStyle.Render("│ ")
+		} else {
+			number = gutterStyle.Render(pad(strconv.Itoa(row.bufLine+1), gutterWidth) + " │ ")
+		}
+	}
+
+	if matches := search.byLine[i]; len(matches) > 0 {
+		return number + renderSearchLine(text, document.rowHighlights(i), matches, nil, search.focused, 0, contentWidth, tabWidth)
+	}
+	if i == position.row {
+		return number + renderDiffCursorLine(text, position.column, contentWidth, diffCursorRowStyle(row.kind), tabWidth)
+	}
+	background, glowFrom, style := hexBg, hexCtxGlow, baseStyle
+	switch row.kind {
+	case diffAdd:
+		background, glowFrom, style = hexDiffAddBg, hexDiffAddGlow, diffAddTextStyle
+	case diffDel:
+		background, glowFrom, style = hexDiffDelBg, hexDiffDelGlow, diffDelTextStyle
+	}
+	if glow > 0 && motion.active() {
+		background = blendHex(glowFrom, background, easeOut(motion.progress))
+		style = style.Background(lipgloss.Color(background))
+	}
+	if row.kind == diffDel {
+		return number + plainWindowStyled(text, 0, contentWidth, style, tabWidth)
+	}
+	return number + renderHighlightedLine(document.highlights, row.bufLine, text, contentWidth, background, style, tabWidth)
 }
 
 // diffGutterWidth is the line-number column width of a diff document drawn

@@ -125,8 +125,8 @@ func TestTheReviewOfASessionStillEditedSaysApplyingWaits(t *testing.T) {
 	record, _ := m.agentEdits.registry.Snapshot("S")
 	m, cmd := m.enterAgentEditReview(record, false)
 	m = settleAgentEdits(m, cmd)
-	if status := ansi.Strip(m.renderStatusLine()); !strings.Contains(status, "agents are working… (editing · agent-a, agent-b) · Esc back to the editor") || strings.Contains(status, "a apply all") {
-		t.Fatalf("the hint says the agents work: %q", status)
+	if plain := ansi.Strip(m.View().Content); !strings.Contains(plain, "editing · agent-a, agent-b") || !strings.Contains(plain, "back to editor") || strings.Contains(plain, "apply all") {
+		t.Fatalf("the floating panel says the agents work:\n%s", plain)
 	}
 	for _, press := range []rune{'a', 'x', 'r'} {
 		locked := key(m, typeRune(press))

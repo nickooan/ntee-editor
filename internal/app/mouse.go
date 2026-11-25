@@ -377,6 +377,7 @@ func (m Model) wheelScroll(dir int) Model {
 		m.preview.position = m.preview.position.moved(dir*wheelScrollLines, m.previewSpan())
 		return m.syncPreviewSel()
 	case m.mode == modeReview:
+		m = m.pauseAutoDrive()
 		m.review.position = m.review.position.moved(dir*wheelScrollLines, m.reviewSpan())
 	case m.mode == modeExternalHistory && m.externalHistory.detailFocused:
 		m.externalHistory.detail = m.externalHistory.detail.scrolledBy(dir*wheelScrollLines, m.externalDetailSpan())

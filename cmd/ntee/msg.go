@@ -537,7 +537,7 @@ func sendMessage(args []string, options msgOptions) int {
 		if options.agent != "" && command == extmsg.CommandEnd {
 			option += " " + extmsg.AgentOption + options.agent
 		}
-		output, code = deliverRequest(socketPath, buildRequest(command, options.base, option, paths, note), session, timeout)
+		output, code = deliverRequest(socketPath, extmsg.BuildRequest(command, options.base, option, paths, note), session, timeout)
 	}
 	if code == 1 && !extmsg.IsErrorReply(output) {
 		fmt.Fprintln(os.Stderr, output)
@@ -569,10 +569,10 @@ func deliverRequest(socketPath, request string, session msgSession, timeout time
 // its exit. An editor older than the budget option refuses it; the bare wait
 // then goes out once.
 func deliverWait(socketPath string, session msgSession, timeout time.Duration) (string, int) {
-	budgeted := buildRequest(extmsg.CommandWait, "", session.option()+" "+extmsg.WaitOption+timeout.String(), nil, "")
+	budgeted := extmsg.BuildRequest(extmsg.CommandWait, "", session.option()+" "+extmsg.WaitOption+timeout.String(), nil, "")
 	output, code := deliverRequest(socketPath, budgeted, session, timeout)
 	if strings.HasPrefix(output, extmsg.ErrorReply("unknown option "+extmsg.WaitOption)) {
-		return deliverRequest(socketPath, buildRequest(extmsg.CommandWait, "", session.option(), nil, ""), session, timeout)
+		return deliverRequest(socketPath, extmsg.BuildRequest(extmsg.CommandWait, "", session.option(), nil, ""), session, timeout)
 	}
 	return output, code
 }
@@ -635,27 +635,6 @@ func checkSessionCommand(command string, paths []string, session msgSession, bas
 		}
 	}
 	return nil
-}
-
-// buildRequest is the wire text: the command, the optional session option
-// (msgSession.option) and base revision on the first line, then one path per
-// line, then the optional note after the separator line.
-func buildRequest(command, base, sessionOption string, paths []string, note string) string {
-	header := command
-	if sessionOption != "" {
-		header += " " + sessionOption
-	}
-	if base != "" {
-		header += " " + base
-	}
-	request := header + "\n"
-	if len(paths) > 0 {
-		request += strings.Join(paths, "\n") + "\n"
-	}
-	if note != "" {
-		request += extmsg.LineNoteSeparator + "\n" + note + "\n"
-	}
-	return request
 }
 
 // checkLineNote refuses a note the editor would refuse, before the request

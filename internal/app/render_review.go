@@ -2,15 +2,17 @@ package app
 
 import (
 	"fmt"
-	"github.com/nickooan/ntee-editor/internal/staging"
+	"math"
 	"path/filepath"
 	"slices"
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/nickooan/ntee-editor/internal/filetree"
 	"github.com/nickooan/ntee-editor/internal/keymap"
+	"github.com/nickooan/ntee-editor/internal/staging"
 	"github.com/nickooan/ntee-editor/internal/view"
 )
 
@@ -67,7 +69,7 @@ func (m Model) reviewSidebarRow(row int) sidebarRow {
 		if hidden := m.review.hiddenCount[entry.RelativePath]; hidden > 0 {
 			label += fmt.Sprintf("  %d", hidden)
 		}
-		return sidebarRow{segments: []sidebarSegment{{text: label, style: dirStyle}}}
+		return m.injectingReviewRow(entry.RelativePath, sidebarRow{segments: []sidebarSegment{{text: label, style: dirStyle}}})
 	}
 	file := m.review.files[m.review.fileByPath[entry.RelativePath]]
 	badge, color := reviewBadge(file.status)
@@ -85,7 +87,32 @@ func (m Model) reviewSidebarRow(row int) sidebarRow {
 			sidebarSegment{text: fmt.Sprintf("  +%d", file.document.adds), style: reviewHeaderAddStyle},
 			sidebarSegment{text: fmt.Sprintf(" −%d", file.document.dels), style: reviewHeaderDelStyle})
 	}
-	return fileRow
+	return m.injectingReviewRow(entry.RelativePath, fileRow)
+}
+
+// hexInjectGlow is the background a row injected into the review list starts
+// from, before it fades into the pane.
+const hexInjectGlow = "#4b5a1c"
+
+// injectingReviewRow draws a left-pane row that just joined the list: it
+// slides in from a few cells right and its glow fades out. Any other row is
+// returned as is.
+func (m Model) injectingReviewRow(path string, row sidebarRow) sidebarRow {
+	progress, injecting := m.reviewInjectProgress(path)
+	if !injecting {
+		return row
+	}
+	eased := easeOut(progress)
+	background := lipgloss.Color(blendHex(hexInjectGlow, hexBg, eased))
+	segments := make([]sidebarSegment, 0, len(row.segments)+1)
+	if offset := int(math.Round((1 - eased) * 4)); offset > 0 {
+		segments = append(segments, sidebarSegment{text: strings.Repeat(" ", offset), style: baseStyle.Background(background)})
+	}
+	for _, segment := range row.segments {
+		segment.style = segment.style.Background(background)
+		segments = append(segments, segment)
+	}
+	return sidebarRow{segments: segments}
 }
 
 // activateReviewRow applies a click on a left-pane row: a directory folds or
@@ -98,7 +125,7 @@ func (m Model) activateReviewRow(rowIndex int) (Model, bool) {
 	if entry.Type == "directory" {
 		return m.toggleReviewFold(entry.RelativePath), true
 	}
-	m, _ = m.selectReviewFile(m.review.fileByPath[entry.RelativePath])
+	m, _ = m.pauseAutoDrive().selectReviewFile(m.review.fileByPath[entry.RelativePath])
 	return m, true
 }
 
@@ -151,10 +178,106 @@ func (m Model) renderReview(width, height int) string {
 				focused: m.review.search.focused,
 			}
 		}
-		body = renderDiffDocument(file.document, m.review.position, search, file.noteMarkerRows(), width, rowsHeight, m.tabWidthFor(file.workspaceRel))
+		body = renderDiffDocument(file.document, m.review.position, search, file.noteMarkerRows(), m.reviewCodeFrame(file), width, rowsHeight, m.tabWidthFor(file.workspaceRel))
 		body = m.withReviewNote(file, body, width, rowsHeight)
 	}
-	return header + "\n" + body
+	return header + "\n" + m.withReviewPanel(file, body, width, rowsHeight)
+}
+
+// reviewCursorPaneRow is the cursor's row in the main pane's diff rows.
+func (m Model) reviewCursorPaneRow(file reviewFile, height int) int {
+	if !file.loaded() || len(file.document.rows) == 0 {
+		return 0
+	}
+	return m.review.position.row - fileViewportTop(m.review.position.row, m.review.position.scrollY, height, len(file.document.rows))
+}
+
+// agentEditDecisionPanel is a staged review's decision: the keys once its
+// agents finished, else who works on it and that the keys unlock after.
+// ok=false for any other review.
+func (m Model) agentEditDecisionPanel() (floatPanel, bool) {
+	id := m.review.agentEdits
+	if id == "" || m.review.agentEditsTrace {
+		return floatPanel{}, false
+	}
+	decide := []floatPanelRow{{key: "a", label: "apply all"}, {key: "x", label: "discard all"}, {key: "r", label: "request changes"}, {key: "Esc", label: "leave…"}}
+	panel := floatPanel{title: " decide ", titleStyle: floatPanelTitleStyle, rows: decide}
+	record, ok := m.agentEditsPendingRecord(id)
+	if !ok {
+		return panel, true
+	}
+	working := func(activity string, agents []string) floatPanel {
+		spinner := m.agentEditsSpinner(m.agentsWorkingRecently())
+		who := ansi.Truncate(activity+" · "+staging.AgentNames(agents)+m.agentsIdleText(), 30, "…")
+		return floatPanel{
+			title:      " " + spinner + " agents working ",
+			titleStyle: lineNoteSessionTitleStyle,
+			rows:       []floatPanelRow{{label: who}, {label: "a x r unlock when done"}, {key: "Esc", label: "back to editor"}},
+		}
+	}
+	switch {
+	case m.agentEdits.stillEditing[id]:
+		return working("editing", record.WithAgents().EditingAgents()), true
+	case m.agentEdits.checking[id]:
+		return working("checking", record.CheckingAgents()), true
+	case slices.Contains(m.sessionsAwaitingReview(), id):
+		panel.title, panel.titleStyle = " ⏳ agent waiting for you ", lineNoteSessionTitleStyle
+	}
+	return panel, true
+}
+
+// reviewFloatPanel is the review's floating panel: a live review's
+// auto-drive switch above a staged review's decision. ok=false for a review
+// with neither (a plain or trace review).
+func (m Model) reviewFloatPanel() (floatPanel, bool) {
+	panel, decides := m.agentEditDecisionPanel()
+	if !m.reviewIsLive() {
+		return panel, decides
+	}
+	rows := m.autoDriveRows()
+	if !decides {
+		return floatPanel{title: " review session " + m.review.session + " ", titleStyle: floatPanelTitleStyle, rows: rows, minimumWidth: m.autoDriveWidth()}, true
+	}
+	panel.rows = append(append(rows, floatPanelRow{rule: true}), panel.rows...)
+	panel.minimumWidth = m.autoDriveWidth()
+	return panel, true
+}
+
+// reviewPanelPlacement is where the floating panel sits over the main
+// pane's diff rows; ok=false when there is none or it doesn't fit (the
+// status line then carries the decision and the switch, as on a narrow
+// window).
+func (m Model) reviewPanelPlacement(file reviewFile, width, height int) (panel floatPanel, top, left int, ok bool) {
+	panel, ok = m.reviewFloatPanel()
+	if !ok {
+		return panel, 0, 0, false
+	}
+	top, left, ok = floatPanelPlacement(width, height, m.reviewCursorPaneRow(file, height), panel.width(), panel.height())
+	return panel, top, left, ok
+}
+
+// reviewPanelShown reports whether this frame floats the panel, from the
+// same sizes renderReview draws with.
+func (m Model) reviewPanelShown() bool {
+	file, ok := m.selectedReviewFile()
+	if !ok {
+		return false
+	}
+	_, _, _, shown := m.reviewPanelPlacement(file, max(3, m.width-m.sidebarWidth())-4, m.reviewRowsHeight())
+	return shown
+}
+
+// withReviewPanel floats the panel over the body, on top of the note box.
+func (m Model) withReviewPanel(file reviewFile, body string, width, height int) string {
+	panel, top, left, ok := m.reviewPanelPlacement(file, width, height)
+	if !ok {
+		return body
+	}
+	rows := strings.Split(body, "\n")
+	for len(rows) < height {
+		rows = append(rows, "")
+	}
+	return strings.Join(spliceFloatPanel(rows, panel, top, left), "\n")
 }
 
 // reviewNoteLabels are the borders of a review file's active note box: it
@@ -241,8 +364,18 @@ func (m Model) renderReviewStatus() string {
 	// staged review's decision leads here: it is what the user is here for,
 	// and the end of a long status line is the first thing a narrow window
 	// cuts.
-	if m.review.agentEdits != "" && !m.review.agentEditsTrace {
+	// The floating panel carries the decision and the auto-drive switch when
+	// it fits the pane.
+	panelShown := m.reviewPanelShown()
+	if m.review.agentEdits != "" && !m.review.agentEditsTrace && !panelShown {
 		line += statusTextStyle.Render("   ") + agentEditDecisionStyle.Render(m.agentEditReviewHint())
+	}
+	if m.reviewIsLive() && !panelShown {
+		state := "off"
+		if m.review.follow {
+			state = "on"
+		}
+		line += statusTextStyle.Render("   ") + hintStyle.Render("auto-drive "+state+" ("+m.keys.Label(keymap.AutoDrive)+")")
 	}
 	if !m.review.preparing && len(m.review.files) > 0 {
 		loaded := 0
@@ -310,7 +443,7 @@ func (m Model) agentEditReviewHint() string {
 }
 
 // reviewSessionBadge is the live review's mark in the status bar: how many
-// files arrived, whether the view follows new ones (or how many are
+// files arrived, whether auto-drive follows new ones (or how many are
 // unseen), and whether the agent has finished.
 func (m Model) reviewSessionBadge() string {
 	badge := fmt.Sprintf("● review session %s · %d %s", m.review.session, len(m.review.files), pluralize("file", len(m.review.files)))
@@ -318,7 +451,7 @@ func (m Model) reviewSessionBadge() string {
 	case len(m.review.unseen) > 0:
 		badge += fmt.Sprintf(" · %d new", len(m.review.unseen))
 	case m.review.follow:
-		badge += " · following"
+		badge += " · auto-drive"
 	}
 	if m.session.complete {
 		badge += " · complete"

@@ -2,7 +2,7 @@
 
 **Introduction**
 
-`ntee --mcp` serves the agent edit sessions ([staging.md](staging.md)) as MCP tools, so a coding agent stages its file edits in the user's running editor through typed tool calls: no shell heredocs, no `<<< :new` separator, no session ids or exit codes to manage. The server's `instructions` and tool descriptions teach the agent to use these tools instead of its own file-writing tools whenever an ntee editor is open on the project, and to run builds and tests only once the edits are applied.
+`ntee --mcp` serves the agent edit sessions ([staging.md](staging.md)) as MCP tools, so a coding agent stages its file edits in the user's running editor through typed tool calls: no shell heredocs, no `<<< :new` separator, no session ids or exit codes to manage. It also gives the agent **show tools**, so when the user asks to see, explain or walk through code, the agent shows it in the editor with short notes instead of pasting it into the chat. The server's `instructions` and tool descriptions teach the agent to use these tools instead of its own file-writing tools whenever an ntee editor is open on the project, and to run builds and tests only once the edits are applied.
 
 Set it up once per agent, for example in Claude Code:
 
@@ -10,7 +10,7 @@ Set it up once per agent, for example in Claude Code:
 claude mcp add ntee -- ntee --mcp
 ```
 
-The agent then sees `read_file`, `edit_replace`, `edit_write`, `edit_status`, `edit_discard`, `edit_end` and `edit_wait`. `read_file` reads a file's latest content through the editor — edits staged by any agent and not yet on disk included — so a second agent working on the project sees the first one's staged changes, and its edits to those files build on them.
+The agent then sees `read_file`, `edit_replace`, `edit_write`, `edit_status`, `edit_discard`, `edit_end` and `edit_wait` (plus the sandbox, check and report tools), and the show tools `show_code`, `walkthrough_step`, `walkthrough_end` and `walkthrough_wait`. `read_file` reads a file's latest content through the editor — edits staged by any agent and not yet on disk included — so a second agent working on the project sees the first one's staged changes, and its edits to those files build on them.
 
 The agent's own Read, Edit and Write tools only see the disk. To keep Claude Code from using them on a file with staged edits, add the optional hook `ntee --hook` to the project's `.claude/settings.json`:
 
@@ -63,9 +63,20 @@ Every part of a reply the tools act on — the phrases `overReply` and the `edit
 
 *Plus: `newEditTools`, `textResult`, `noEditorText`, `stillWaitingText`, `needsPath`, `knownTool`.*
 
+### show_tools.go
+
+The show tools change nothing; they put code in front of the user. They take no edit session, and never touch the edit tools' state.
+
+- `callShow` — one show call. `show_code` sends an `open <file>#L<line>` with the note (`extmsg.BuildRequest`): the editor opens the file at the line with the note box, or asks first when the user is busy, which the reply says plainly so the agent carries on. A **walkthrough** is a live review session (`--review-session=`): each `walkthrough_step` reviews one file, its note on its line (no line = the file's first change; `base` on the first stop picks the revision every file is compared against), so the editor's auto-drive follows the agent from stop to stop and the user can browse back. Unchanged code shows as plain context with its note. `walkthrough_end` sends `end`; `walkthrough_wait` sends a budgeted `wait` (default 300 s, at most 1 h) and says to call again while the user is still going.
+- `walkthroughFor` / `walkthroughOver` — the automatic walkthrough id (`<prefix>-walk-<n>`): the first step starts one, `walkthrough_end`, the user closing it (`ended …`, which tells the agent to stop sending stops) or a finished wait let it go, and the next step starts a new one; wait takes the current walkthrough, else the one ended last.
+- `checkShowArguments` — refuses what the editor would, before anything is sent: `show_code` needs a line, lines start at 1, a note stays under 16 KiB, `base` is one revision and only a walkthrough step takes it.
+- `forShowTools` — rewrites the editor's `ntee --msg` hints (wait, end, `--msg-base`) into tool terms.
+
+*Plus: `isShowTool`, `showNeedsPath`, `showCodeText`, `noShowEditorText` (no editor: show the code in the reply instead), `walkthroughTag`, `walkthroughWaitingText`.*
+
 ### instructions.go
 
-- `instructions` — the teaching text sent at `initialize`: when to use the tools, the read → replace → end → wait flow (read with `read_file`, since Read, Grep and Glob see only the disk), the matching rules, and what each outcome asks of the agent.
-- `toolDefinitions` — the seven tools with their JSON schemas and hints (`readOnlyHint` for read_file, status and wait; `destructiveHint` for discard).
+- `instructions` — the teaching text sent at `initialize`: when to use the tools, the read → replace → end → wait flow (read with `read_file`, since Read, Grep and Glob see only the disk), the matching rules, and what each outcome asks of the agent. Its "Showing code" part teaches the show tools: `show_code` for one key place, a walkthrough for several (read first, plan the stops in reading order, one point per stop), and how to write a note for the small box beside the code — a few short, friendly lines, light markdown, no long paragraphs.
+- `toolDefinitions` — `editToolDefinitions` then `showToolDefinitions` (no `session` property: the show tools have none), with their JSON schemas and hints (`readOnlyHint` for read_file, status and wait; `destructiveHint` for discard).
 
 *Plus: `objectSchema`, which adds the optional `session` property to every edit tool (`read_file` has its own schema, with `offset` and `limit`).*

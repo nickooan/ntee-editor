@@ -200,7 +200,11 @@ func (m Model) landAgentEditReviewRefresh(msg agentEditReviewRefreshedMsg) (tea.
 			changed = append(changed, file.workspaceRel)
 			continue
 		}
-		file.loadGen = files[index].loadGen + 1
+		// The diff on screen stays until the reload lands (no blank pane).
+		previous := files[index]
+		file.loadGen = previous.loadGen + 1
+		file.status, file.document, file.corpus, file.problem, file.contentHash = previous.status, previous.document, previous.corpus, previous.problem, previous.contentHash
+		file.reloading = previous.loaded()
 		files[index] = file
 		changed = append(changed, file.workspaceRel)
 		if file.workspaceRel == selectedPath {
@@ -222,7 +226,8 @@ func (m Model) landAgentEditReviewRefresh(msg agentEditReviewRefreshedMsg) (tea.
 		m.review.selection.index = m.review.fileByPath[selectedPath]
 	}
 	if added {
-		m = m.refreshReviewTree()
+		previousRows := m.review.rowByPath
+		m = m.refreshReviewTree().injectReviewRows(previousRows)
 	}
 	var loads []tea.Cmd
 	for _, rel := range changed {

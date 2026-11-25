@@ -157,12 +157,14 @@ func (m Model) handleReviewFileResolved(msg reviewFileResolvedMsg) (tea.Model, t
 	if selectedPath != "" {
 		m.review.selection.index = m.review.fileByPath[selectedPath]
 	}
-	m = m.refreshReviewTree()
+	previousRows := m.review.rowByPath
+	m = m.refreshReviewTree().injectReviewRows(previousRows)
 	return m.landReviewArrival(msg.file.workspaceRel, selectedPath == "")
 }
 
 // refreshReviewFile reloads a resent file with the requests' notes added:
-// the newer load wins over one still in flight (loadGen).
+// the newer load wins over one still in flight (loadGen). Its current diff
+// stays on screen until the reload lands.
 func (m Model) refreshReviewFile(index int, requests []reviewRequest) (Model, tea.Cmd) {
 	files := slices.Clone(m.review.files)
 	file := files[index]
@@ -170,7 +172,7 @@ func (m Model) refreshReviewFile(index int, requests []reviewRequest) (Model, te
 		file = m.addReviewNote(file, request)
 	}
 	file.loadGen++
-	file.status, file.document, file.corpus, file.problem = reviewLoading, diffDocument{}, "", ""
+	file.reloading = file.loaded()
 	files[index] = file
 	m.review.files = files
 	if index == m.review.selection.index {
@@ -179,17 +181,31 @@ func (m Model) refreshReviewFile(index int, requests []reviewRequest) (Model, te
 	return m.landReviewArrival(file.workspaceRel, false)
 }
 
-// landReviewArrival follows an arriving (not yet loaded) file — selects it,
-// which loads it — while the view follows or nothing is selected yet;
-// otherwise it loads in the background, marked unseen and announced in the
-// status bar.
+// landReviewArrival follows an arriving file while the view follows or
+// nothing is selected yet: a file with a diff to show (a reload) is selected
+// at once, a new one once it loaded (followPending), so the pane never goes
+// blank in between. Otherwise it loads in the background, marked unseen and
+// announced in the status bar.
 func (m Model) landReviewArrival(rel string, nothingSelected bool) (Model, tea.Cmd) {
+	if m.review.follow && !nothingSelected {
+		if current, ok := m.selectedReviewFile(); ok && current.workspaceRel == rel {
+			// Already on screen: it reloads in place and lands on its change.
+			return m, m.reviewLoadPathCmd(rel)
+		}
+		if index, ok := m.review.fileByPath[rel]; ok && !m.review.files[index].loaded() {
+			m.review.followPending = rel
+			return m, m.reviewLoadPathCmd(rel)
+		}
+	}
 	if m.review.follow || nothingSelected {
 		following := m.review.follow
 		m, load := m.selectReviewPath(rel)
 		// Arrivals can resolve out of order: following one that is not the
 		// newest must not stop the view from following.
 		m.review.follow = following
+		if file, ok := m.selectedReviewFile(); ok && following {
+			m.review.position = rowCursor{}.anchoredAt(file.driveLandingRow(), m.reviewSpanFor(file))
+		}
 		return m, load
 	}
 	load := m.reviewLoadPathCmd(rel)
@@ -206,11 +222,10 @@ func (m Model) landReviewArrival(rel string, nothingSelected bool) (Model, tea.C
 	return m, load
 }
 
-// reviewSessionSelected applies a selection to the live review: the view
-// follows arrivals again once the user is on the newest file, and the file
-// is no longer unseen.
+// reviewSessionSelected applies a selection to the live review: the file is
+// no longer unseen. Auto-drive is the user's switch (pauseAutoDrive,
+// toggleAutoDrive); a selection never turns it on by itself.
 func (m Model) reviewSessionSelected(rel string) Model {
-	m.review.follow = rel == m.review.newestPath
 	if m.review.unseen[rel] {
 		unseen := make(map[string]bool, len(m.review.unseen))
 		for path := range m.review.unseen {

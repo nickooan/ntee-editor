@@ -208,7 +208,8 @@ func TestInitializeListAndPing(t *testing.T) {
 	if initialized.ProtocolVersion != "2025-03-26" || initialized.ServerInfo.Name != "ntee" || initialized.Capabilities["tools"] == nil {
 		t.Fatalf("initialize = %+v", initialized)
 	}
-	if !strings.Contains(initialized.Instructions, "instead of your own Read/Edit/Write tools") || !strings.Contains(initialized.Instructions, "read_file before you edit") || !strings.Contains(initialized.Instructions, "edit_wait") {
+	if !strings.Contains(initialized.Instructions, "instead of your own Read/Edit/Write tools") || !strings.Contains(initialized.Instructions, "read_file before you edit") || !strings.Contains(initialized.Instructions, "edit_wait") ||
+		!strings.Contains(initialized.Instructions, "show_code") || !strings.Contains(initialized.Instructions, "walkthrough_step") {
 		t.Fatalf("instructions do not teach the flow: %q", initialized.Instructions)
 	}
 
@@ -235,7 +236,7 @@ func TestInitializeListAndPing(t *testing.T) {
 			t.Fatalf("%s has no object schema", tool.Name)
 		}
 	}
-	if got := strings.Join(names, ","); got != "edit_replace,edit_write,read_file,edit_status,edit_discard,edit_end,edit_sandbox,edit_check,edit_wait,edit_report" {
+	if got := strings.Join(names, ","); got != "edit_replace,edit_write,read_file,edit_status,edit_discard,edit_end,edit_sandbox,edit_check,edit_wait,edit_report,show_code,walkthrough_step,walkthrough_end,walkthrough_wait" {
 		t.Fatalf("tools = %s", got)
 	}
 

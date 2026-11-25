@@ -76,7 +76,7 @@ func TestReviewSessionGrowsAndFollowsArrivals(t *testing.T) {
 	if selectedReviewPath(m) != "apps/web/new.go" || !m.review.follow {
 		t.Fatalf("the view follows to the newest file: selected=%q follow=%v", selectedReviewPath(m), m.review.follow)
 	}
-	if plain := ansi.Strip(m.View().Content); !strings.Contains(plain, "● review session r1 · 2 files · following") || !strings.Contains(plain, "Esc quit session") {
+	if plain := ansi.Strip(m.View().Content); !strings.Contains(plain, "● review session r1 · 2 files · auto-drive") || !strings.Contains(plain, "Esc quit session") {
 		t.Fatalf("status shows the live session:\n%s", plain)
 	}
 	m, outcome := sendReviewFile(t, m, "r1", "libs/core/lib.go", "gone on purpose")
@@ -106,8 +106,12 @@ func TestReviewSessionStopsFollowingWhenTheUserMoves(t *testing.T) {
 	}
 	m = keySettled(m, shiftKey(tea.KeyDown))
 	m = keySettled(m, shiftKey(tea.KeyDown))
-	if selectedReviewPath(m) != "libs/core/lib.go" || !m.review.follow || len(m.review.unseen) != 0 {
-		t.Fatalf("back on the newest file the view follows again: selected=%q follow=%v unseen=%v", selectedReviewPath(m), m.review.follow, m.review.unseen)
+	if selectedReviewPath(m) != "libs/core/lib.go" || m.review.follow || len(m.review.unseen) != 0 {
+		t.Fatalf("on the newest file it is seen, and the user still drives: selected=%q follow=%v unseen=%v", selectedReviewPath(m), m.review.follow, m.review.unseen)
+	}
+	m = keySettled(m, ctrlKey('`'))
+	if !m.review.follow {
+		t.Fatal("only the auto-drive key hands the view back to the agent")
 	}
 }
 
@@ -174,6 +178,7 @@ func TestReviewSessionStepsThroughAFilesNotes(t *testing.T) {
 	if selectedReviewPath(m) != "apps/web/main.go" {
 		t.Fatalf("the resent file is followed: %q", selectedReviewPath(m))
 	}
+	m = settleReviewMotion(m)
 	plain := ansi.Strip(m.View().Content)
 	if !strings.Contains(plain, "note 2/2 · L5") || !strings.Contains(plain, "stop added") || !strings.Contains(plain, "[/] note") {
 		t.Fatalf("the active note's box counts the notes and the hint names the keys:\n%s", plain)
@@ -419,5 +424,22 @@ func TestHistoryDetailShowsEachFilesNote(t *testing.T) {
 	m.externalHistory.records = records
 	if plain := ansi.Strip(strings.Join(m.externalDetailLines(80), "\n")); !strings.Contains(plain, "apps/web/main.go#L3") || !strings.Contains(plain, "↳ Why …") {
 		t.Fatalf("the detail shows the file's note:\n%s", plain)
+	}
+}
+
+func TestAWalkthroughStopOnUnchangedCodeShowsTheCodeAndItsNote(t *testing.T) {
+	m := diffSessionWorkspace(t)
+	m, outcome := sendReviewFile(t, m, "w1", "apps/web/same.go#L3", "**same** is the shared value")
+	if !strings.Contains(outcome, "queued") || !m.choice.open() {
+		t.Fatalf("the first stop asks to start: %q", outcome)
+	}
+	m = keySettled(m, keyPress(tea.KeyEnter))
+	file, _ := m.selectedReviewFile()
+	if file.status != reviewUnchanged || m.review.position.row != 2 {
+		t.Fatalf("an unchanged file lands on its note's line: status=%v row=%d", file.status, m.review.position.row)
+	}
+	plain := ansi.Strip(m.View().Content)
+	if !strings.Contains(plain, "var same = 1") || !strings.Contains(plain, "same is the shared value") || strings.Contains(plain, "no changes against") {
+		t.Fatalf("the code shows with its note, not a no-changes placeholder:\n%s", plain)
 	}
 }

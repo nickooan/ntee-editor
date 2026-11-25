@@ -29,6 +29,7 @@ const (
 	JumpBack
 	ExpandSelection
 	Exec
+	AutoDrive
 	actionCount
 )
 
@@ -56,6 +57,7 @@ var actionSpecs = [actionCount]actionSpec{
 	JumpBack:        {"jump_back", "ctrl+o", "jump back"},
 	ExpandSelection: {"expand_selection", "ctrl+a", "expand the selection"},
 	Exec:            {"exec", "ctrl+e", "@exec bar / replace"},
+	AutoDrive:       {"auto_drive", "ctrl+`", "review: auto-drive on/off (follow the agent)"},
 }
 
 // Actions lists every action in display order.
@@ -96,17 +98,37 @@ func Default() Keymap {
 	return keymap
 }
 
+// legacyChords maps a binding to what terminals without the kitty keyboard
+// protocol send for it: Ctrl+` and Ctrl+@ both arrive as NUL, which Bubble Tea
+// reports as ctrl+space.
+var legacyChords = map[string]string{
+	"ctrl+`": "ctrl+space",
+	"ctrl+@": "ctrl+space",
+}
+
+// pressed reports whether key press key is the chord bound: the chord
+// itself, or its legacy-terminal form.
+func pressed(bound, key string) bool {
+	return bound == key || (key == "ctrl+space" && legacyChords[bound] == key)
+}
+
 // Matches reports whether a key press (tea.KeyPressMsg.String()) triggers
 // action. Called per keystroke, so it is a plain compare.
 func (k Keymap) Matches(action Action, key string) bool {
-	return k.keys[action] == key
+	return pressed(k.keys[action], key)
 }
 
 // ActionFor returns the action bound to a key press, if any. A linear scan
-// over a handful of strings: cheaper than a map and allocation-free.
+// over a handful of strings: cheaper than a map and allocation-free. An
+// exact binding wins over a legacy-terminal form.
 func (k Keymap) ActionFor(key string) (Action, bool) {
 	for index, bound := range k.keys {
 		if bound == key {
+			return Action(index), true
+		}
+	}
+	for index, bound := range k.keys {
+		if pressed(bound, key) {
 			return Action(index), true
 		}
 	}

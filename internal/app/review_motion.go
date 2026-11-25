@@ -21,6 +21,10 @@ type reviewMotion struct {
 	// Replaced, never mutated: Model copies share it.
 	injected map[string]int
 	code     *codeMotion
+	// switching: the auto-drive switch flipped at switchFrame and its chip
+	// is flashing.
+	switching   bool
+	switchFrame int
 }
 
 // codeMotion is the selected file's change animation: rows expanding in,
@@ -34,10 +38,49 @@ type codeMotion struct {
 // rowMotion is what changed between two versions of a file's diff document,
 // in the newer document's rows. ghosts are the removed rows' texts, keyed by
 // the newer row they sat before (len(rows) = past the last row).
+// previousToNext maps each older row to the same row in the newer document
+// (-1 = gone), so a cursor the user placed survives the reload.
 type rowMotion struct {
-	inserted  []bool
-	recolored []bool
-	ghosts    map[int][]string
+	inserted       []bool
+	recolored      []bool
+	ghosts         map[int][]string
+	previousToNext []int
+}
+
+// firstChangedRow is the topmost row the change touched: where auto-drive
+// puts the cursor.
+func (motion *rowMotion) firstChangedRow() (int, bool) {
+	first := -1
+	for row := range motion.inserted {
+		if motion.inserted[row] || motion.recolored[row] {
+			first = row
+			break
+		}
+	}
+	for row := range motion.ghosts {
+		if first < 0 || row < first {
+			first = row
+		}
+	}
+	if first < 0 {
+		return 0, false
+	}
+	return min(first, len(motion.inserted)-1), true
+}
+
+// carried is where previousRow sits in the newer document: the row itself,
+// else the next row that survived, else the last row.
+func (motion *rowMotion) carried(previousRow int) int {
+	last := len(motion.inserted) - 1
+	if previousRow < 0 || previousRow >= len(motion.previousToNext) {
+		return min(max(previousRow, 0), last)
+	}
+	for row := previousRow; row < len(motion.previousToNext); row++ {
+		if next := motion.previousToNext[row]; next >= 0 {
+			return next
+		}
+	}
+	return last
 }
 
 // diffMotionFrame is one frame of a rowMotion as renderDiffDocument draws
@@ -83,6 +126,9 @@ func (motion reviewMotion) running() bool {
 			return true
 		}
 	}
+	if motion.switching && motion.frame-motion.switchFrame < reviewInjectFrames {
+		return true
+	}
 	return motion.code != nil && motion.frame-motion.code.startFrame < reviewCodeFrames
 }
 
@@ -116,6 +162,9 @@ func (m Model) handleReviewMotionTick(msg reviewMotionTickMsg) (tea.Model, tea.C
 	}
 	if motion.code != nil && motion.frame-motion.code.startFrame >= reviewCodeFrames {
 		motion.code = nil
+	}
+	if motion.switching && motion.frame-motion.switchFrame >= reviewInjectFrames {
+		motion.switching = false
 	}
 	if !motion.running() {
 		motion.ticking = false
@@ -207,7 +256,10 @@ func compareReviewDocuments(previous, next diffDocument) *rowMotion {
 	for index := range next.rows {
 		nextTexts[index] = next.rowText(index)
 	}
-	motion := &rowMotion{inserted: make([]bool, len(next.rows)), recolored: make([]bool, len(next.rows))}
+	motion := &rowMotion{inserted: make([]bool, len(next.rows)), recolored: make([]bool, len(next.rows)), previousToNext: make([]int, len(previous.rows))}
+	for row := range motion.previousToNext {
+		motion.previousToNext[row] = -1
+	}
 	changed := false
 	var removed []string
 	flush := func(beforeRow int) {
@@ -229,6 +281,7 @@ func compareReviewDocuments(previous, next diffDocument) *rowMotion {
 			motion.inserted[op.BIdx], changed = true, true
 		case diff.Equal:
 			flush(op.BIdx)
+			motion.previousToNext[op.AIdx] = op.BIdx
 			if previous.rows[op.AIdx].kind != next.rows[op.BIdx].kind {
 				motion.recolored[op.BIdx], changed = true, true
 			}

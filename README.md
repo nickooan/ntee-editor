@@ -422,7 +422,16 @@ replay compares against the same revision.
 | `Ctrl+F` | find in this file (removed lines included) |
 | `Ctrl+P` | jump to a file of the review |
 | `Ctrl+G` | search across the review's files |
+| ``Ctrl+` `` | **auto-drive** on/off in a live review (a review session, or an agent's staged edits) |
 | `Esc` | leave the review |
+
+In a live review, **auto-drive** follows the agent: each file it sends or edits
+opens as it arrives, and the cursor lands on the change it just made. The
+moment you move — arrow keys, `n`/`p`, `Shift+↑/↓`, a click, the wheel, a
+search — auto-drive pauses and your view stays put, even as the agent keeps
+editing the file you are reading. The panel at the right of the code shows the
+switch (`◉ AUTO-DRIVE ON` / `○ AUTO-DRIVE OFF`); ``Ctrl+` `` jumps back to the
+agent's newest change and follows again.
 
 ### For coding agents
 
@@ -556,6 +565,7 @@ from `Ctrl+T` → **keybinds**, or edit the `keybinds:` section by hand.
 | `jump_back` | `ctrl+o` | jump back |
 | `expand_selection` | `ctrl+a` | expand the selection |
 | `exec` | `ctrl+e` | `@exec` bar (also "replace" from the find bar) |
+| `auto_drive` | ``ctrl+` `` | review: auto-drive on/off (also Ctrl+Space, what older terminals send for it) |
 
 **By hand** — list only what you change; everything else keeps its default.
 For example, goto on `Ctrl+N`, save on `F5`, and undo/redo swapped:
@@ -574,6 +584,7 @@ key does what:
 
 ```yaml
 keybinds:
+    auto_drive: ctrl+`
     exec: ctrl+e
     expand_selection: ctrl+a
     find: ctrl+f

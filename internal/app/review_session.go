@@ -188,6 +188,10 @@ func (m Model) refreshReviewFile(index int, requests []reviewRequest) (Model, te
 // announced in the status bar.
 func (m Model) landReviewArrival(rel string, nothingSelected bool) (Model, tea.Cmd) {
 	if m.review.follow && !nothingSelected {
+		if current, ok := m.selectedReviewFile(); ok && current.workspaceRel == rel {
+			// Already on screen: it reloads in place and lands on its change.
+			return m, m.reviewLoadPathCmd(rel)
+		}
 		if index, ok := m.review.fileByPath[rel]; ok && !m.review.files[index].loaded() {
 			m.review.followPending = rel
 			return m, m.reviewLoadPathCmd(rel)
@@ -199,6 +203,9 @@ func (m Model) landReviewArrival(rel string, nothingSelected bool) (Model, tea.C
 		// Arrivals can resolve out of order: following one that is not the
 		// newest must not stop the view from following.
 		m.review.follow = following
+		if file, ok := m.selectedReviewFile(); ok && following {
+			m.review.position = rowCursor{}.anchoredAt(file.driveLandingRow(), m.reviewSpanFor(file))
+		}
 		return m, load
 	}
 	load := m.reviewLoadPathCmd(rel)
@@ -215,11 +222,10 @@ func (m Model) landReviewArrival(rel string, nothingSelected bool) (Model, tea.C
 	return m, load
 }
 
-// reviewSessionSelected applies a selection to the live review: the view
-// follows arrivals again once the user is on the newest file, and the file
-// is no longer unseen.
+// reviewSessionSelected applies a selection to the live review: the file is
+// no longer unseen. Auto-drive is the user's switch (pauseAutoDrive,
+// toggleAutoDrive); a selection never turns it on by itself.
 func (m Model) reviewSessionSelected(rel string) Model {
-	m.review.follow = rel == m.review.newestPath
 	if m.review.unseen[rel] {
 		unseen := make(map[string]bool, len(m.review.unseen))
 		for path := range m.review.unseen {

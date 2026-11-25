@@ -353,7 +353,7 @@ func (m Model) handleFuzzyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		rel := m.fuzzyCorpus[matchIndex].Text
 		if m.fuzzyPrompt == fuzzyPromptReview {
-			return m.closeFuzzy().selectReviewPath(rel)
+			return m.closeFuzzy().pauseAutoDrive().selectReviewPath(rel)
 		}
 		if strings.HasSuffix(rel, "/") {
 			// Directory: drill down inside the finder instead of opening.

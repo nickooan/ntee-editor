@@ -10,16 +10,37 @@ import (
 
 // floatPanel is a small bordered box floated over a pane's right side: a
 // title on the top border and key → label rows (a row with no key is plain
-// text). Any mode can float one over its content with floatPanelPlacement
-// and spliceFloatPanel.
+// text, one with segments is drawn as styled, a rule divides sections). Any
+// mode can float one over its content with floatPanelPlacement and
+// spliceFloatPanel.
 type floatPanel struct {
 	title      string
 	titleStyle lipgloss.Style
 	rows       []floatPanelRow
+	// minimumWidth keeps the box from resizing when its rows change between
+	// states (0 = fit the rows).
+	minimumWidth int
 }
 
 type floatPanelRow struct {
 	key, label string
+	segments   []floatPanelSegment
+	rule       bool
+}
+
+// floatPanelSegment is a run of a styled row; its style sets its own
+// background.
+type floatPanelSegment struct {
+	text  string
+	style lipgloss.Style
+}
+
+func (row floatPanelRow) segmentsWidth() int {
+	width := 0
+	for _, segment := range row.segments {
+		width += ansi.StringWidth(segment.text)
+	}
+	return width
 }
 
 var (
@@ -56,12 +77,15 @@ func (panel floatPanel) width() int {
 	inner := ansi.StringWidth(panel.title) + 2
 	for _, row := range panel.rows {
 		rowWidth := ansi.StringWidth(row.label)
-		if row.key != "" {
+		switch {
+		case row.segments != nil:
+			rowWidth = row.segmentsWidth()
+		case row.key != "":
 			rowWidth += keys + 2
 		}
 		inner = max(inner, rowWidth+2*floatPanelPaddingX)
 	}
-	return inner + 2
+	return max(inner+2, panel.minimumWidth)
 }
 
 func (panel floatPanel) height() int { return len(panel.rows) + 2*floatPanelPaddingY + 2 }
@@ -81,9 +105,18 @@ func (panel floatPanel) render() []string {
 		lines = append(lines, blank)
 	}
 	for _, row := range panel.rows {
+		if row.rule {
+			lines = append(lines, floatPanelBorderStyle.Render("├"+strings.Repeat("─", horizontal)+"┤"))
+			continue
+		}
 		var body string
 		used := 0
-		if row.key != "" {
+		if row.segments != nil {
+			for _, segment := range row.segments {
+				body += segment.style.Render(segment.text)
+			}
+			used = row.segmentsWidth()
+		} else if row.key != "" {
 			body = floatPanelKeyStyle.Render(padTo(row.key, keys)) + floatPanelLabelStyle.Render("  "+row.label)
 			used = keys + 2 + ansi.StringWidth(row.label)
 		} else {

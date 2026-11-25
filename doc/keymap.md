@@ -20,6 +20,7 @@ The package is pure — no I/O, no Bubble Tea types. Keys are the strings Bubble
 | `inspect` | ctrl+t | | `jump_back` | ctrl+o |
 | `op_mode` | ctrl+r | | `expand_selection` | ctrl+a |
 | `next_tab` | shift+tab | | `exec` | ctrl+e |
+| `auto_drive` | ctrl+` | | | |
 
 `Keymap` is a fixed-size array of keys indexed by `Action` — a small value type, so the app's by-value `Model` carries it without sharing state between copies, and lookups never allocate (they run per keystroke).
 
@@ -35,7 +36,7 @@ Three rules hold for every keymap this package hands out:
 
 - `Resolve` — builds the effective keymap from the config map. It overlays the entries in sorted order, warning on unknown actions and unbindable keys. Then it removes duplicates: each pass reverts *every* override caught sharing a key (so neither side of a tie wins by map order) and repeats until none remain. Defaults never collide, so the override set shrinks every pass and the loop ends; a pure swap (undo ↔ redo) has no duplicate and survives.
 - `Keymap.With` — the edit path used by the keybinds pane and the `keybind` bar command: a copy with one action rebound, or an error naming the action that already holds the key. Rebinding an action to its own key is a no-op, not a conflict.
-- `Keymap.ActionFor` / `Keymap.Matches` — the per-keystroke lookups. `ActionFor` is a linear scan over 16 strings, cheaper than a map and allocation-free.
+- `Keymap.ActionFor` / `Keymap.Matches` — the per-keystroke lookups. `ActionFor` is a linear scan over 17 strings, cheaper than a map and allocation-free. Both also accept a chord's legacy-terminal form (`legacyChords`, via `pressed`): Ctrl+` and Ctrl+@ arrive as NUL without the kitty keyboard protocol, which Bubble Tea reports as `ctrl+space`, so `auto_drive` fires in either kind of terminal. An exact binding wins over a legacy form.
 - `Keymap.Bindings` — the full name→key map. The app always writes this whole map to `config.yaml`, so the file lists every binding explicitly; legacy files with an empty or partial section still load, with defaults filling the gaps.
 - `ValidKey` — the bindability rule above, with a readable reason on rejection.
 - `Label` — display form for hints and the pane: `ctrl+shift+s` → `Ctrl+Shift+S`.

@@ -65,6 +65,10 @@ type reviewFile struct {
 	// on the load goroutine; handleReviewLoaded takes it for the selected
 	// file and drops it otherwise.
 	motion *rowMotion
+	// changeRow is the top of the newest reload's change (hasChange): where
+	// auto-drive lands on the file.
+	changeRow int
+	hasChange bool
 }
 
 // reviewRequest is one file asked for review: its workspace path, the line
@@ -111,6 +115,8 @@ type reviewState struct {
 	follow     bool
 	newestPath string
 	unseen     map[string]bool
+	// follow is auto-drive (review_auto_drive.go): the view follows the
+	// agent's newest file and change until the user moves.
 	// followPending is an arrival the view follows once it loaded: the file
 	// on screen stays until then instead of a blank "computing diff…".
 	followPending string
@@ -619,14 +625,20 @@ func (m Model) handleReviewLoaded(msg reviewLoadedMsg) (tea.Model, tea.Cmd) {
 		}
 		// The notes may have moved on while it loaded (a step to another
 		// note); the load only brings the diff.
-		file.notes = stampReviewNotes(files[index].notes, file.contentHash)
-		file.activeNote = files[index].activeNote
+		previous := files[index]
+		file.notes = stampReviewNotes(previous.notes, file.contentHash)
+		file.activeNote = previous.activeNote
 		file.reloading = false
 		motion := file.motion
 		file.motion = nil
+		if motion != nil {
+			file.changeRow, file.hasChange = motion.firstChangedRow()
+		} else {
+			file.changeRow, file.hasChange = previous.changeRow, previous.hasChange
+		}
 		files[index] = file
 		if index == m.review.selection.index {
-			m.review.position = rowCursor{}.anchoredAt(file.landingRow(), m.reviewSpanFor(file))
+			m.review.position = m.reviewLandingAfterLoad(previous, file, motion)
 			m = m.startCodeMotion(file.workspaceRel, motion)
 		}
 		if file.workspaceRel == m.review.followPending {
@@ -763,6 +775,7 @@ func (m Model) selectReviewPath(rel string) (Model, tea.Cmd) {
 // reviewGoToGrepHit lands a Ctrl+G hit from the review-scoped grep: the
 // searched text is each file's row corpus, so the hit line is a row.
 func (m Model) reviewGoToGrepHit(hit grepHit) Model {
+	m = m.pauseAutoDrive()
 	m, _ = m.selectReviewPath(hit.rel)
 	m.review.position = m.review.position.anchoredAt(hit.line, m.reviewSpan())
 	return m

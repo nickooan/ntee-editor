@@ -31,10 +31,13 @@ func (m Model) handleReviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m.openGrepOver(m.reviewGrepFiles(), grepTargetReview), nil
+	case m.keys.Matches(keymap.AutoDrive, k):
+		return m.toggleAutoDrive()
 	}
 
 	span := m.reviewSpan()
 	if position, handled := handleRowNavigationKey(k, m.review.position, span); handled {
+		m = m.pauseAutoDrive()
 		m.review.position = position
 		return m, nil
 	}
@@ -42,6 +45,10 @@ func (m Model) handleReviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return next, cmd
 	}
 	file, _ := m.selectedReviewFile()
+	switch k {
+	case "shift+up", "shift+down", "}", "shift+]", "{", "shift+[", "n", "p", "]", "[":
+		m = m.pauseAutoDrive() // the user drives the review now
+	}
 	switch k {
 	case "esc":
 		if m.reviewSessionRunning() {
@@ -84,6 +91,7 @@ func (m Model) reviewMatchesFor(query string) []view.SearchMatch {
 func (m Model) landReviewSearch(search documentSearch, landRow int, land bool) Model {
 	m.review.search = search
 	if land {
+		m = m.pauseAutoDrive()
 		m.review.position = m.review.position.anchoredAt(landRow, m.reviewSpan())
 	}
 	return m
@@ -101,6 +109,7 @@ func (m Model) handleReviewClick(x, y int) (Model, bool) {
 	if !hit {
 		return m, false
 	}
+	m = m.pauseAutoDrive()
 	m.review.position = m.review.position.clickedAt(row, column, span)
 	return m, true
 }

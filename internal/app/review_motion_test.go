@@ -102,7 +102,7 @@ func TestReviewFollowPendingDropsWhenTheUserMoves(t *testing.T) {
 	m, _, _ := startedReviewSession(t)
 	m, cmd := m.addReviewSessionFile([]reviewRequest{{workspaceRel: "libs/core/lib.go"}})
 	m, loads := deliverRound(m, cmd, isReviewResolved)
-	m, _ = m.selectReviewPath("apps/web/main.go")
+	m = keySettled(m, shiftKey(tea.KeyUp)) // the user moves to main.go
 	m, _ = deliverRound(m, tea.Batch(loads...), isReviewLoaded)
 	if selectedReviewPath(m) != "apps/web/main.go" || m.review.follow {
 		t.Fatalf("the user's choice wins over a pending follow: selected=%q follow=%v", selectedReviewPath(m), m.review.follow)
@@ -213,11 +213,11 @@ func TestBlendHexMixesAndQuantizes(t *testing.T) {
 func TestAgentEditDecisionFallsBackToTheStatusLineWhenThePaneIsSmall(t *testing.T) {
 	m, _, receiver, _, _ := agentEditsModel(t, store.AgentEditPolicyReview)
 	m = endAgentEdits(t, m, receiver, true)
-	if !m.agentEditDecisionPanelShown() {
+	if !m.reviewPanelShown() {
 		t.Fatal("the panel floats in a regular window")
 	}
 	m.width = 44 // a 24-cell code pane
-	if m.agentEditDecisionPanelShown() {
+	if m.reviewPanelShown() {
 		t.Fatal("a narrow pane has no room for the panel")
 	}
 	if status := ansi.Strip(m.renderStatusLine()); !strings.Contains(status, "a apply all to disk") {

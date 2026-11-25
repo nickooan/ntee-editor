@@ -76,7 +76,7 @@ func TestReviewSessionGrowsAndFollowsArrivals(t *testing.T) {
 	if selectedReviewPath(m) != "apps/web/new.go" || !m.review.follow {
 		t.Fatalf("the view follows to the newest file: selected=%q follow=%v", selectedReviewPath(m), m.review.follow)
 	}
-	if plain := ansi.Strip(m.View().Content); !strings.Contains(plain, "● review session r1 · 2 files · following") || !strings.Contains(plain, "Esc quit session") {
+	if plain := ansi.Strip(m.View().Content); !strings.Contains(plain, "● review session r1 · 2 files · auto-drive") || !strings.Contains(plain, "Esc quit session") {
 		t.Fatalf("status shows the live session:\n%s", plain)
 	}
 	m, outcome := sendReviewFile(t, m, "r1", "libs/core/lib.go", "gone on purpose")
@@ -106,8 +106,12 @@ func TestReviewSessionStopsFollowingWhenTheUserMoves(t *testing.T) {
 	}
 	m = keySettled(m, shiftKey(tea.KeyDown))
 	m = keySettled(m, shiftKey(tea.KeyDown))
-	if selectedReviewPath(m) != "libs/core/lib.go" || !m.review.follow || len(m.review.unseen) != 0 {
-		t.Fatalf("back on the newest file the view follows again: selected=%q follow=%v unseen=%v", selectedReviewPath(m), m.review.follow, m.review.unseen)
+	if selectedReviewPath(m) != "libs/core/lib.go" || m.review.follow || len(m.review.unseen) != 0 {
+		t.Fatalf("on the newest file it is seen, and the user still drives: selected=%q follow=%v unseen=%v", selectedReviewPath(m), m.review.follow, m.review.unseen)
+	}
+	m = keySettled(m, ctrlKey('`'))
+	if !m.review.follow {
+		t.Fatal("only the auto-drive key hands the view back to the agent")
 	}
 }
 

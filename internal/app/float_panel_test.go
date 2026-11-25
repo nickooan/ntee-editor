@@ -31,7 +31,7 @@ func TestFloatPanelSitsBottomRightAndFlipsAtSixtyFivePercent(t *testing.T) {
 }
 
 func TestFloatPanelRendersAlignedRowsOfOneWidth(t *testing.T) {
-	panel := floatPanel{title: " decide ", titleStyle: floatPanelTitleStyle, rows: []floatPanelRow{{"a", "apply all"}, {"Esc", "leave…"}, {"", "plain text"}}}
+	panel := floatPanel{title: " decide ", titleStyle: floatPanelTitleStyle, rows: []floatPanelRow{{key: "a", label: "apply all"}, {key: "Esc", label: "leave…"}, {label: "plain text"}}}
 	lines := panel.render()
 	if len(lines) != panel.height() {
 		t.Fatalf("rows + 2 borders: %d", len(lines))
@@ -52,7 +52,7 @@ func TestAgentEditDecisionPanelFloatsOverTheCode(t *testing.T) {
 	m = endAgentEdits(t, m, receiver, true)
 	file, _ := m.selectedReviewFile()
 	width, height := max(3, m.width-m.sidebarWidth())-4, m.reviewRowsHeight()
-	panel, top, _, ok := m.agentEditDecisionPlacement(file, width, height)
+	panel, top, _, ok := m.reviewPanelPlacement(file, width, height)
 	if !ok || top != height-panel.height()-1 {
 		t.Fatalf("the panel floats at the bottom while the cursor is near the top: top=%d ok=%v", top, ok)
 	}
@@ -61,5 +61,24 @@ func TestAgentEditDecisionPanelFloatsOverTheCode(t *testing.T) {
 	}
 	if status := ansi.Strip(m.renderStatusLine()); strings.Contains(status, "a apply all to disk") {
 		t.Fatalf("the status line leaves the decision to the panel: %q", status)
+	}
+}
+
+func TestFloatPanelKeepsItsMinimumWidth(t *testing.T) {
+	panel := floatPanel{title: " t ", rows: []floatPanelRow{{label: "short"}}, minimumWidth: 30}
+	for _, line := range panel.render() {
+		if ansi.StringWidth(line) != 30 {
+			t.Fatalf("every row fills the minimum width: %q", ansi.Strip(line))
+		}
+	}
+}
+
+func TestAutoDriveSwitchNeverResizesThePanel(t *testing.T) {
+	m, _, _ := startedReviewSession(t)
+	on, _ := m.reviewFloatPanel()
+	m.review.follow = false
+	off, _ := m.reviewFloatPanel()
+	if on.width() != off.width() || on.height() != off.height() {
+		t.Fatalf("on %dx%d, off %dx%d", on.width(), on.height(), off.width(), off.height())
 	}
 }

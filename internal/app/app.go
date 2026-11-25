@@ -1198,7 +1198,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.splash {
 			return m, nil
 		}
-		return m.handleMouse(msg)
+		return withReviewMotionTick(m.handleMouse(msg)) // a click may flip auto-drive
 
 	case tea.PasteMsg:
 		if m.splash {
@@ -1255,7 +1255,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Ctrl+P / Ctrl+G to the reviewed files).
 		switch m.mode {
 		case modeReview:
-			return m.handleReviewKey(msg)
+			return withReviewMotionTick(m.handleReviewKey(msg))
 		case modeExternalHistory:
 			return m.handleExternalHistoryKey(msg)
 		}

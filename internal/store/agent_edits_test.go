@@ -64,6 +64,28 @@ func exerciseAgentEditLog(t *testing.T, log AgentEditLogStore) {
 	if finished, _ = log.LoadFinishedAgentEdits(); len(finished) != 1 || finished[0].Session != "s3" {
 		t.Fatalf("a lowered keep trims at once: %+v", finished)
 	}
+
+	reported := finished[0]
+	reported.GitBranches = map[string]string{"repo": "fix-thing"}
+	reported.GitReport = &AgentEditGitReport{Result: GitReportDone, PullRequest: "https://example.com/pull/7", At: base.Add(2 * time.Hour)}
+	if err := log.SaveFinishedAgentEdit(reported); err != nil {
+		t.Fatal(err)
+	}
+	if finished, _ = log.LoadFinishedAgentEdits(); len(finished) != 1 || finished[0].GitReport == nil || finished[0].GitReport.PullRequest != "https://example.com/pull/7" || finished[0].GitBranches["repo"] != "fix-thing" {
+		t.Fatalf("a rewritten finished record keeps its report and branches: %+v", finished)
+	}
+	if finished[0].Files[0].BaseContent != "old\n" {
+		t.Fatal("rewriting a finished record keeps its files")
+	}
+	summaries, _ := log.LoadFinishedAgentEditSummaries()
+	if len(summaries) != 1 || summaries[0].GitReport == nil || summaries[0].GitReport.Result != GitReportDone {
+		t.Fatalf("the summary carries the report too: %+v", summaries)
+	}
+	gone := reported
+	gone.Session, gone.EndedAt = "gone", base.Add(3*time.Hour)
+	if err := log.SaveFinishedAgentEdit(gone); err == nil {
+		t.Fatal("a session that never finished is not saved as finished")
+	}
 }
 
 func TestAgentEditLogWithNteeDB(t *testing.T) {

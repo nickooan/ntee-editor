@@ -701,8 +701,17 @@ func (r *Registry) EndApply(session string) {
 // status and outcome, and the git work the user asked of the agent — and
 // moves the session to the finished records, keeping the newest keep.
 func (r *Registry) Finish(session, policy string, followUp store.AgentEditGitFollowUp, results map[string]FileResult, keep int) (store.AgentEditSession, error) {
+	return r.FinishWithGitBranches(session, policy, followUp, nil, results, keep)
+}
+
+// FinishWithGitBranches is Finish, also recording each repo's checked-out
+// branch for the agent's git follow-up.
+func (r *Registry) FinishWithGitBranches(session, policy string, followUp store.AgentEditGitFollowUp, branches map[string]string, results map[string]FileResult, keep int) (store.AgentEditSession, error) {
 	return r.finish(session, keep, func(record store.AgentEditSession) store.AgentEditSession {
 		record.GitFollowUp = cmp.Or(followUp, store.GitFollowUpNone)
+		if record.GitFollowUp != store.GitFollowUpNone && len(branches) > 0 {
+			record.GitBranches = branches
+		}
 		files := slices.Clone(record.Files)
 		applied := 0
 		var notApplied []string
@@ -736,6 +745,33 @@ func (r *Registry) Finish(session, policy string, followUp store.AgentEditGitFol
 		}
 		return record
 	})
+}
+
+// RecordGitReport stores the agent's report on the git work the user asked
+// of a finished session. Reporting again replaces the earlier report.
+func (r *Registry) RecordGitReport(session string, report store.AgentEditGitReport) (store.AgentEditSession, error) {
+	record, found, err := r.log.LoadFinishedAgentEdit(session)
+	switch {
+	case err != nil:
+		return store.AgentEditSession{}, fmt.Errorf("cannot read edit session %s: %w", session, err)
+	case !found:
+		if _, pending := r.Snapshot(session); pending {
+			return store.AgentEditSession{}, fmt.Errorf("edit session %s is not applied yet — report its git work once edit_wait says it finished", session)
+		}
+		return store.AgentEditSession{}, fmt.Errorf("no finished edit session %s", session)
+	case record.GitFollowUp != store.GitFollowUpCommit && record.GitFollowUp != store.GitFollowUpPullRequest:
+		return store.AgentEditSession{}, fmt.Errorf("the user asked for no git work on edit session %s — nothing to report", session)
+	}
+	report.At = r.now()
+	record.GitReport = &report
+	if err := r.log.SaveFinishedAgentEdit(record); err != nil {
+		return store.AgentEditSession{}, fmt.Errorf("cannot save the report: %w", err)
+	}
+	summary := store.SummarizeAgentEdit(record)
+	r.mu.Lock()
+	r.finished[session] = summary
+	r.mu.Unlock()
+	return summary, nil
 }
 
 // Discard drops the session's staged edits; the record stays, marked

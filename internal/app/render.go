@@ -1274,16 +1274,20 @@ func (m Model) headerAgentLabelHit(x int) bool {
 // headerAgentEditingLabel says agents are still staging edits — the user
 // cannot apply those sessions yet. "" when none is.
 func (m Model) headerAgentEditingLabel() string {
-	spinner := splashSpinner[m.agentEdits.frame%len(splashSpinner)]
-	switch editing, checking := len(m.agentEdits.stillEditing), len(m.agentEdits.checking); {
+	spinner, idle := m.agentEditsSpinner(m.agentsWorkingRecently()), m.agentsIdleText()
+	switch editing, checking, awaiting := len(m.agentEdits.stillEditing), len(m.agentEdits.checking), len(m.sessionsAwaitingReview()); {
 	case editing == 1:
-		return spinner + " ✎ agent editing…"
+		return spinner + " ✎ agent editing…" + idle
 	case editing > 1:
-		return fmt.Sprintf("%s ✎ agents editing (%d)…", spinner, editing)
+		return fmt.Sprintf("%s ✎ agents editing (%d)…%s", spinner, editing, idle)
 	case checking == 1:
-		return spinner + " ⚙ agents checking…"
+		return spinner + " ⚙ agents checking…" + idle
 	case checking > 1:
-		return fmt.Sprintf("%s ⚙ agents checking (%d)…", spinner, checking)
+		return fmt.Sprintf("%s ⚙ agents checking (%d)…%s", spinner, checking, idle)
+	case awaiting == 1:
+		return m.agentEditsSpinner(true) + " ⏳ agent waiting for your review"
+	case awaiting > 1:
+		return fmt.Sprintf("%s ⏳ agents waiting for your review (%d)", m.agentEditsSpinner(true), awaiting)
 	}
 	return ""
 }

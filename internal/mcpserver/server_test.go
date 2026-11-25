@@ -235,7 +235,7 @@ func TestInitializeListAndPing(t *testing.T) {
 			t.Fatalf("%s has no object schema", tool.Name)
 		}
 	}
-	if got := strings.Join(names, ","); got != "edit_replace,edit_write,read_file,edit_status,edit_discard,edit_end,edit_sandbox,edit_check,edit_wait" {
+	if got := strings.Join(names, ","); got != "edit_replace,edit_write,read_file,edit_status,edit_discard,edit_end,edit_sandbox,edit_check,edit_wait,edit_report" {
 		t.Fatalf("tools = %s", got)
 	}
 
@@ -312,13 +312,91 @@ func TestReadFileNumbersTheLatestContentAndSaysWhereItCameFrom(t *testing.T) {
 	}
 
 	h.setReply(func(string) string { return "error no such file: b.go — not staged and not on disk" })
-	if result = h.call(6, toolRead, map[string]any{"path": "b.go"}); !result.IsError || result.Content[0].Text != "error no such file: b.go — not staged and not on disk" {
+	if result = h.call(6, toolRead, map[string]any{"path": filepath.Join(h.workingDir, "b.go")}); !result.IsError || result.Content[0].Text != "error no such file: b.go — not staged and not on disk" {
 		t.Fatalf("a refusal comes back as is: %+v", result)
 	}
 	h.nextRequest()
 	h.setReply(func(string) string { return extmsg.BodyReply("a.go\tmodified · +1 −0 · 1 edit\n") })
 	if result := h.call(7, toolStatus, nil); result.Content[0].Text != "a.go\tmodified · +1 −0 · 1 edit\n\nedit session: "+own {
 		t.Fatalf("status = %q", result.Content[0].Text)
+	}
+}
+
+func TestWorkingDirResolvesRelativePathsAndKeepsTheSession(t *testing.T) {
+	h := newHarness(t)
+	session := h.sessionTag + "1"
+	agent := strings.TrimSuffix(h.sessionTag, "-")
+	otherRepo := t.TempDir()
+
+	h.setReply(func(string) string { return "ok staged a.go" })
+	h.call(1, toolWrite, map[string]any{"path": "a.go", "content": "x"})
+	if got := h.nextRequest(); !strings.Contains(got, filepath.Join(h.workingDir, "a.go")) {
+		t.Fatalf("without working_dir a relative path resolves against the launch folder: %q", got)
+	}
+
+	result := h.call(2, toolWrite, map[string]any{"path": "b.go", "content": "y", "working_dir": otherRepo})
+	want, _ := extmsg.EditRequest(extmsg.CommandWrite, session, agent, filepath.Join(otherRepo, "b.go"), "y")
+	if got := h.nextRequest(); got != want {
+		t.Fatalf("working_dir request = %q, want %q", got, want)
+	}
+	if text := result.Content[0].Text; !strings.HasPrefix(text, "working_dir now "+otherRepo+" (") || !strings.HasSuffix(text, "edit session: "+session) {
+		t.Fatalf("a changed working_dir is named and the session is kept: %q", text)
+	}
+
+	result = h.call(3, toolWrite, map[string]any{"path": "c.go", "content": "z", "working_dir": otherRepo})
+	if got := h.nextRequest(); !strings.Contains(got, filepath.Join(otherRepo, "c.go")) {
+		t.Fatalf("an unchanged working_dir still resolves: %q", got)
+	}
+	if strings.Contains(result.Content[0].Text, "working_dir now") {
+		t.Fatalf("an unchanged working_dir is not announced again: %q", result.Content[0].Text)
+	}
+
+	h.setReply(func(string) string { return extmsg.BodyReplyWith("x\n", "disk") })
+	h.call(4, toolRead, map[string]any{"path": "d.go"})
+	if got := h.nextRequest(); !strings.Contains(got, filepath.Join(otherRepo, "d.go")) {
+		t.Fatalf("later calls without working_dir keep the last one: %q", got)
+	}
+
+	h.setReply(func(string) string { return "ok sandbox /tmp/box" })
+	h.call(5, toolSandbox, map[string]any{"include": []string{"lib"}})
+	if got := h.nextRequest(); !strings.Contains(got, filepath.Join(otherRepo, "lib")) {
+		t.Fatalf("sandbox include resolves against working_dir: %q", got)
+	}
+}
+
+func TestWorkingDirIsRefusedWithoutSendingWhenItIsNotAnAbsoluteFolder(t *testing.T) {
+	h := newHarness(t)
+	file := filepath.Join(h.workingDir, "file.txt")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		tool      string
+		arguments map[string]any
+		want      string
+	}{
+		{toolRead, map[string]any{"path": "a.go", "working_dir": "relative/dir"}, "working_dir must be an absolute folder"},
+		{toolRead, map[string]any{"path": "a.go", "working_dir": filepath.Join(h.workingDir, "missing")}, "is not an existing folder"},
+		{toolRead, map[string]any{"path": "a.go", "working_dir": file}, "is not an existing folder"},
+		{toolEnd, map[string]any{"working_dir": h.workingDir}, "edit_end takes no working_dir"},
+	}
+	for index, test := range cases {
+		result := h.call(index+1, test.tool, test.arguments)
+		if !result.IsError || !strings.Contains(result.Content[0].Text, test.want) {
+			t.Fatalf("%v = %+v, want error containing %q", test.arguments, result, test.want)
+		}
+		h.noRequest()
+	}
+}
+
+func TestAMissingRelativeFileNamesTheFolderItResolvedAgainst(t *testing.T) {
+	h := newHarness(t)
+	h.setReply(func(string) string { return "error no such file: launch/b.go — not staged and not on disk" })
+	result := h.call(1, toolRead, map[string]any{"path": "b.go"})
+	h.nextRequest()
+	want := "error no such file: launch/b.go — not staged and not on disk\n(b.go resolved against " + h.workingDir + " — if your current folder is elsewhere, pass working_dir or an absolute path)"
+	if !result.IsError || result.Content[0].Text != want {
+		t.Fatalf("missing relative file = %q", result.Content[0].Text)
 	}
 }
 
@@ -726,6 +804,10 @@ func TestToolTermsReplaceCLIHints(t *testing.T) {
 			t.Fatalf("forTools(%q) = %q, want %q", reply, got, want)
 		}
 	}
+	reportHint := "once done, blocked or declined, report it — run: ntee --msg --msg-edit-session e1 --msg-note '<what happened>' report done|blocked|declined [commit=<sha>] [pr=<url>]"
+	if got := forTools(reportHint); got != "once done, blocked or declined, report it — call edit_report (result done, blocked or declined; commit or pull_request when you made one; a note saying what happened)" {
+		t.Fatalf("the report hint is in tool terms: %q", got)
+	}
 }
 
 func TestAChangeRequestSendsTheNextEditBackToTheSession(t *testing.T) {
@@ -754,6 +836,56 @@ func TestAChangeRequestSendsTheNextEditBackToTheSession(t *testing.T) {
 	h.call(4, toolReplace, map[string]any{"path": "a.go", "old_text": "x", "new_text": "y"})
 	if got := h.nextRequest(); !strings.HasPrefix(got, "replace --edit-session="+session+" ") {
 		t.Fatalf("the follow-up goes to the same session, open for edits again: %q", got)
+	}
+}
+
+func TestEditReportGoesToTheSessionThatEndedLast(t *testing.T) {
+	h := newHarness(t)
+	session := h.sessionTag + "1"
+	if result := h.call(1, toolReport, map[string]any{"result": "done"}); !result.IsError || !strings.Contains(result.Content[0].Text, "no edit session to report on") {
+		t.Fatalf("no session yet: %+v", result)
+	}
+	h.noRequest()
+
+	h.call(2, toolWrite, map[string]any{"path": "a.go", "content": "x"})
+	h.nextRequest()
+	h.setReply(func(string) string {
+		return "ok edit session " + session + " ended — the user is reviewing 1 staged file"
+	})
+	h.call(3, toolEnd, nil)
+	h.nextRequest()
+	h.setReply(func(string) string {
+		return "ok finished — edit session " + session + " applied 1 file · the user asks you to commit"
+	})
+	h.call(4, toolWait, nil)
+	h.nextRequest()
+
+	h.setReply(func(string) string {
+		return "ok report recorded — the user sees edit session " + session + " as commit done abc123"
+	})
+	result := h.call(5, toolReport, map[string]any{"result": "done", "commit": "abc123", "note": "committed on main"})
+	want := extmsg.ReportRequest(session, extmsg.ReportArgs{Result: "done", Commit: "abc123"}, "committed on main")
+	if got := h.nextRequest(); got != want {
+		t.Fatalf("report request = %q, want %q", got, want)
+	}
+	if result.IsError || !strings.Contains(result.Content[0].Text, "commit done abc123") {
+		t.Fatalf("report result = %+v", result)
+	}
+}
+
+func TestEditReportIsRefusedWithoutSendingWhenItsArgumentsAreBad(t *testing.T) {
+	h := newHarness(t)
+	cases := []map[string]any{
+		{"session": "e1"},
+		{"session": "e1", "result": "maybe"},
+		{"session": "e1", "result": "done", "commit": "abc 123"},
+		{"session": "e1", "result": "done", "pull_request": "https://example.com/a b"},
+	}
+	for index, arguments := range cases {
+		if result := h.call(index+1, toolReport, arguments); !result.IsError {
+			t.Fatalf("%v should be refused: %+v", arguments, result)
+		}
+		h.noRequest()
 	}
 }
 

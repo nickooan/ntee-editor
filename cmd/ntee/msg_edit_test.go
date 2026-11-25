@@ -110,6 +110,7 @@ func TestMsgHelpExplainsEditSessions(t *testing.T) {
 		"Several agents may share one session: name yourself with --msg-agent",
 		"ntee --msg --msg-edit-session <id> sandbox [fresh|drop] [<folder>…]",
 		"check pass|fail|skip",
+		"report done|blocked|declined [commit=<sha>] [pr=<url>]",
 		"--msg-expect <v> on your next write or replace",
 		"Once every agent in the session sent end, it finalises",
 	} {

@@ -2,7 +2,10 @@ package app
 
 import (
 	"cmp"
+	"fmt"
+	"maps"
 	"path/filepath"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -56,6 +59,12 @@ type agentEditsState struct {
 	// agentEditsAnimationIdle without one (a restored session whose agent is
 	// gone), and starts again on the next.
 	lastActivityAt time.Time
+	// lastSeenAt is each session's latest agent call that changed nothing
+	// (a read, a sandbox, a status), and waitExpiredAt when its last waiter
+	// gave up: both keep the label honest about an agent still there.
+	// Replaced, never mutated.
+	lastSeenAt    map[string]time.Time
+	waitExpiredAt map[string]time.Time
 	// typingPause is how long the user must have stopped typing before an
 	// agent edit session may move them to its review: a keystroke meant for
 	// the editor must never land on the review's a/x/r.
@@ -117,12 +126,80 @@ func (m Model) agentsWorking() bool {
 
 // agentEditsAnimationIdle is how long the header label animates after the
 // working sessions' last activity: a redraw ~7 times a second is for agents
-// visibly at work, not for one that went quiet hours ago.
-const agentEditsAnimationIdle = 2 * time.Minute
+// visibly at work, not for one that went quiet hours ago. It is long enough
+// for a build or test run between calls, which the editor cannot see.
+const agentEditsAnimationIdle = 10 * time.Minute
+
+// agentEditWaitGrace keeps a session counted as awaited for a moment after
+// its waiter gave up: the agent's next edit_wait is on its way.
+const agentEditWaitGrace = 5 * time.Second
 
 // agentsAnimating reports whether the header label should animate.
 func (m Model) agentsAnimating() bool {
-	return m.agentsWorking() && time.Since(m.agentEdits.lastActivityAt) < agentEditsAnimationIdle
+	return m.agentsWorkingRecently() || len(m.sessionsAwaitingReview()) > 0
+}
+
+func (m Model) agentsWorkingRecently() bool {
+	return m.agentsWorking() && m.agentsQuietFor() < agentEditsAnimationIdle
+}
+
+func (m Model) agentsQuietFor() time.Duration {
+	return time.Since(m.agentEdits.lastActivityAt)
+}
+
+// sessionsAwaitingReview are the pending sessions an agent is blocked on in
+// edit_wait while no agent edits or checks them: the user's turn.
+func (m Model) sessionsAwaitingReview() []string {
+	var awaited []string
+	for _, session := range m.agentEdits.pending {
+		id := session.Session
+		if m.agentEdits.stillEditing[id] || m.agentEdits.checking[id] {
+			continue
+		}
+		if len(m.agentEdits.waiters[id]) > 0 || time.Since(m.agentEdits.waitExpiredAt[id]) < agentEditWaitGrace {
+			awaited = append(awaited, id)
+		}
+	}
+	return awaited
+}
+
+// agentEditsSpinner is the animation frame while agents visibly work, and a
+// still mark once they went quiet, so a stopped tick never shows a frozen
+// frame.
+func (m Model) agentEditsSpinner(animated bool) string {
+	if !animated {
+		return "·"
+	}
+	return splashSpinner[m.agentEdits.frame%len(splashSpinner)]
+}
+
+// agentsIdleText is " · idle 12m" once the working agents went quiet past
+// the animation, else "".
+func (m Model) agentsIdleText() string {
+	if quiet := m.agentsQuietFor(); quiet >= agentEditsAnimationIdle {
+		return fmt.Sprintf(" · idle %dm", int(quiet.Minutes()))
+	}
+	return ""
+}
+
+// agentEditsSeenMsg says an agent called in for the session without
+// changing it.
+type agentEditsSeenMsg struct {
+	session string
+}
+
+func (m Model) handleAgentEditsSeen(msg agentEditsSeenMsg) (tea.Model, tea.Cmd) {
+	now := time.Now()
+	lastSeen := maps.Clone(m.agentEdits.lastSeenAt)
+	if lastSeen == nil {
+		lastSeen = map[string]time.Time{}
+	}
+	lastSeen[msg.session] = now
+	m.agentEdits.lastSeenAt = lastSeen
+	if (m.agentEdits.stillEditing[msg.session] || m.agentEdits.checking[msg.session]) && now.After(m.agentEdits.lastActivityAt) {
+		m.agentEdits.lastActivityAt = now
+	}
+	return m, nil
 }
 
 // sessionLastActivity is the newest timestamp the session's agents left.
@@ -188,7 +265,11 @@ func (m Model) refreshAgentEditsPending() Model {
 			default:
 				continue
 			}
-			if activity := sessionLastActivity(session); activity.After(m.agentEdits.lastActivityAt) {
+			activity := sessionLastActivity(session)
+			if seen := m.agentEdits.lastSeenAt[session.Session]; seen.After(activity) {
+				activity = seen
+			}
+			if activity.After(m.agentEdits.lastActivityAt) {
 				m.agentEdits.lastActivityAt = activity
 			}
 		}
@@ -307,7 +388,42 @@ func (m Model) handleAgentEditsFinishedList(msg agentEditsFinishedListMsg) (tea.
 // moved; a session the agent discarded ends for its waiters and leaves the
 // screen.
 func (m Model) handleAgentEditsChanged(msg agentEditsChangedMsg) (tea.Model, tea.Cmd) {
+	before, _ := m.agentEditsPendingRecord(msg.session)
 	m = m.refreshAgentEditsPending()
+	next, cmd := m.handleAgentEditsChangedRefreshed(msg)
+	if after, ok := m.agentEditsPendingRecord(msg.session); ok && len(before.Files) > 0 {
+		if added := m.agentEditReposAdded(before, after); len(added) > 0 {
+			model := next.(Model)
+			model.notice = "✎ edit session " + msg.session + " · now also in " + strings.Join(added, ", ")
+			if model.mode == modeReview && model.review.agentEdits == msg.session {
+				model.notice += " · {/} jumps between repos"
+			}
+			return model, cmd
+		}
+	}
+	return next, cmd
+}
+
+// agentEditReposAdded are the repos after's files reach that before's did
+// not, in after's file order.
+func (m Model) agentEditReposAdded(before, after store.AgentEditSession) []string {
+	known := map[string]bool{}
+	for _, file := range before.Files {
+		if name, _, ok := m.agentEditRepoOf(file.Rel); ok {
+			known[name] = true
+		}
+	}
+	var added []string
+	for _, file := range after.Files {
+		if name, _, ok := m.agentEditRepoOf(file.Rel); ok && !known[name] {
+			known[name] = true
+			added = append(added, name)
+		}
+	}
+	return added
+}
+
+func (m Model) handleAgentEditsChangedRefreshed(msg agentEditsChangedMsg) (tea.Model, tea.Cmd) {
 	if record, ok := m.agentEdits.registry.Finished(msg.session); ok {
 		m = m.agentEditSessionOver(msg.session, record)
 		m.notice = "edit session " + msg.session + " " + record.Outcome

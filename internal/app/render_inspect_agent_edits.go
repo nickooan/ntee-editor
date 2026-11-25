@@ -122,8 +122,8 @@ func agentEditSessionRow(record store.AgentEditSession, pending bool) panelRow {
 		style = panelWarnStyle
 	}
 	detail := "  " + files + " · " + agentEditTime(record.EndedAt)
-	if label := gitFollowUpLabel(record.GitFollowUp); label != "" && record.Status != store.AgentEditDiscarded {
-		detail += " · " + label + " asked"
+	if label := gitReportLabel(record); label != "" && record.Status != store.AgentEditDiscarded {
+		detail += " · " + label
 	}
 	return panelRow{label: record.Session, pieces: []string{
 		style.Render(string(record.Status)) + panelDimStyle.Render(detail),

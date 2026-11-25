@@ -38,12 +38,16 @@ func checkEditCommand(command string, paths []string, session msgSession, base s
 		if len(paths) != 1 || paths[0] != extmsg.CheckPass && paths[0] != extmsg.CheckFail && paths[0] != extmsg.CheckSkip {
 			return errors.New("check takes one result: pass, fail or skip (say what you ran with --msg-note)")
 		}
+	case extmsg.CommandReport:
+		if _, err := extmsg.ParseReportArgs(paths); err != nil {
+			return err
+		}
 	case extmsg.CommandStatus, extmsg.CommandDiscard, extmsg.CommandEnd, extmsg.CommandWait:
 		if len(paths) > 0 {
 			return fmt.Errorf("%s takes no paths: ntee --msg %s %s %s", command, session.flag(), session.id, command)
 		}
 	default:
-		return errors.New("--msg-edit-session goes with write, replace, show, read, staged, status, discard, sandbox, check, end and wait")
+		return errors.New("--msg-edit-session goes with write, replace, show, read, staged, status, discard, sandbox, check, report, end and wait")
 	}
 	return nil
 }
@@ -58,11 +62,15 @@ func sendEditCommand(command string, paths []string, session msgSession, options
 		return 1
 	}
 	mode := ""
+	var report extmsg.ReportArgs
 	switch {
 	case command == extmsg.CommandSandbox && len(paths) > 0 && (paths[0] == extmsg.SandboxFresh || paths[0] == extmsg.SandboxDrop):
 		mode, paths = paths[0], paths[1:]
 	case command == extmsg.CommandCheck:
 		mode, paths = paths[0], nil // the result, not a path
+	case command == extmsg.CommandReport:
+		report, _ = extmsg.ParseReportArgs(paths) // checked by checkEditCommand
+		paths = nil
 	}
 	for index, path := range paths {
 		absolute, err := filepath.Abs(path)
@@ -111,6 +119,8 @@ func sendEditCommand(command string, paths []string, session msgSession, options
 		request, timeout = extmsg.SandboxRequest(session.id, mode, paths), editSandboxTimeout
 	case extmsg.CommandCheck:
 		request = extmsg.CheckRequest(session.id, options.agent, mode, options.note)
+	case extmsg.CommandReport:
+		request = extmsg.ReportRequest(session.id, report, options.note)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)

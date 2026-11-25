@@ -39,6 +39,7 @@ const (
 	toolWait    = "edit_wait"
 	toolSandbox = "edit_sandbox"
 	toolCheck   = "edit_check"
+	toolReport  = "edit_report"
 )
 
 type toolArguments struct {
@@ -57,6 +58,9 @@ type toolArguments struct {
 	Include        []string `json:"include"`
 	Result         string   `json:"result"`
 	Note           string   `json:"note"`
+	WorkingDir     string   `json:"working_dir"`
+	Commit         string   `json:"commit"`
+	PullRequest    string   `json:"pull_request"`
 }
 
 type textContent struct {
@@ -94,11 +98,45 @@ type editTools struct {
 	// or an edit's reply), sent with its next edit so a change made under
 	// it by another agent is caught.
 	versions map[string]string
+	// workingDir resolves relative paths: the launch folder until the agent
+	// names another with working_dir. Changing it never touches the session.
+	workingDir string
 }
 
 func newEditTools(config Config) *editTools {
 	stamp := config.Now().Format("20060102-150405")
-	return &editTools{config: config, prefix: "mcp-" + stamp + "-" + strconv.Itoa(os.Getpid()), versions: map[string]string{}}
+	return &editTools{config: config, prefix: "mcp-" + stamp + "-" + strconv.Itoa(os.Getpid()), versions: map[string]string{}, workingDir: config.WorkingDir}
+}
+
+func (tools *editTools) currentWorkingDir() string {
+	tools.mu.Lock()
+	defer tools.mu.Unlock()
+	return tools.workingDir
+}
+
+// useWorkingDir checks a working_dir argument and makes it the base for
+// relative paths; changed reports whether it differs from the last one.
+func (tools *editTools) useWorkingDir(folder string) (changed bool, err error) {
+	if !filepath.IsAbs(folder) {
+		return false, fmt.Errorf("working_dir must be an absolute folder, got %q", folder)
+	}
+	info, err := os.Stat(folder)
+	if err != nil || !info.IsDir() {
+		return false, fmt.Errorf("working_dir %s is not an existing folder", folder)
+	}
+	folder = filepath.Clean(folder)
+	tools.mu.Lock()
+	defer tools.mu.Unlock()
+	changed = folder != tools.workingDir
+	tools.workingDir = folder
+	return changed, nil
+}
+
+func (tools *editTools) resolve(path string) string {
+	if filepath.IsAbs(path) {
+		return path
+	}
+	return filepath.Join(tools.currentWorkingDir(), path)
 }
 
 // sessionFor picks the call's session: the explicit one, else (for wait)
@@ -124,14 +162,14 @@ func (tools *editTools) sessionFor(name, explicit string) (string, error) {
 			return session, nil
 		}
 		return "", fmt.Errorf("no edit session yet — stage your edits and call %s first, or pass session", toolEnd)
-	case toolWait:
+	case toolWait, toolReport:
 		if tools.lastEnded != "" {
 			return tools.lastEnded, nil
 		}
 		if tools.current != "" {
 			return tools.current, nil
 		}
-		return "", fmt.Errorf("no edit session to wait on — call %s first, or pass session", toolEnd)
+		return "", fmt.Errorf("no edit session to %s — call %s first, or pass session", map[string]string{toolWait: "wait on", toolReport: "report on"}[name], toolEnd)
 	case toolReplace, toolWrite:
 		switch {
 		case tools.current != "":
@@ -220,16 +258,36 @@ func (tools *editTools) call(ctx context.Context, name string, raw json.RawMessa
 			return textResult("bad arguments: "+err.Error(), true)
 		}
 	}
+	if arguments.WorkingDir != "" && !takesWorkingDir(name) {
+		return textResult(name+" takes no working_dir", true)
+	}
+	workingDirNote := ""
+	if arguments.WorkingDir != "" {
+		changed, err := tools.useWorkingDir(arguments.WorkingDir)
+		if err != nil {
+			return textResult(err.Error()+" — nothing was sent", true)
+		}
+		if changed {
+			workingDirNote = "working_dir now " + tools.currentWorkingDir() + " (relative paths resolve against it; your edit session is unchanged)\n"
+		}
+	}
+	result := tools.callEditor(ctx, name, arguments)
+	if result.IsError && needsPath(name) && !filepath.IsAbs(arguments.Path) && strings.Contains(result.Content[0].Text, "no such file") {
+		result.Content[0].Text += "\n(" + arguments.Path + " resolved against " + tools.currentWorkingDir() +
+			" — if your current folder is elsewhere, pass working_dir or an absolute path)"
+	}
+	result.Content[0].Text = workingDirNote + result.Content[0].Text
+	return result
+}
+
+func (tools *editTools) callEditor(ctx context.Context, name string, arguments toolArguments) toolResult {
 	command, payload, err := commandFor(name, arguments)
 	if err != nil {
 		return textResult(err.Error(), true)
 	}
 	absolutePath := ""
 	if needsPath(name) {
-		absolutePath = arguments.Path
-		if !filepath.IsAbs(absolutePath) {
-			absolutePath = filepath.Join(tools.config.WorkingDir, absolutePath)
-		}
+		absolutePath = tools.resolve(arguments.Path)
 	}
 	var paths []string
 	if absolutePath != "" {
@@ -255,6 +313,8 @@ func (tools *editTools) call(ctx context.Context, name string, raw json.RawMessa
 		request, timeout = extmsg.EditWaitRequest(session, budget), budget+waitReplyMargin
 	case toolCheck:
 		request = extmsg.CheckRequest(session, tools.prefix, arguments.Result, arguments.Note)
+	case toolReport:
+		request = extmsg.ReportRequest(session, extmsg.ReportArgs{Result: arguments.Result, Commit: arguments.Commit, PullRequest: arguments.PullRequest}, arguments.Note)
 	case toolSandbox:
 		mode := ""
 		switch {
@@ -265,10 +325,7 @@ func (tools *editTools) call(ctx context.Context, name string, raw json.RawMessa
 		}
 		include := make([]string, len(arguments.Include))
 		for index, folder := range arguments.Include {
-			if !filepath.IsAbs(folder) {
-				folder = filepath.Join(tools.config.WorkingDir, folder)
-			}
-			include[index] = folder
+			include[index] = tools.resolve(folder)
 		}
 		request, timeout = extmsg.SandboxRequest(session, mode, include), tools.config.SandboxTimeout
 	default:
@@ -315,7 +372,7 @@ func (tools *editTools) call(ctx context.Context, name string, raw json.RawMessa
 		if (name == toolReplace || name == toolWrite) && arguments.Session == "" && strings.Contains(line, extmsg.PhraseStartNewSession) {
 			// The session this edit went to is the user's now: the edit
 			// opens a new one (which builds on it) instead.
-			return tools.call(ctx, name, raw)
+			return tools.callEditor(ctx, name, arguments)
 		}
 	}
 	switch {
@@ -393,6 +450,14 @@ func commandFor(name string, arguments toolArguments) (command, payload string, 
 			return "", "", fmt.Errorf("%s needs result: pass, fail or skip", name)
 		}
 		return extmsg.CommandCheck, "", nil
+	case toolReport:
+		if arguments.Result != extmsg.ReportDone && arguments.Result != extmsg.ReportBlocked && arguments.Result != extmsg.ReportDeclined {
+			return "", "", fmt.Errorf("%s needs result: done, blocked or declined", name)
+		}
+		if strings.ContainsAny(arguments.Commit+arguments.PullRequest, " \t\n") {
+			return "", "", fmt.Errorf("commit and pull_request take a sha and a URL, without spaces")
+		}
+		return extmsg.CommandReport, "", nil
 	case toolSandbox:
 		if arguments.Drop && (arguments.Fresh || len(arguments.Include) > 0) {
 			return "", "", fmt.Errorf("drop takes neither fresh nor include")
@@ -411,6 +476,10 @@ func needsPath(name string) bool {
 	return name == toolReplace || name == toolWrite || name == toolRead
 }
 
+func takesWorkingDir(name string) bool {
+	return needsPath(name) || name == toolSandbox
+}
+
 func knownTool(name string) bool {
 	for _, definition := range toolDefinitions {
 		if definition.Name == name {
@@ -424,6 +493,8 @@ var cliWaitHint = regexp.MustCompile(`run: ntee --msg --msg-edit-session \S+ wai
 
 var cliSandboxHint = regexp.MustCompile(`run: ntee --msg --msg-edit-session \S+ sandbox`)
 
+var cliReportHint = regexp.MustCompile(`run: ntee --msg --msg-edit-session \S+ --msg-note '<what happened>' report done\|blocked\|declined \[commit=<sha>\] \[pr=<url>\]`)
+
 // hintsForTools rewrites the editor's ntee --msg hints into tool terms.
 var hintsForTools = strings.NewReplacer(
 	"ntee --msg show prints", toolRead+" shows",
@@ -436,6 +507,7 @@ var hintsForTools = strings.NewReplacer(
 )
 
 func forTools(reply string) string {
+	reply = cliReportHint.ReplaceAllString(reply, "call "+toolReport+" (result done, blocked or declined; commit or pull_request when you made one; a note saying what happened)")
 	reply = cliSandboxHint.ReplaceAllString(reply, "call "+toolSandbox)
 	return hintsForTools.Replace(cliWaitHint.ReplaceAllString(reply, "call "+toolWait))
 }

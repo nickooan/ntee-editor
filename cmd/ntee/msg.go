@@ -210,6 +210,7 @@ Edit sessions — stage your file edits in the editor instead of writing them:
   ntee --msg --msg-edit-session <id> discard
   ntee --msg --msg-edit-session <id> sandbox [fresh|drop] [<folder>…]
   ntee --msg --msg-edit-session <id> [--msg-agent <name>] [--msg-note "<what you ran>"] check pass|fail|skip
+  ntee --msg --msg-edit-session <id> [--msg-note "<what happened>"] report done|blocked|declined [commit=<sha>] [pr=<url>]
   ntee --msg --msg-edit-session <id> end
   ntee --msg --msg-edit-session <id> --msg-wait 1h wait
       Each edit is kept in the editor, not written to the file: the files on
@@ -664,7 +665,7 @@ func checkLineNote(command string, paths []string, note string, session msgSessi
 	if strings.TrimSpace(note) == "" {
 		return nil
 	}
-	if command == extmsg.CommandReview && session.kind == extmsg.SessionReview || command == extmsg.CommandCheck && session.kind == extmsg.SessionEdit {
+	if command == extmsg.CommandReview && session.kind == extmsg.SessionReview || (command == extmsg.CommandCheck || command == extmsg.CommandReport) && session.kind == extmsg.SessionEdit {
 		return nil
 	}
 	if command != extmsg.CommandOpen {

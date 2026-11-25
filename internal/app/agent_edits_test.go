@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -369,6 +370,77 @@ func stagedReviewWith(t *testing.T, prepare func(Model) Model) (Model, string, c
 	return m, root, waitReply
 }
 
+func TestASessionSpreadingIntoAnotherRepoIsAnnouncedAndTheReviewJumpsBetweenRepos(t *testing.T) {
+	m, root, receiver, _, settings := agentEditsModel(t, store.AgentEditPolicyReview)
+	must(t, os.MkdirAll(filepath.Join(root, "app"), 0o755))
+	must(t, os.WriteFile(filepath.Join(root, "app", "a.go"), []byte("package app\n"), 0o644))
+	m.workspaceRepos = []string{"app", "lib"}
+
+	receiver.Handle("write --edit-session=e1\napp/a.go\n---\npackage app // one\n")
+	m, _ = deliver(m, agentEditsChangedMsg{session: "e1"})
+	if strings.Contains(m.notice, "now also in") {
+		t.Fatalf("the first repo is no spread: %q", m.notice)
+	}
+	receiver.Handle("write --edit-session=e1\napp/b.go\n---\npackage app // two\n")
+	m, _ = deliver(m, agentEditsChangedMsg{session: "e1"})
+	if strings.Contains(m.notice, "now also in") {
+		t.Fatalf("another file in the same repo is no spread: %q", m.notice)
+	}
+	receiver.Handle("write --edit-session=e1\nlib/util.ts\n---\nexport const two = 2\n")
+	m, _ = deliver(m, agentEditsChangedMsg{session: "e1"})
+	if m.notice != "✎ edit session e1 · now also in lib" {
+		t.Fatalf("spreading into lib is announced: %q", m.notice)
+	}
+
+	current, _ := settings.LoadExternalSettings()
+	m, _ = sendAgentEditControl(t, m, receiver, extmsg.CommandEnd, "e1", current)
+	m, _ = sendAgentEditControl(t, m, receiver, extmsg.CommandWait, "e1", current)
+	if m.mode != modeReview || len(m.review.files) != 3 {
+		t.Fatalf("the review holds every repo's files: mode %v, %d files", m.mode, len(m.review.files))
+	}
+	if repos := m.reviewRepos(); strings.Join(repos, ",") != "app,lib" {
+		t.Fatalf("repos = %v", repos)
+	}
+	if !strings.Contains(m.renderReviewStatus(), "{/} repo") {
+		t.Fatalf("the hint offers the repo jump: %q", m.renderReviewStatus())
+	}
+	selectedRepo := func(m Model) string {
+		file, _ := m.selectedReviewFile()
+		return m.reviewFileRepo(file)
+	}
+	m, _ = m.selectReviewFile(slices.IndexFunc(m.review.files, func(file reviewFile) bool { return file.workspaceRel == "app/b.go" }))
+	if m = key(m, typeRune('}')); selectedRepo(m) != "lib" {
+		t.Fatalf("} goes to the next repo: %q", selectedRepo(m))
+	}
+	if m = key(m, typeRune('}')); selectedRepo(m) != "lib" {
+		t.Fatalf("} at the last repo stays: %q", selectedRepo(m))
+	}
+	m = key(m, typeRune('{'))
+	if file, _ := m.selectedReviewFile(); file.workspaceRel != "app/a.go" {
+		t.Fatalf("{ goes to the previous repo's first file: %q", file.workspaceRel)
+	}
+	next, _ := m.handleReviewKey(tea.KeyPressMsg{Code: ']', Mod: tea.ModShift})
+	if m = next.(Model); selectedRepo(m) != "lib" {
+		t.Fatalf("shift+] reported without text jumps too: %q", selectedRepo(m))
+	}
+	next, _ = m.handleReviewKey(tea.KeyPressMsg{Code: '[', Mod: tea.ModShift})
+	if m = next.(Model); selectedRepo(m) != "app" {
+		t.Fatalf("shift+[ reported without text jumps back: %q", selectedRepo(m))
+	}
+}
+
+func TestTheRepoJumpIsOfferedOnlyWithSeveralRepos(t *testing.T) {
+	m, _, _ := stagedReview(t)
+	if strings.Contains(m.renderReviewStatus(), "{/} repo") {
+		t.Fatal("one repo: no repo jump hint")
+	}
+	before, _ := m.selectedReviewFile()
+	m = key(m, typeRune('}'))
+	if after, _ := m.selectedReviewFile(); after.workspaceRel != before.workspaceRel {
+		t.Fatal("} with one repo does nothing")
+	}
+}
+
 func TestAgentEditReviewKeysTakeEitherCase(t *testing.T) {
 	m, _, _ := stagedReview(t)
 	for _, press := range []struct {
@@ -597,6 +669,71 @@ func TestTheAgentEditLabelStopsAnimatingForAQuietSession(t *testing.T) {
 	next, cmd := m.handleAgentEditsTick()
 	if cmd != nil || next.(Model).agentEdits.ticking {
 		t.Fatal("the tick chain stops")
+	}
+	if label := next.(Model).headerAgentEditingLabel(); !strings.HasPrefix(label, "· ✎ agent editing… · idle 10m") {
+		t.Fatalf("a quiet session shows a still mark and how long it was quiet, not a frozen frame: %q", label)
+	}
+}
+
+func TestAnAgentCallThatChangesNothingKeepsTheLabelAnimating(t *testing.T) {
+	m, _, receiver, _, _ := agentEditsModel(t, store.AgentEditPolicyReview)
+	receiver.Handle("write --edit-session=e1\nmain.go\n---\nreplaced\n")
+	m = m.refreshAgentEditsPending()
+	m.agentEdits.lastActivityAt = time.Now().Add(-agentEditsAnimationIdle)
+	m, cmd := deliver(m, agentEditsSeenMsg{session: "e1"})
+	if !m.agentsAnimating() || !m.agentEdits.ticking || cmd == nil {
+		t.Fatal("a read or sandbox call from the session's agent restarts the animation")
+	}
+	if m = m.refreshAgentEditsPending(); !m.agentsAnimating() {
+		t.Fatal("the heartbeat survives a refresh from the registry")
+	}
+	if strings.Contains(m.headerAgentEditingLabel(), "idle") {
+		t.Fatalf("an agent seen just now is not idle: %q", m.headerAgentEditingLabel())
+	}
+}
+
+func TestAHeartbeatNoticeIsQueuedOncePerSession(t *testing.T) {
+	receiver := &ExternalReceiver{}
+	receiver.notices = []any{agentEditsSeenMsg{session: "e1"}}
+	if !receiver.noticeAlreadyWaiting(agentEditsSeenMsg{session: "e1"}) {
+		t.Fatal("a second heartbeat for the same session is covered by the waiting one")
+	}
+	if receiver.noticeAlreadyWaiting(agentEditsSeenMsg{session: "e2"}) {
+		t.Fatal("another session's heartbeat is queued")
+	}
+}
+
+func TestAnAgentBlockedInWaitShowsAsWaitingForReview(t *testing.T) {
+	m, _, receiver, _, settings := agentEditsModel(t, store.AgentEditPolicyReview)
+	receiver.Handle("write --edit-session=e1\nmain.go\n---\nreplaced\n")
+	current, _ := settings.LoadExternalSettings()
+	m, _ = sendAgentEditControl(t, m, receiver, extmsg.CommandEnd, "e1", current)
+	m = m.refreshAgentEditsPending()
+	if len(m.sessionsAwaitingReview()) != 0 || m.headerAgentEditingLabel() != "" {
+		t.Fatalf("a ready session nobody waits on shows nothing: %q", m.headerAgentEditingLabel())
+	}
+	m, wait := sendAgentEditControl(t, m, receiver, extmsg.CommandWait, "e1", current)
+	if got := m.sessionsAwaitingReview(); len(got) != 1 || got[0] != "e1" {
+		t.Fatalf("the waited-on session is awaiting review: %v", got)
+	}
+	if !m.agentsAnimating() || !m.agentEdits.ticking {
+		t.Fatal("a waiting agent animates the label")
+	}
+	if label := m.headerAgentEditingLabel(); !strings.HasSuffix(label, " ⏳ agent waiting for your review") || strings.HasPrefix(label, "·") {
+		t.Fatalf("header = %q", label)
+	}
+	m.mode, m.review.agentEdits = modeReview, "e1"
+	if hint := m.agentEditReviewHint(); !strings.Contains(hint, "⏳ agent waiting for you") || !strings.Contains(hint, "a apply all to disk") {
+		t.Fatalf("the review hint says the agent waits and keeps the decision keys: %q", hint)
+	}
+
+	m, _ = deliver(m, sessionWaitExpiredMsg{reply: wait})
+	if len(m.sessionsAwaitingReview()) != 1 {
+		t.Fatal("between one wait giving up and the next, the session still shows as awaited")
+	}
+	m.agentEdits.waitExpiredAt = map[string]time.Time{"e1": time.Now().Add(-agentEditWaitGrace)}
+	if len(m.sessionsAwaitingReview()) != 0 || m.agentsAnimating() {
+		t.Fatal("once the grace passes with no new wait, the agent is no longer counted as waiting")
 	}
 }
 

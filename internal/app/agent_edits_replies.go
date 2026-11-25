@@ -1,9 +1,12 @@
 package app
 
 import (
+	"cmp"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -39,7 +42,9 @@ func (m Model) handleAgentEditMessage(msg externalMessageMsg) (tea.Model, tea.Cm
 		waiters := cloneWaiters(m.agentEdits.waiters)
 		waiters[id] = append(slices.Clip(waiters[id]), msg.reply)
 		m.agentEdits.waiters = waiters
-		return m, nil
+		// A blocked waiter is an agent alive and waiting on the user: the
+		// label says so, animated.
+		return withAgentEditsTick(m, nil)
 	}
 
 	m = m.refreshAgentEditsPending()
@@ -103,6 +108,12 @@ func (m Model) dropExpiredWait(reply chan<- string) Model {
 			waiters[id] = slices.Delete(slices.Clone(channels), index, index+1)
 			if len(waiters[id]) == 0 {
 				delete(waiters, id)
+				expired := maps.Clone(m.agentEdits.waitExpiredAt)
+				if expired == nil {
+					expired = map[string]time.Time{}
+				}
+				expired[id] = time.Now()
+				m.agentEdits.waitExpiredAt = expired
 			}
 			m.agentEdits.waiters = waiters
 			return m
@@ -159,12 +170,35 @@ func agentEditGitFollowUpText(record store.AgentEditSession) string {
 	if len(applied) > maxFollowUpFiles {
 		files += " … and " + strconv.Itoa(len(applied)-maxFollowUpFiles) + " more"
 	}
+	branches := gitBranchesText(record.GitBranches)
+	afterwards := " · if your harness asks the user to confirm a git step, say so in your reply and wait for them; once done, blocked or declined, " +
+		agentEditReportHint(record.Session)
 	if record.GitFollowUp == store.GitFollowUpCommit {
-		return " · the user asks you to commit the applied files on the current branch: commit only " + files +
-			", with a message you write from the change — no new branch, no push"
+		return " · the user asks you to commit the applied files on the current branch" + branches + ": commit only " + files +
+			", with a message you write from the change — no new branch, no push" + afterwards
 	}
-	return " · the user asks for a new branch and a pull request: first ask them for the branch name (suggest one from the change); then create the branch, commit only " +
-		files + ", push it and open the pull request"
+	return " · the user asks for a pull request: the current branch is" + cmp.Or(branches, " unknown") +
+		" — if the user already agreed on that branch for this change, use it; otherwise first ask them for the branch name (suggest one from the change) and create it; then commit only " +
+		files + ", push it and open the pull request" + afterwards
+}
+
+// gitBranchesText is " (repo: branch, …)" for the outcome text, sorted by
+// repo; "" when no branch is known.
+func gitBranchesText(branches map[string]string) string {
+	if len(branches) == 0 {
+		return ""
+	}
+	var pairs []string
+	for _, repo := range slices.Sorted(maps.Keys(branches)) {
+		pairs = append(pairs, repo+": "+branches[repo])
+	}
+	return " (" + strings.Join(pairs, ", ") + ")"
+}
+
+// agentEditReportHint tells the agent how to report its git work; the MCP
+// tools rewrite it into edit_report terms.
+func agentEditReportHint(session string) string {
+	return "report it — run: ntee --msg --msg-edit-session " + session + " --msg-note '<what happened>' report done|blocked|declined [commit=<sha>] [pr=<url>]"
 }
 
 // gitFollowUpLabel names a follow-up for the user: "commit", "PR", "".

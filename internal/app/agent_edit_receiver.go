@@ -58,15 +58,20 @@ func (r *ExternalReceiver) notify(msg any) {
 	}
 }
 
-// noticeAlreadyWaiting reports a plain change notice that an identical
-// waiting one covers. r.noticeMu is held.
+// noticeAlreadyWaiting reports a plain change or seen notice that an
+// identical waiting one covers. r.noticeMu is held.
 func (r *ExternalReceiver) noticeAlreadyWaiting(msg any) bool {
-	changed, ok := msg.(agentEditsChangedMsg)
-	if !ok || changed.started {
+	switch notice := msg.(type) {
+	case agentEditsChangedMsg:
+		if notice.started {
+			return false
+		}
+	case agentEditsSeenMsg:
+	default:
 		return false
 	}
 	for _, waiting := range r.notices {
-		if waiting == any(changed) {
+		if waiting == msg {
 			return true
 		}
 	}
@@ -85,6 +90,59 @@ func (r *ExternalReceiver) dispatchNotices(sink func(msg any)) {
 			sink(notice)
 		}
 	}
+}
+
+// agentEditsReportedMsg tells the UI an agent reported the git work the user
+// asked of a finished session.
+type agentEditsReportedMsg struct {
+	record store.AgentEditSession
+}
+
+// handleGitReport records an agent's report on a finished session's git
+// follow-up, right here on the socket goroutine, and tells the UI.
+func (r *ExternalReceiver) handleGitReport(message extmsg.Message) string {
+	args, err := extmsg.ParseReportArgs(message.Args)
+	if err != nil {
+		return extmsg.ErrorReply(err.Error())
+	}
+	record, err := r.agentEdits.RecordGitReport(message.Session, store.AgentEditGitReport{
+		Result:      store.AgentEditGitReportResult(args.Result),
+		Note:        message.LineNote,
+		Commit:      args.Commit,
+		PullRequest: args.PullRequest,
+	})
+	if err != nil {
+		return extmsg.ErrorReply(err.Error())
+	}
+	r.notify(agentEditsReportedMsg{record: record})
+	return extmsg.OkReply("report recorded — the user sees edit session " + message.Session + " as " + gitReportLabel(record))
+}
+
+// gitReportLabel is the history row's word on a session's git follow-up:
+// what was asked, or what the agent reported. "" when nothing was asked.
+func gitReportLabel(record store.AgentEditSession) string {
+	asked := gitFollowUpLabel(record.GitFollowUp)
+	if asked == "" {
+		return ""
+	}
+	report := record.GitReport
+	if report == nil {
+		return asked + " asked"
+	}
+	switch report.Result {
+	case store.GitReportDone:
+		label := asked + " done"
+		if record.GitFollowUp == store.GitFollowUpPullRequest {
+			label = "PR opened"
+		}
+		if made := cmp.Or(report.PullRequest, report.Commit); made != "" {
+			label += " " + made
+		}
+		return label
+	case store.GitReportBlocked:
+		return asked + " blocked — the agent needs your OK in its terminal"
+	}
+	return asked + " declined by the agent"
 }
 
 // handleAgentEdit carries out an edit session's write, replace, show, status

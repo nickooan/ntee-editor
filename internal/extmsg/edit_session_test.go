@@ -170,6 +170,35 @@ func TestCheckRequest(t *testing.T) {
 	}
 }
 
+func TestReportRequestRoundTripsThroughParse(t *testing.T) {
+	request := ReportRequest("e1", ReportArgs{Result: ReportDone, Commit: "abc123", PullRequest: "https://example.com/pull/7"}, "pushed\nand opened")
+	message, err := Parse(request)
+	if err != nil || message.Command != CommandReport || message.LineNote != "pushed\nand opened" {
+		t.Fatalf("a report request parses: %q → %+v %v", request, message, err)
+	}
+	if parsed, err := ParseReportArgs(message.Args); err != nil || parsed != (ReportArgs{Result: ReportDone, Commit: "abc123", PullRequest: "https://example.com/pull/7"}) {
+		t.Fatalf("its arguments round-trip: %+v %v", parsed, err)
+	}
+	if got := ReportRequest("e1", ReportArgs{Result: ReportBlocked}, ""); got != "report --edit-session=e1 blocked\n" {
+		t.Fatalf("plain = %q", got)
+	}
+}
+
+func TestReportIsRefusedWhenItsArgumentsAreBad(t *testing.T) {
+	for _, request := range []string{
+		"report done\n",
+		"report --edit-session=e1\n",
+		"report --edit-session=e1 maybe\n",
+		"report --edit-session=e1 done commit=a commit=b\n",
+		"report --edit-session=e1 done branch=x\n",
+		"report --edit-session=e1 done\n/some/path\n",
+	} {
+		if _, err := Parse(request); err == nil {
+			t.Fatalf("%q should be refused", request)
+		}
+	}
+}
+
 func TestWithExpect(t *testing.T) {
 	request, _ := EditRequest(CommandReplace, "e1", "a1", "/p/a.go", EncodeReplace(ReplacePayload{Old: "x", New: "y"}))
 	message, err := Parse(WithExpect(request, "0123456789ab"))

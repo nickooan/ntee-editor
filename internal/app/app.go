@@ -1145,8 +1145,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case sessionWaitExpiredMsg:
 		return m.dropExpiredWait(msg.reply), nil
 
+	case agentEditsSeenMsg:
+		return withAgentEditsTick(m.handleAgentEditsSeen(msg))
+
 	case agentEditsFinishedListMsg:
 		return m.handleAgentEditsFinishedList(msg)
+
+	case agentEditsReportedMsg:
+		return m.handleAgentEditsReported(msg)
 
 	case agentEditReviewPreparedMsg:
 		return m.handleAgentEditReviewPrepared(msg)

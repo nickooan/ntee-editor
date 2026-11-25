@@ -63,6 +63,23 @@ func SandboxRequest(session, mode string, include []string) string {
 	return request
 }
 
+// ReportRequest is an agent's report on a finished session's git work:
+// report.Result is ReportDone, ReportBlocked or ReportDeclined.
+func ReportRequest(session string, report ReportArgs, note string) string {
+	request := CommandReport + " " + EditSessionOption + session + " " + report.Result
+	if report.Commit != "" {
+		request += " " + ReportCommitArg + report.Commit
+	}
+	if report.PullRequest != "" {
+		request += " " + ReportPullRequestArg + report.PullRequest
+	}
+	request += "\n"
+	if note != "" {
+		request += LineNoteSeparator + "\n" + note
+	}
+	return request
+}
+
 // CheckRequest is an agent's check of its finalising session: result is
 // CheckPass, CheckFail or CheckSkip; the note (what it ran, what failed)
 // follows the separator line.

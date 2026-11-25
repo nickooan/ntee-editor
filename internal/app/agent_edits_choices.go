@@ -86,22 +86,31 @@ func agentEditUnsavedChoice(record store.AgentEditSession, unsaved []string) cho
 // file is in none. It reads only what the editor already knows: no disk.
 func (m Model) agentEditRepos(record store.AgentEditSession) (repos []string, inRepos bool) {
 	for _, file := range record.Files {
-		repo := "."
-		if !m.workspaceIsRepo {
-			if repo = m.deepestRepoFor(file.Rel); repo == "" {
-				return nil, false
-			}
+		name, _, ok := m.agentEditRepoOf(file.Rel)
+		if !ok {
+			return nil, false
 		}
-		if !slices.Contains(repos, repo) {
-			repos = append(repos, repo)
-		}
-	}
-	for index, repo := range repos {
-		if repo == "." {
-			repos[index] = filepath.Base(m.workspaceRoot)
+		if !slices.Contains(repos, name) {
+			repos = append(repos, name)
 		}
 	}
 	return repos, len(repos) > 0
+}
+
+// agentEditRepoOf is the git repo a workspace file is in: its name as
+// agentEditRepos gives it, and its folder on disk.
+func (m Model) agentEditRepoOf(rel string) (name, folder string, ok bool) {
+	repo := "."
+	if !m.workspaceIsRepo {
+		if repo = m.deepestRepoFor(rel); repo == "" {
+			return "", "", false
+		}
+	}
+	name = repo
+	if repo == "." {
+		name = filepath.Base(m.workspaceRoot)
+	}
+	return name, filepath.Join(m.workspaceRoot, repo), true
 }
 
 // pendingBaseSessions lists the pending sessions the record's files build

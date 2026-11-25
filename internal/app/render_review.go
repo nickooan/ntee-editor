@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/nickooan/ntee-editor/internal/staging"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -268,7 +269,11 @@ func (m Model) renderReviewStatus() string {
 	if file, ok := m.selectedReviewFile(); ok && len(file.notes) > 1 {
 		noteHint = "[/] note · "
 	}
-	navigationHints := "↑/↓ move · Shift+↑/↓ file · n/p change · " + noteHint + m.actionHints(
+	repoHint := ""
+	if len(m.reviewRepos()) > 1 {
+		repoHint = "{/} repo · "
+	}
+	navigationHints := "↑/↓ move · Shift+↑/↓ file · " + repoHint + "n/p change · " + noteHint + m.actionHints(
 		hintFor("find", keymap.Find), hintFor("files", keymap.GotoFile), hintFor("grep", keymap.Grep))
 	if m.review.agentEdits != "" && !m.review.agentEditsTrace {
 		return line + statusTextStyle.Render("   ") + hintStyle.Render(navigationHints)
@@ -289,15 +294,17 @@ const agentEditDecisionHint = " a apply all to disk · x discard all · r reques
 // are locked — that they are working, animated with the header's label.
 func (m Model) agentEditReviewHint() string {
 	id := m.review.agentEdits
-	spinner := splashSpinner[m.agentEdits.frame%len(splashSpinner)]
+	spinner, idle := m.agentEditsSpinner(m.agentsWorkingRecently()), m.agentsIdleText()
 	record, ok := m.agentEditsPendingRecord(id)
 	switch {
 	case !ok:
 		return agentEditDecisionHint
 	case m.agentEdits.stillEditing[id]:
-		return " " + spinner + " agents are working… (editing · " + staging.AgentNames(record.WithAgents().EditingAgents()) + ") · Esc back to the editor "
+		return " " + spinner + " agents are working… (editing · " + staging.AgentNames(record.WithAgents().EditingAgents()) + idle + ") · Esc back to the editor "
 	case m.agentEdits.checking[id]:
-		return " " + spinner + " agents are working… (checking · " + staging.AgentNames(record.CheckingAgents()) + ") · Esc back to the editor "
+		return " " + spinner + " agents are working… (checking · " + staging.AgentNames(record.CheckingAgents()) + idle + ") · Esc back to the editor "
+	case slices.Contains(m.sessionsAwaitingReview(), id):
+		return " " + m.agentEditsSpinner(true) + " ⏳ agent waiting for you ·" + agentEditDecisionHint
 	}
 	return agentEditDecisionHint
 }

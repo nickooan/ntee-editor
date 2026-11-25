@@ -53,6 +53,10 @@ func (m Model) handleReviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.selectReviewFile(m.review.selection.index - 1)
 	case "shift+down":
 		return m.selectReviewFile(m.review.selection.index + 1)
+	case "}", "shift+]":
+		return m.selectReviewRepo(1)
+	case "{", "shift+[":
+		return m.selectReviewRepo(-1)
 	case "n":
 		m.review.position = m.review.position.blockJump(1, span, file.document.isHunkStart)
 	case "p":

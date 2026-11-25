@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -127,6 +128,9 @@ func (r *ExternalReceiver) Handle(text string) string {
 		if r.agentEdits == nil {
 			return extmsg.ErrorReply("this editor takes no agent edits — open a folder to use them")
 		}
+		if message.Session != "" && slices.Contains([]string{extmsg.CommandRead, extmsg.CommandShow, extmsg.CommandStatus, extmsg.CommandSandbox}, message.Command) {
+			r.notify(agentEditsSeenMsg{session: message.Session})
+		}
 		switch message.Command {
 		case extmsg.CommandEnd:
 			record, allEnded, err := r.agentEdits.MarkAgentEnded(message.Session, message.Agent)
@@ -158,6 +162,8 @@ func (r *ExternalReceiver) Handle(text string) string {
 				return extmsg.OkReply("check recorded — waiting for " + countText(len(checking), "other agent") + "'s check (" + staging.AgentNames(checking) +
 					") before the user reviews edit session " + message.Session + "; to hear the outcome run: ntee --msg --msg-edit-session " + message.Session + " wait")
 			}
+		case extmsg.CommandReport:
+			return r.handleGitReport(message)
 		case extmsg.CommandWait:
 		default:
 			return r.handleAgentEdit(message, settings)

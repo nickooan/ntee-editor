@@ -61,7 +61,32 @@ type AgentEditSession struct {
 	// GitFollowUp is what the user asked the agent to do in git once the
 	// session was applied; the editor itself never runs git for it.
 	GitFollowUp AgentEditGitFollowUp `json:"gitFollowUp"`
+	// GitBranches is each repo's checked-out branch when the session was
+	// applied with a git follow-up, by repo name: the agent hears it.
+	GitBranches map[string]string `json:"gitBranches,omitempty"`
+	// GitReport is what the agent said it did about GitFollowUp; nil until
+	// it reports.
+	GitReport *AgentEditGitReport `json:"gitReport,omitempty"`
 }
+
+// AgentEditGitReport is the agent's word on the git work the user asked of
+// it: done (with the commit or pull request), blocked (it needs the user,
+// e.g. its harness asked them to confirm) or declined.
+type AgentEditGitReport struct {
+	Result      AgentEditGitReportResult `json:"result"`
+	Note        string                   `json:"note,omitempty"`
+	Commit      string                   `json:"commit,omitempty"`
+	PullRequest string                   `json:"pullRequest,omitempty"`
+	At          time.Time                `json:"at"`
+}
+
+type AgentEditGitReportResult string
+
+const (
+	GitReportDone     AgentEditGitReportResult = "done"
+	GitReportBlocked  AgentEditGitReportResult = "blocked"
+	GitReportDeclined AgentEditGitReportResult = "declined"
+)
 
 // AgentEditGitFollowUp is the git work the user asks of the agent along
 // with applying a session.
@@ -239,6 +264,9 @@ type AgentEditLogStore interface {
 	// FinishAgentEdit moves a finished session to the finished records and
 	// keeps only the newest keep of them.
 	FinishAgentEdit(session AgentEditSession, keep int) error
+	// SaveFinishedAgentEdit rewrites a finished session's record (and its
+	// summary) in place, e.g. once the agent reports its git work.
+	SaveFinishedAgentEdit(session AgentEditSession) error
 	// LoadPendingAgentEdits returns the pending sessions, oldest first.
 	LoadPendingAgentEdits() ([]AgentEditSession, error)
 	// LoadFinishedAgentEdits returns the finished sessions, newest first.
@@ -431,6 +459,30 @@ func (log *AgentEditLog) FinishAgentEdit(session AgentEditSession, keep int) err
 		// it does not fail the finish.
 		_, _ = tidyAgentEditDB(db)
 		return nil
+	})
+}
+
+func (log *AgentEditLog) SaveFinishedAgentEdit(session AgentEditSession) error {
+	data, err := json.Marshal(session)
+	if err != nil {
+		return err
+	}
+	summary, err := json.Marshal(SummarizeAgentEdit(session))
+	if err != nil {
+		return err
+	}
+	return log.withDB(func(db *nteedb.DB) error {
+		_, ok, err := db.Get(agentEditDoneKey(session))
+		switch {
+		case err != nil:
+			return err
+		case !ok:
+			return fmt.Errorf("no finished edit session %s", session.Session)
+		}
+		if err := db.Put(agentEditDoneKey(session), data); err != nil {
+			return err
+		}
+		return db.Put(agentEditSummaryKey(agentEditDoneKey(session)), summary)
 	})
 }
 
@@ -676,6 +728,16 @@ func (m *MemoryAgentEditLog) FinishAgentEdit(session AgentEditSession, keep int)
 	delete(m.records, agentEditPendingKey(session))
 	m.records[agentEditDoneKey(session)] = session
 	m.trimLocked(keep)
+	return nil
+}
+
+func (m *MemoryAgentEditLog) SaveFinishedAgentEdit(session AgentEditSession) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.records[agentEditDoneKey(session)]; !ok {
+		return fmt.Errorf("no finished edit session %s", session.Session)
+	}
+	m.records[agentEditDoneKey(session)] = session
 	return nil
 }
 

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -84,12 +85,102 @@ func TestApplyAndCommitAsksTheAgentToCommitTheAppliedFiles(t *testing.T) {
 func TestApplyAndNewPRAsksTheAgentToAgreeTheBranchName(t *testing.T) {
 	m, _, waitReply := stagedReviewInRepo(t)
 	m = applyWith(t, m, 2)
-	if outcome := gotReply(t, waitReply); !strings.Contains(outcome, "the user asks for a new branch and a pull request: first ask them for the branch name") ||
+	outcome := gotReply(t, waitReply)
+	if !strings.Contains(outcome, "the user asks for a pull request: the current branch is unknown — if the user already agreed on that branch for this change, use it; otherwise first ask them for the branch name") ||
 		!strings.Contains(outcome, "commit only main.go, push it and open the pull request") {
-		t.Fatalf("the agent is asked for a PR, the branch name first: %q", outcome)
+		t.Fatalf("the agent is asked for a PR, the branch name first unless already agreed: %q", outcome)
+	}
+	if !strings.Contains(outcome, "if your harness asks the user to confirm a git step, say so in your reply and wait for them") ||
+		!strings.Contains(outcome, "run: ntee --msg --msg-edit-session e1 --msg-note '<what happened>' report done|blocked|declined") {
+		t.Fatalf("the agent is told to report back, blocked included: %q", outcome)
 	}
 	if !strings.Contains(m.notice, "asked the agent to open a PR") {
 		t.Fatalf("the notice says so: %q", m.notice)
+	}
+}
+
+func TestTheGitFollowUpNamesEachRepoCurrentBranch(t *testing.T) {
+	repo, plain := t.TempDir(), t.TempDir()
+	if output, err := exec.Command("git", "init", "-q", "-b", "fix-thing", repo).CombinedOutput(); err != nil {
+		t.Skipf("git unavailable: %v %s", err, output)
+	}
+	branches := currentGitBranches(map[string]string{"repo": repo, "plain": plain})
+	if len(branches) != 1 || branches["repo"] != "fix-thing" {
+		t.Fatalf("the repo's branch is read, a folder outside git left out: %v", branches)
+	}
+	record := store.AgentEditSession{
+		Session:     "e1",
+		GitFollowUp: store.GitFollowUpCommit,
+		GitBranches: map[string]string{"zeta": "main", "repo": "fix-thing"},
+		Files:       []store.AgentEditFile{{Rel: "main.go", Result: store.AgentEditFileApplied}},
+	}
+	if text := agentEditGitFollowUpText(record); !strings.Contains(text, "on the current branch (repo: fix-thing, zeta: main): commit only main.go") {
+		t.Fatalf("the commit text names the branches, sorted by repo: %q", text)
+	}
+	record.GitFollowUp = store.GitFollowUpPullRequest
+	if text := agentEditGitFollowUpText(record); !strings.Contains(text, "the current branch is (repo: fix-thing, zeta: main) — if the user already agreed on that branch") {
+		t.Fatalf("the PR text names the branches: %q", text)
+	}
+}
+
+// appliedWithFollowUp stages main.go in e1 and applies it with followUp.
+func appliedWithFollowUp(t *testing.T, followUp store.AgentEditGitFollowUp) (Model, *ExternalReceiver) {
+	t.Helper()
+	m, _, receiver, _, _ := agentEditsModel(t, store.AgentEditPolicyReview)
+	m.workspaceIsRepo = true
+	receiver.Handle("write --edit-session=e1\nmain.go\n---\nreplaced\n")
+	if _, _, err := receiver.agentEdits.MarkAgentEnded("e1", ""); err != nil {
+		t.Fatal(err)
+	}
+	m, cmd := m.startAgentEditApply("e1", store.AgentEditPolicyReview, false, followUp, 10, nil)
+	return settleAgentEdits(m, cmd), receiver
+}
+
+func TestAnAgentsGitReportReachesTheRecordTheNoticeAndTheHistoryRow(t *testing.T) {
+	m, receiver := appliedWithFollowUp(t, store.GitFollowUpPullRequest)
+	reply := receiver.Handle("report --edit-session=e1 done pr=https://example.com/pull/117\n---\nopened the PR\nmore detail")
+	if !strings.HasPrefix(reply, "ok report recorded") || !strings.Contains(reply, "PR opened https://example.com/pull/117") {
+		t.Fatalf("report reply = %q", reply)
+	}
+	record, _ := receiver.agentEdits.Finished("e1")
+	if record.GitReport == nil || record.GitReport.Result != store.GitReportDone || record.GitReport.Note != "opened the PR\nmore detail" || record.GitReport.At.IsZero() {
+		t.Fatalf("the report is on the record: %+v", record.GitReport)
+	}
+	m, _ = deliver(m, agentEditsReportedMsg{record: record})
+	if m.notice != "edit session e1 · PR opened https://example.com/pull/117 — opened the PR" {
+		t.Fatalf("notice = %q", m.notice)
+	}
+	if row := agentEditSessionRow(record, false); !strings.Contains(strings.Join(row.pieces, ""), "PR opened https://example.com/pull/117") || strings.Contains(strings.Join(row.pieces, ""), "PR asked") {
+		t.Fatalf("the history row shows the report instead of the ask: %+v", row.pieces)
+	}
+}
+
+func TestABlockedGitReportIsShownAsNeedingTheUser(t *testing.T) {
+	m, receiver := appliedWithFollowUp(t, store.GitFollowUpCommit)
+	if reply := receiver.Handle("report --edit-session=e1 blocked\n---\nthe permission check refused git commit"); !strings.HasPrefix(reply, "ok ") {
+		t.Fatalf("report reply = %q", reply)
+	}
+	record, _ := receiver.agentEdits.Finished("e1")
+	m, _ = deliver(m, agentEditsReportedMsg{record: record})
+	if m.errText != "edit session e1 · commit blocked — the agent needs your OK in its terminal — the permission check refused git commit" {
+		t.Fatalf("a blocked report stands out: %q", m.errText)
+	}
+}
+
+func TestAGitReportIsRefusedWhenThereIsNothingToReportOn(t *testing.T) {
+	_, receiver := appliedWithFollowUp(t, store.GitFollowUpNone)
+	if reply := receiver.Handle("report --edit-session=e1 done\n"); !strings.Contains(reply, "the user asked for no git work on edit session e1") {
+		t.Fatalf("apply only: %q", reply)
+	}
+	receiver.Handle("write --edit-session=e2\nmain.go\n---\nagain\n")
+	if reply := receiver.Handle("report --edit-session=e2 done\n"); !strings.Contains(reply, "edit session e2 is not applied yet") {
+		t.Fatalf("still pending: %q", reply)
+	}
+	if reply := receiver.Handle("report --edit-session=nope done\n"); !strings.Contains(reply, "no finished edit session nope") {
+		t.Fatalf("unknown session: %q", reply)
+	}
+	if reply := receiver.Handle("report --edit-session=e1 maybe\n"); !strings.Contains(reply, "report takes a result: done, blocked or declined") {
+		t.Fatalf("bad result: %q", reply)
 	}
 }
 

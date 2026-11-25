@@ -49,6 +49,7 @@ const (
 	CommandDiscard = "discard" // drop the session's staged edits
 	CommandSandbox = "sandbox" // a scratch copy of the session's repos with its staged files in place, to build and test
 	CommandCheck   = "check"   // an agent's report on its finalising session: pass, fail or skip, with a note
+	CommandReport  = "report"  // an agent's report on a finished session's git follow-up: done, blocked or declined
 
 	// Reads through the editor, for any agent; an edit session is optional.
 	CommandRead   = "read"   // a file's latest content: staged by some session, else the disk
@@ -322,6 +323,18 @@ func Parse(text string) (Message, error) {
 		case len(message.LineNote) > MaxLineNoteBytes:
 			return Message{}, fmt.Errorf("note is too long (max %d KiB)", MaxLineNoteBytes>>10)
 		}
+	case CommandReport:
+		switch {
+		case message.SessionKind != SessionEdit:
+			return Message{}, errors.New("report needs " + EditSessionOption + "<id>")
+		case len(message.Paths) > 0:
+			return Message{}, errors.New("report takes no paths — say what happened in its note")
+		case len(message.LineNote) > MaxLineNoteBytes:
+			return Message{}, fmt.Errorf("note is too long (max %d KiB)", MaxLineNoteBytes>>10)
+		}
+		if _, err := ParseReportArgs(message.Args); err != nil {
+			return Message{}, err
+		}
 	case CommandSandbox:
 		switch {
 		case message.SessionKind != SessionEdit:
@@ -341,7 +354,7 @@ func Parse(text string) (Message, error) {
 			return Message{}, errors.New(message.Command + " takes only the session option")
 		}
 	default:
-		return Message{}, fmt.Errorf("unknown command %q — use open, review, read, staged, end or wait (an edit session also takes write, replace, show, status, discard, sandbox and check)", message.Command)
+		return Message{}, fmt.Errorf("unknown command %q — use open, review, read, staged, end or wait (an edit session also takes write, replace, show, status, discard, sandbox, check and report)", message.Command)
 	}
 	return message, nil
 }
@@ -359,6 +372,39 @@ const (
 	CheckFail = "fail"
 	CheckSkip = "skip"
 )
+
+// A report's result argument, and the arguments naming what it made.
+const (
+	ReportDone           = "done"
+	ReportBlocked        = "blocked"
+	ReportDeclined       = "declined"
+	ReportCommitArg      = "commit="
+	ReportPullRequestArg = "pr="
+)
+
+// ReportArgs is a report's first-line arguments, parsed.
+type ReportArgs struct {
+	Result, Commit, PullRequest string
+}
+
+// ParseReportArgs reads "done|blocked|declined [commit=<sha>] [pr=<url>]".
+func ParseReportArgs(args []string) (ReportArgs, error) {
+	if len(args) == 0 || !slices.Contains([]string{ReportDone, ReportBlocked, ReportDeclined}, args[0]) {
+		return ReportArgs{}, errors.New("report takes a result: " + ReportDone + ", " + ReportBlocked + " or " + ReportDeclined + " (then optional " + ReportCommitArg + "<sha> and " + ReportPullRequestArg + "<url>, and a note after a " + LineNoteSeparator + " line)")
+	}
+	parsed := ReportArgs{Result: args[0]}
+	for _, arg := range args[1:] {
+		switch {
+		case strings.HasPrefix(arg, ReportCommitArg) && parsed.Commit == "":
+			parsed.Commit = strings.TrimPrefix(arg, ReportCommitArg)
+		case strings.HasPrefix(arg, ReportPullRequestArg) && parsed.PullRequest == "":
+			parsed.PullRequest = strings.TrimPrefix(arg, ReportPullRequestArg)
+		default:
+			return ReportArgs{}, errors.New("report takes " + ReportCommitArg + "<sha> and " + ReportPullRequestArg + "<url> once each, got " + arg)
+		}
+	}
+	return parsed, nil
+}
 
 // carriesPayload reports whether a command's text after the separator line
 // is a payload rather than a note.

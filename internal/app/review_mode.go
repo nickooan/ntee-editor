@@ -7,6 +7,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -647,6 +648,51 @@ func (m Model) selectReviewFile(index int) (Model, tea.Cmd) {
 		m = m.reviewSessionSelected(file.workspaceRel)
 	}
 	return m, m.reviewLoadSelectedCmd()
+}
+
+// reviewFileRepo names the repo a review file is in: the one its diff was
+// resolved in, else (a staged file, which needs no diff base) the repo the
+// editor knows holds it; "" for none.
+func (m Model) reviewFileRepo(file reviewFile) string {
+	if file.repoLabel != "" {
+		return file.repoLabel
+	}
+	name, _, _ := m.agentEditRepoOf(file.workspaceRel)
+	return name
+}
+
+// reviewRepos are the review's repos, sorted like the tree's top-level
+// folders.
+func (m Model) reviewRepos() []string {
+	var repos []string
+	for _, file := range m.review.files {
+		if repo := m.reviewFileRepo(file); !slices.Contains(repos, repo) {
+			repos = append(repos, repo)
+		}
+	}
+	slices.Sort(repos)
+	return repos
+}
+
+// selectReviewRepo moves to the first file (by path) of the next (step 1)
+// or previous (step -1) repo; at either end it stays.
+func (m Model) selectReviewRepo(step int) (Model, tea.Cmd) {
+	file, ok := m.selectedReviewFile()
+	repos := m.reviewRepos()
+	if !ok || len(repos) < 2 {
+		return m, nil
+	}
+	target := slices.Index(repos, m.reviewFileRepo(file)) + step
+	if target < 0 || target >= len(repos) {
+		return m, nil
+	}
+	first := -1
+	for index, candidate := range m.review.files {
+		if m.reviewFileRepo(candidate) == repos[target] && (first < 0 || candidate.workspaceRel < m.review.files[first].workspaceRel) {
+			first = index
+		}
+	}
+	return m.selectReviewFile(first)
 }
 
 // landingRow is where selecting the file puts the cursor: on its active

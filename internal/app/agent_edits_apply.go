@@ -7,6 +7,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/nickooan/ntee-editor/internal/extmsg"
+	"github.com/nickooan/ntee-editor/internal/gitcmd"
 	"github.com/nickooan/ntee-editor/internal/input"
 	"github.com/nickooan/ntee-editor/internal/staging"
 	"github.com/nickooan/ntee-editor/internal/store"
@@ -107,11 +108,57 @@ func (m Model) startAgentEditApply(id, policy string, replaceUnsaved bool, follo
 		replacedDrafts[file.Rel] = rootRel
 	}
 	m.notice = "applying edit session " + id + "…"
+	repoFolders := map[string]string{}
+	if followUp == store.GitFollowUpCommit || followUp == store.GitFollowUpPullRequest {
+		repoFolders = m.agentEditRepoFolders(record)
+	}
 	return m, func() tea.Msg {
 		results := registry.ApplyFiles(id, record.Files, decided)
-		finished, err := registry.Finish(id, policy, followUp, results, keep)
+		finished, err := registry.FinishWithGitBranches(id, policy, followUp, currentGitBranches(repoFolders), results, keep)
 		return agentEditsFinishedMsg{session: id, record: finished, err: err, reply: reply, replacedDrafts: replacedDrafts}
 	}
+}
+
+// agentEditRepoFolders maps each repo name agentEditRepos gives the record
+// to its folder on disk.
+func (m Model) agentEditRepoFolders(record store.AgentEditSession) map[string]string {
+	folders := map[string]string{}
+	for _, file := range record.Files {
+		if name, folder, ok := m.agentEditRepoOf(file.Rel); ok {
+			folders[name] = folder
+		}
+	}
+	return folders
+}
+
+// currentGitBranches is each repo's checked-out branch, by repo name; a repo
+// on a detached HEAD, or where git fails, is left out. It runs git, so off
+// the UI goroutine.
+func currentGitBranches(repoFolders map[string]string) map[string]string {
+	branches := map[string]string{}
+	for name, folder := range repoFolders {
+		output, err := gitcmd.Out(folder, "branch", "--show-current")
+		if branch := strings.TrimSpace(string(output)); err == nil && branch != "" {
+			branches[name] = branch
+		}
+	}
+	return branches
+}
+
+func (m Model) handleAgentEditsReported(msg agentEditsReportedMsg) (tea.Model, tea.Cmd) {
+	text := "edit session " + msg.record.Session + " · " + gitReportLabel(msg.record)
+	if report := msg.record.GitReport; report != nil {
+		if note, _, _ := strings.Cut(report.Note, "\n"); note != "" {
+			text += " — " + note
+		}
+		if report.Result == store.GitReportDone {
+			m.notice = text
+		} else {
+			m.errText = text
+		}
+	}
+	m, loadFinished := m.loadAgentEditsFinishedCmd()
+	return m, loadFinished
 }
 
 // applyAgentEditToBuffer puts a staged file's content into the open buffer
@@ -173,6 +220,8 @@ func (m Model) handleAgentEditsFinished(msg agentEditsFinishedMsg) (tea.Model, t
 		outcome += " · asked the agent to " + map[store.AgentEditGitFollowUp]string{store.GitFollowUpCommit: "commit", store.GitFollowUpPullRequest: "open a PR"}[msg.record.GitFollowUp]
 		if !agentHeard {
 			outcome += " (no agent is waiting now — it hears on its next wait)"
+		} else {
+			outcome += " — it may ask you to confirm in its terminal"
 		}
 	}
 	if msg.record.Status == store.AgentEditApplied || msg.record.Status == store.AgentEditDiscarded {

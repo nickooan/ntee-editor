@@ -15,6 +15,7 @@ When an ntee editor is open on the project, read and change files with these too
 6. Call edit_wait (again while it says still waiting) until it reports the outcome; it also tells you when the session finalises or is back to editing. Builds, tests, linters, Grep and shell commands in the project see the edits only once they are applied.
 
 Rules:
+- Paths: relative paths resolve against working_dir — the folder you were launched in, not your shell's current folder. Pass working_dir (absolute) on your first call and again whenever you move to another folder or repo; or pass absolute paths. Moving keeps your edit session: edits in several repos form one change set.
 - old_text must match exactly once, whitespace included. On "matches N times", add surrounding lines, or pass line (a line inside the match you mean); replace_all changes every match (renames).
 - Sessions are automatic: all edits until edit_end form one session, and the next edit starts a new one. Pass session only to run separate change sets side by side.
 - Another agent's session: read_file names the session whose staged edits it shows, and any open session changing the same repo. By default your edits go in your own session and build on theirs. If your change belongs to the same change set, pass that session on your first edit: your later calls (edits, edit_end, edit_check, edit_wait) go there too. edit_end may say it is waiting for other agents — call edit_wait. A session that is finalising refuses newcomers: work in your own session.
@@ -22,7 +23,8 @@ Rules:
 - "not applied … changed on disk since it was staged" (or a session it built on changed or was discarded): re-read it with read_file and stage it again (a new session).
 - "ended" or "discarded": the user stopped this change set — do not re-send it unless asked.
 - "changes requested" (from edit_wait): the user wants to talk about the session before deciding. Stop calling tools and tell the user, in your reply, that you are ready for their questions or changes. Once they answer, re-read with read_file, stage the follow-ups (they go into the same session), then edit_end and edit_wait again.
-- Git after applying: when edit_wait's outcome says the user asks you to commit, commit only the files it lists, on the current branch, with a message you write from the change. When it asks for a new branch and a pull request, first ask the user for the branch name (suggest one), then create the branch, commit those files, push and open the pull request. When it asks neither, do not touch git.
+- Git after applying: when edit_wait's outcome says the user asks you to commit, commit only the files it lists, on the current branch, with a message you write from the change. When it asks for a pull request, it names the current branch: use it if the user already agreed on it for this change, else ask the user for the branch name (suggest one) and create it; then commit those files, push and open the pull request. When it asks neither, do not touch git.
+- The outcome reaches you as a tool result, so your harness may ask the user to confirm the git steps: if it does, or refuses them, say so in your reply and wait for the user. Then call edit_report: done (with commit or pull_request), blocked (it needs the user) or declined, with a note — the user sees it in the editor.
 - "set aside for later": the edits stay staged and unwritten until the user decides; carry on, and call edit_wait again when you need the outcome.
 - If a tool says no ntee editor is running, nothing was staged: make the edit with your usual file tools.`
 
@@ -46,7 +48,13 @@ var sessionProperty = map[string]any{
 
 var pathProperty = map[string]any{
 	"type":        "string",
-	"description": "The file, relative to the project folder or absolute.",
+	"description": "The file, absolute or relative to working_dir (the folder you were launched in until you pass working_dir).",
+}
+
+var workingDirProperty = map[string]any{
+	"type": "string",
+	"description": "Absolute folder you are working in now, e.g. after cd into another repo. Relative paths on this and later calls resolve against it. " +
+		"Changing it keeps your edit session: edits in several repos form one change set.",
 }
 
 func objectSchema(properties map[string]any, required ...string) map[string]any {
@@ -66,6 +74,7 @@ var toolDefinitions = []toolDefinition{
 			"old_text must match exactly once, whitespace included; pass line to pick one of several matches, or replace_all for every match. The reply names the changed lines.",
 		InputSchema: objectSchema(map[string]any{
 			"path":        pathProperty,
+			"working_dir": workingDirProperty,
 			"old_text":    map[string]any{"type": "string", "description": "The exact text to find, as staged so far."},
 			"new_text":    map[string]any{"type": "string", "description": "Its replacement; empty deletes old_text."},
 			"replace_all": map[string]any{"type": "boolean", "description": "Replace every match instead of exactly one."},
@@ -78,8 +87,9 @@ var toolDefinitions = []toolDefinition{
 		Description: "Stage a file's whole new content in the running ntee editor — also how to create a file. " +
 			"Nothing is written until edit_end applies the session.",
 		InputSchema: objectSchema(map[string]any{
-			"path":    pathProperty,
-			"content": map[string]any{"type": "string", "description": "The complete new file content."},
+			"path":        pathProperty,
+			"working_dir": workingDirProperty,
+			"content":     map[string]any{"type": "string", "description": "The complete new file content."},
 		}, "path", "content"),
 	},
 	{
@@ -90,10 +100,11 @@ var toolDefinitions = []toolDefinition{
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"path":    pathProperty,
-				"offset":  map[string]any{"type": "integer", "minimum": 1, "description": "The first line to read (default 1)."},
-				"limit":   map[string]any{"type": "integer", "minimum": 1, "description": fmt.Sprintf("How many lines to read (default %d).", defaultReadLines)},
-				"session": readSessionProperty,
+				"path":        pathProperty,
+				"working_dir": workingDirProperty,
+				"offset":      map[string]any{"type": "integer", "minimum": 1, "description": "The first line to read (default 1)."},
+				"limit":       map[string]any{"type": "integer", "minimum": 1, "description": fmt.Sprintf("How many lines to read (default %d).", defaultReadLines)},
+				"session":     readSessionProperty,
 			},
 			"required":             []string{"path"},
 			"additionalProperties": false,
@@ -127,9 +138,10 @@ var toolDefinitions = []toolDefinition{
 		Description: "Make (or refresh) a scratch copy of every repo the current edit session touches, laid out like the project, with the session's staged files in place — to build, test and search the staged code before the user reviews it. " +
 			"The reply names its folder. Never edit files there: stage changes with edit_replace and call this again. Deleted when the session is applied or discarded.",
 		InputSchema: objectSchema(map[string]any{
-			"fresh":   map[string]any{"type": "boolean", "description": "Rebuild the copy from the disk as it is now (picks up files changed on disk since it was made)."},
-			"drop":    map[string]any{"type": "boolean", "description": "Delete the sandbox now."},
-			"include": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "More folders the build needs (e.g. a sibling repo), relative to the project or absolute."},
+			"fresh":       map[string]any{"type": "boolean", "description": "Rebuild the copy from the disk as it is now (picks up files changed on disk since it was made)."},
+			"drop":        map[string]any{"type": "boolean", "description": "Delete the sandbox now."},
+			"include":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "More folders the build needs (e.g. a sibling repo), absolute or relative to working_dir."},
+			"working_dir": workingDirProperty,
 		}),
 	},
 	{
@@ -147,10 +159,22 @@ var toolDefinitions = []toolDefinition{
 		Title: "Wait for the user's review",
 		Description: "Wait until the user applies or discards the session they are reviewing (default: the session that ended last). If it says still waiting, call it again. " +
 			"If it says changes requested, stop and ask the user in your reply what they want; then stage the follow-ups in the same session and end it again. " +
-			"A finished outcome may ask you to commit the applied files, or to open a pull request on a new branch (agree the branch name with the user first).",
+			"A finished outcome may ask you to commit the applied files, or to open a pull request (it names the current branch; agree the branch with the user). Afterwards call edit_report.",
 		InputSchema: objectSchema(map[string]any{
 			"timeout_seconds": map[string]any{"type": "integer", "minimum": 1, "maximum": maxWaitSeconds, "description": "How long to wait this call (default 300)."},
 		}),
 		Annotations: map[string]any{"readOnlyHint": true},
+	},
+	{
+		Name:  toolReport,
+		Title: "Report the git work the user asked for",
+		Description: "After edit_wait's outcome asked you to commit or open a pull request, tell the editor what happened (default: the session that ended last): " +
+			"done, blocked (e.g. your harness asked the user to confirm, or refused) or declined. The user sees it in the editor's history.",
+		InputSchema: objectSchema(map[string]any{
+			"result":       map[string]any{"type": "string", "enum": []string{"done", "blocked", "declined"}, "description": "What happened to the git work."},
+			"note":         map[string]any{"type": "string", "description": "A line on what you did or what stopped you, e.g. 'committed on main' or 'git push needs your confirmation in the terminal'."},
+			"commit":       map[string]any{"type": "string", "description": "The commit you made (sha), when done."},
+			"pull_request": map[string]any{"type": "string", "description": "The pull request URL, when you opened one."},
+		}, "result"),
 	},
 }

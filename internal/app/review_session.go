@@ -157,12 +157,14 @@ func (m Model) handleReviewFileResolved(msg reviewFileResolvedMsg) (tea.Model, t
 	if selectedPath != "" {
 		m.review.selection.index = m.review.fileByPath[selectedPath]
 	}
-	m = m.refreshReviewTree()
+	previousRows := m.review.rowByPath
+	m = m.refreshReviewTree().injectReviewRows(previousRows)
 	return m.landReviewArrival(msg.file.workspaceRel, selectedPath == "")
 }
 
 // refreshReviewFile reloads a resent file with the requests' notes added:
-// the newer load wins over one still in flight (loadGen).
+// the newer load wins over one still in flight (loadGen). Its current diff
+// stays on screen until the reload lands.
 func (m Model) refreshReviewFile(index int, requests []reviewRequest) (Model, tea.Cmd) {
 	files := slices.Clone(m.review.files)
 	file := files[index]
@@ -170,7 +172,7 @@ func (m Model) refreshReviewFile(index int, requests []reviewRequest) (Model, te
 		file = m.addReviewNote(file, request)
 	}
 	file.loadGen++
-	file.status, file.document, file.corpus, file.problem = reviewLoading, diffDocument{}, "", ""
+	file.reloading = file.loaded()
 	files[index] = file
 	m.review.files = files
 	if index == m.review.selection.index {
@@ -179,11 +181,18 @@ func (m Model) refreshReviewFile(index int, requests []reviewRequest) (Model, te
 	return m.landReviewArrival(file.workspaceRel, false)
 }
 
-// landReviewArrival follows an arriving (not yet loaded) file — selects it,
-// which loads it — while the view follows or nothing is selected yet;
-// otherwise it loads in the background, marked unseen and announced in the
-// status bar.
+// landReviewArrival follows an arriving file while the view follows or
+// nothing is selected yet: a file with a diff to show (a reload) is selected
+// at once, a new one once it loaded (followPending), so the pane never goes
+// blank in between. Otherwise it loads in the background, marked unseen and
+// announced in the status bar.
 func (m Model) landReviewArrival(rel string, nothingSelected bool) (Model, tea.Cmd) {
+	if m.review.follow && !nothingSelected {
+		if index, ok := m.review.fileByPath[rel]; ok && !m.review.files[index].loaded() {
+			m.review.followPending = rel
+			return m, m.reviewLoadPathCmd(rel)
+		}
+	}
 	if m.review.follow || nothingSelected {
 		following := m.review.follow
 		m, load := m.selectReviewPath(rel)

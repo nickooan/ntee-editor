@@ -70,9 +70,11 @@ func TestAgentEditsOpenTheirReviewWithoutAskingWhenChosen(t *testing.T) {
 		t.Fatalf("the header names the session: %q", header)
 	}
 	status := ansi.Strip(m.renderStatusLine())
-	notice, decision := strings.Index(status, "✎ EDITS opened without asking"), strings.Index(status, "a apply all to disk")
-	if notice < 0 || decision < notice || strings.Contains(status, "edit session e1") {
-		t.Fatalf("the status line leads with the notice, then the decision, without the badge: %q", status)
+	if !strings.Contains(status, "✎ EDITS opened without asking") || strings.Contains(status, "edit session e1") || strings.Contains(status, "a apply all to disk") {
+		t.Fatalf("the status line leads with the notice, without the badge or the decision: %q", status)
+	}
+	if plain := ansi.Strip(m.View().Content); !strings.Contains(plain, "╭─ decide") {
+		t.Fatalf("the decision floats over the code:\n%s", plain)
 	}
 }
 

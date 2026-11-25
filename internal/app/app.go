@@ -1101,10 +1101,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleReviewPrepared(msg)
 
 	case reviewLoadedMsg:
-		return m.handleReviewLoaded(msg)
+		return withReviewMotionTick(m.handleReviewLoaded(msg))
 
 	case reviewFileResolvedMsg:
-		return m.handleReviewFileResolved(msg)
+		return withReviewMotionTick(m.handleReviewFileResolved(msg))
+
+	case reviewMotionTickMsg:
+		return m.handleReviewMotionTick(msg)
 
 	case externalMessageMsg:
 		return m.handleExternalMessage(msg)
@@ -1158,7 +1161,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleAgentEditReviewPrepared(msg)
 
 	case agentEditReviewRefreshedMsg:
-		return m.handleAgentEditReviewRefreshed(msg)
+		return withReviewMotionTick(m.handleAgentEditReviewRefreshed(msg))
 
 	case agentEditsChangesRequestedMsg:
 		return withAgentEditsTick(m.handleAgentEditsChangesRequested(msg))

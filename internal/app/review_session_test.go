@@ -174,6 +174,7 @@ func TestReviewSessionStepsThroughAFilesNotes(t *testing.T) {
 	if selectedReviewPath(m) != "apps/web/main.go" {
 		t.Fatalf("the resent file is followed: %q", selectedReviewPath(m))
 	}
+	m = settleReviewMotion(m)
 	plain := ansi.Strip(m.View().Content)
 	if !strings.Contains(plain, "note 2/2 · L5") || !strings.Contains(plain, "stop added") || !strings.Contains(plain, "[/] note") {
 		t.Fatalf("the active note's box counts the notes and the hint names the keys:\n%s", plain)

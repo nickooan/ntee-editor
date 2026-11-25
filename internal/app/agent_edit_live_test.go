@@ -75,8 +75,8 @@ func TestTheLiveReviewOpensOnlyForAFreeUserWhoReviewsFirst(t *testing.T) {
 func TestTheLiveReviewUnlocksWhereTheUserIsOnceAgentsFinish(t *testing.T) {
 	m, _, receiver, _, _ := agentEditsModel(t, store.AgentEditPolicyReview)
 	m = stageLive(t, m, receiver, "write --edit-session=e1\nmain.go\n---\nreplaced\n", true, store.AgentEditPolicyReview)
-	if status := ansi.Strip(m.renderStatusLine()); !strings.Contains(status, "agents are working… (editing · unnamed)") {
-		t.Fatalf("the hint says the agent works: %q", status)
+	if plain := ansi.Strip(m.View().Content); !strings.Contains(plain, "agents working") || !strings.Contains(plain, "editing · unnamed") || !strings.Contains(plain, "a x r unlock when done") {
+		t.Fatalf("the floating panel says the agent works:\n%s", plain)
 	}
 	m, reply := endLive(t, m, receiver)
 	if !strings.Contains(gotReply(t, reply), "the user is reviewing") {
@@ -85,8 +85,8 @@ func TestTheLiveReviewUnlocksWhereTheUserIsOnceAgentsFinish(t *testing.T) {
 	if m.choice.open() || m.mode != modeReview || m.review.agentEdits != "e1" || m.agentEditReviewLocked() {
 		t.Fatalf("no prompt: the review stays and unlocks: choice=%v mode=%v locked=%v", m.choice.open(), m.mode, m.agentEditReviewLocked())
 	}
-	if status := ansi.Strip(m.renderStatusLine()); !strings.Contains(status, "a apply all to disk · x discard all · r request changes") {
-		t.Fatalf("the decision is offered: %q", status)
+	if plain := ansi.Strip(m.View().Content); !strings.Contains(plain, "apply all") || !strings.Contains(plain, "request changes") || strings.Contains(plain, "unlock when done") {
+		t.Fatalf("the floating panel offers the decision:\n%s", plain)
 	}
 }
 

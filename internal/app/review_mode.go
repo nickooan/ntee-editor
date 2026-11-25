@@ -57,6 +57,14 @@ type reviewFile struct {
 	// diffed from its content before the agent's edits to the staged
 	// content, with no git involved. nil for a git review.
 	staged *stagedReviewSource
+	// reloading: document (and status, corpus) is the previous load, shown
+	// until the newer one (loadGen) lands, so a resent file never blanks
+	// the pane.
+	reloading bool
+	// motion is what a reload changed against the previous load, computed
+	// on the load goroutine; handleReviewLoaded takes it for the selected
+	// file and drops it otherwise.
+	motion *rowMotion
 }
 
 // reviewRequest is one file asked for review: its workspace path, the line
@@ -103,6 +111,11 @@ type reviewState struct {
 	follow     bool
 	newestPath string
 	unseen     map[string]bool
+	// followPending is an arrival the view follows once it loaded: the file
+	// on screen stays until then instead of a blank "computing diff…".
+	followPending string
+
+	motion reviewMotion // review_motion.go
 
 	// An agent edit session's review (agent_edit_review.go): its id ("" =
 	// none), and whether it is a finished session's read-only trace rather
@@ -410,7 +423,7 @@ func (m Model) reviewLoadBatchCmd(start int) tea.Cmd {
 // the user moves onto one that is still loading.
 func (m Model) reviewLoadSelectedCmd() tea.Cmd {
 	index := m.review.selection.index
-	if index >= len(m.review.files) || m.review.files[index].loaded() {
+	if index >= len(m.review.files) || (m.review.files[index].loaded() && !m.review.files[index].reloading) {
 		return nil
 	}
 	return m.reviewLoadCmd(index, index+1, -1)
@@ -424,7 +437,7 @@ func (m Model) reviewLoadCmd(start, end, nextStart int) tea.Cmd {
 	gen, base, workspaceRoot := m.review.gen, m.review.base, m.workspaceRoot
 	var pending []reviewFile
 	for _, file := range m.review.files[start:end] {
-		if !file.loaded() {
+		if !file.loaded() || file.reloading {
 			pending = append(pending, file)
 		}
 	}
@@ -437,11 +450,18 @@ func (m Model) reviewLoadCmd(start, end, nextStart int) tea.Cmd {
 		revisions := resolveReviewRevisions(base, pending)
 		forEachParallel(len(pending), func(i int) {
 			withReviewLoadSlot(func() {
-				if pending[i].staged != nil {
-					pending[i] = loadStagedReviewFile(pending[i], highlightLimit, tabWidths[i])
-					return
+				previous, reloading := pending[i].document, pending[i].reloading
+				fresh := pending[i]
+				fresh.status, fresh.document, fresh.corpus, fresh.problem, fresh.contentHash = reviewLoading, diffDocument{}, "", "", 0
+				if fresh.staged != nil {
+					fresh = loadStagedReviewFile(fresh, highlightLimit, tabWidths[i])
+				} else {
+					fresh = loadReviewFile(workspaceRoot, revisions[fresh.repoRoot], fresh, highlightLimit, tabWidths[i])
 				}
-				pending[i] = loadReviewFile(workspaceRoot, revisions[pending[i].repoRoot], pending[i], highlightLimit, tabWidths[i])
+				if reloading {
+					fresh.motion = compareReviewDocuments(previous, fresh.document)
+				}
+				pending[i] = fresh
 			})
 		})
 		return reviewLoadedMsg{gen: gen, files: pending, nextStart: nextStart}
@@ -583,31 +603,59 @@ func expandDocumentTabs(document diffDocument, tabWidth int) diffDocument {
 // session inserts files while loads are in flight. A file that already loaded
 // (the priority load raced its batch) keeps its first result so the cursor on
 // it stays put, and a stale load of a resent file is dropped (loadGen).
-// Landing the selected file puts the cursor on its note or first change.
+// Landing the selected file puts the cursor on its note or first change and
+// animates what the reload changed; a pending follow lands on its file now
+// that it has something to show.
 func (m Model) handleReviewLoaded(msg reviewLoadedMsg) (tea.Model, tea.Cmd) {
 	if msg.gen != m.review.gen || m.mode != modeReview {
 		return m, nil
 	}
 	files := append([]reviewFile(nil), m.review.files...)
+	followLanded := false
 	for _, file := range msg.files {
 		index, ok := m.review.fileByPath[file.workspaceRel]
-		if !ok || files[index].loaded() || files[index].loadGen != file.loadGen {
+		if !ok || files[index].loadGen != file.loadGen || (files[index].loaded() && !files[index].reloading) {
 			continue
 		}
 		// The notes may have moved on while it loaded (a step to another
 		// note); the load only brings the diff.
 		file.notes = stampReviewNotes(files[index].notes, file.contentHash)
 		file.activeNote = files[index].activeNote
+		file.reloading = false
+		motion := file.motion
+		file.motion = nil
 		files[index] = file
 		if index == m.review.selection.index {
 			m.review.position = rowCursor{}.anchoredAt(file.landingRow(), m.reviewSpanFor(file))
+			m = m.startCodeMotion(file.workspaceRel, motion)
+		}
+		if file.workspaceRel == m.review.followPending {
+			followLanded = true
 		}
 	}
 	m.review.files = files
+	if followLanded {
+		m = m.landFollowPending()
+	}
 	if msg.nextStart < 0 {
 		return m, nil
 	}
 	return m, m.reviewLoadBatchCmd(msg.nextStart)
+}
+
+// landFollowPending moves the view onto the arrival it was waiting to
+// follow, which just loaded, and reveals it — unless the user moved away
+// meanwhile (follow is off then).
+func (m Model) landFollowPending() Model {
+	rel := m.review.followPending
+	m.review.followPending = ""
+	index, ok := m.review.fileByPath[rel]
+	if !ok || !m.review.follow {
+		return m
+	}
+	m, _ = m.selectReviewFile(index)
+	m.review.follow = true // arrivals resolve out of order: keep following
+	return m.startCodeMotion(rel, revealMotion(m.review.files[index].document))
 }
 
 // selectedReviewFile is the file under the list selection.

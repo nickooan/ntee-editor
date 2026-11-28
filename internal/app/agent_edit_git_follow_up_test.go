@@ -150,7 +150,7 @@ func TestAnAgentsGitReportReachesTheRecordTheNoticeAndTheHistoryRow(t *testing.T
 	if m.notice != "edit session e1 · PR opened https://example.com/pull/117 — opened the PR" {
 		t.Fatalf("notice = %q", m.notice)
 	}
-	if row := agentEditSessionRow(record, false); !strings.Contains(strings.Join(row.pieces, ""), "PR opened https://example.com/pull/117") || strings.Contains(strings.Join(row.pieces, ""), "PR asked") {
+	if row := agentEditSessionRow(record, false, false); !strings.Contains(strings.Join(row.pieces, ""), "PR opened https://example.com/pull/117") || strings.Contains(strings.Join(row.pieces, ""), "PR asked") {
 		t.Fatalf("the history row shows the report instead of the ask: %+v", row.pieces)
 	}
 }

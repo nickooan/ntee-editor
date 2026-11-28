@@ -54,6 +54,14 @@ func (w *AsyncWrites) write() {
 
 func (w *AsyncWrites) enqueue(run func()) { w.queue <- run }
 
+// Connections reports the wrapped store's connections.
+func (w *AsyncWrites) Connections() []ConnectionStatus {
+	if reporter, ok := w.Backend.(ConnectionReporter); ok {
+		return reporter.Connections()
+	}
+	return nil
+}
+
 // flush waits until every write queued before it is in the db: the writer
 // reaches its marker only after them. Safe from any goroutine.
 func (w *AsyncWrites) flush() {

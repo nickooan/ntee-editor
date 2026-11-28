@@ -159,8 +159,8 @@ func (m Model) fileTreeSidebarList(width int) sidebarList {
 	rowAt := func(index int) sidebarRow {
 		entry := entries[index]
 		label, style := filetree.FormatFileTreeEntryLabel(entry, width), m.fileTreeEntryStyle(entry)
-		if _, staged := m.agentEdits.stagedFiles[entry.RelativePath]; staged && entry.Type != "directory" {
-			return stagedFileTreeRow(label, entry.Depth, style)
+		if file, staged := m.agentEdits.stagedFiles[entry.RelativePath]; staged && entry.Type != "directory" {
+			return stagedFileTreeRow(label, entry.Depth, style, file.stale)
 		}
 		return sidebarRow{segments: []sidebarSegment{{text: label, style: style}}}
 	}
@@ -169,7 +169,11 @@ func (m Model) fileTreeSidebarList(width int) sidebarList {
 
 // stagedFileTreeRow puts the staged mark in a file row's marker column
 // (two spaces for a file, after the indent).
-func stagedFileTreeRow(label string, depth int, style lipgloss.Style) sidebarRow {
+func stagedFileTreeRow(label string, depth int, style lipgloss.Style, stale bool) sidebarRow {
+	markStyle := stagedFileMarkStyle
+	if stale {
+		markStyle = staleStagedFileMarkStyle
+	}
 	runes := []rune(label)
 	markAt := 2 * depth
 	if len(runes) < markAt+2 {
@@ -177,7 +181,7 @@ func stagedFileTreeRow(label string, depth int, style lipgloss.Style) sidebarRow
 	}
 	return sidebarRow{segments: []sidebarSegment{
 		{text: string(runes[:markAt]), style: style},
-		{text: "✎ ", style: stagedFileMarkStyle},
+		{text: "✎ ", style: markStyle},
 		{text: string(runes[markAt+2:]), style: style},
 	}}
 }

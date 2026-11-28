@@ -261,3 +261,50 @@ func TestStagedInAnswersAnUnstagedFileWithoutReadingIt(t *testing.T) {
 		t.Fatalf("a staged file still names its session: %q %v", session, err)
 	}
 }
+
+func TestStagedTopsAgreeWithLatest(t *testing.T) {
+	registry, root, _ := newTestRegistry(t)
+	_, err := registry.Replace("A", "", "a.go", Replacement{Old: "one", New: "ONE"})
+	must(t, err)
+	_, err = registry.Replace("B", "", "a.go", Replacement{Old: "three", New: "THREE"})
+	must(t, err)
+	_, err = registry.Write("C", "", "b.go", "new\n")
+	must(t, err)
+	tops := registry.StagedTops()
+	if tops["a.go"] != (StagedTop{Session: "B"}) || tops["b.go"] != (StagedTop{Session: "C"}) || len(tops) != 2 {
+		t.Fatalf("live stacks name their top: %+v", tops)
+	}
+
+	must(t, os.WriteFile(filepath.Join(root, "a.go"), []byte("someone\n"), 0o644))
+	top := registry.StagedTops()["a.go"]
+	if !top.Stale || top.Session != "B" || top.Reason != "changed on disk since it was staged" {
+		t.Fatalf("the disk changed under the stack: %+v", top)
+	}
+	if session, _ := registry.StagedIn("a.go"); session != "" {
+		t.Fatalf("Latest agrees it is the disk: %q", session)
+	}
+	if tops := UnsettledTops(registry.Pending()); tops["a.go"] != "B" {
+		t.Fatalf("without the disk it still counts: %+v", tops)
+	}
+
+	// A new session built on the changed disk is a live root over the stale stack.
+	_, err = registry.Replace("D", "", "a.go", Replacement{Old: "someone", New: "me"})
+	must(t, err)
+	if top := registry.StagedTops()["a.go"]; top != (StagedTop{Session: "D"}) {
+		t.Fatalf("the live root wins: %+v", top)
+	}
+}
+
+func TestStagedTopsNameADiscardedBase(t *testing.T) {
+	registry, _, _ := newTestRegistry(t)
+	_, err := registry.Replace("A", "", "a.go", Replacement{Old: "one", New: "ONE"})
+	must(t, err)
+	_, err = registry.Replace("B", "", "a.go", Replacement{Old: "three", New: "THREE"})
+	must(t, err)
+	_, err = registry.Discard("A", "the user", 20)
+	must(t, err)
+	top := registry.StagedTops()["a.go"]
+	if !top.Stale || top.Session != "B" || top.Reason != "built on edit session A's edits, which were discarded" {
+		t.Fatalf("B is orphaned: %+v", top)
+	}
+}

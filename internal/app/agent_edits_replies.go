@@ -43,8 +43,8 @@ func (m Model) handleAgentEditMessage(msg externalMessageMsg) (tea.Model, tea.Cm
 		waiters[id] = append(slices.Clip(waiters[id]), msg.reply)
 		m.agentEdits.waiters = waiters
 		// A blocked waiter is an agent alive and waiting on the user: the
-		// label says so, animated.
-		return withAgentEditsTick(m, nil)
+		// label says so with the still agentWaitingIcon.
+		return m, nil
 	}
 
 	m = m.refreshAgentEditsPending()

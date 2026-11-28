@@ -157,22 +157,22 @@ func renderDiffRow(document diffDocument, i int, position rowCursor, search diff
 	var number string
 	switch row.kind {
 	case diffAdd:
-		mark := diffMarkAddStyle.Render("+")
+		mark := renderStyledRun(diffMarkAddStyle, "+")
 		if noted {
-			mark = diffNoteMarkAddStyle.Render("◆")
+			mark = renderStyledRun(diffNoteMarkAddStyle, "◆")
 		}
-		number = diffGutterAddStyle.Render(pad(strconv.Itoa(row.bufLine+1), gutterWidth)) + mark + diffGutterAddStyle.Render("│ ")
+		number = renderStyledRun(diffGutterAddStyle, pad(strconv.Itoa(row.bufLine+1), gutterWidth)) + mark + renderStyledRun(diffGutterAddStyle, "│ ")
 	case diffDel:
-		mark := diffMarkDelStyle.Render("-")
+		mark := renderStyledRun(diffMarkDelStyle, "-")
 		if noted {
-			mark = diffNoteMarkDelStyle.Render("◆")
+			mark = renderStyledRun(diffNoteMarkDelStyle, "◆")
 		}
-		number = diffGutterDelStyle.Render(pad("", gutterWidth)) + mark + diffGutterDelStyle.Render("│ ")
+		number = renderStyledRun(diffGutterDelStyle, pad("", gutterWidth)) + mark + renderStyledRun(diffGutterDelStyle, "│ ")
 	default:
 		if noted {
-			number = gutterStyle.Render(pad(strconv.Itoa(row.bufLine+1), gutterWidth)) + diffNoteMarkStyle.Render("◆") + gutterStyle.Render("│ ")
+			number = renderStyledRun(gutterStyle, pad(strconv.Itoa(row.bufLine+1), gutterWidth)) + renderStyledRun(diffNoteMarkStyle, "◆") + renderStyledRun(gutterStyle, "│ ")
 		} else {
-			number = gutterStyle.Render(pad(strconv.Itoa(row.bufLine+1), gutterWidth) + " │ ")
+			number = renderStyledRun(gutterStyle, pad(strconv.Itoa(row.bufLine+1), gutterWidth)+" │ ")
 		}
 	}
 

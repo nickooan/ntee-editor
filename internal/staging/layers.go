@@ -42,6 +42,81 @@ func (r *Registry) StagedIn(rel string) (string, error) {
 	return session, err
 }
 
+// StagedTop is the session on top of a file's staged layers. Stale marks a
+// stack that can no longer be written (Reason says why): the disk changed
+// under its bottom layer, or that layer was built on a session the user
+// discarded. Latest then serves the disk.
+type StagedTop struct {
+	Session string
+	Stale   bool
+	Reason  string
+}
+
+// UnsettledTops maps each file with unsettled staged layers to its newest
+// layer no other session builds on. It reads no disk, so a stale layer still
+// counts: StagedTops tells the two apart.
+func UnsettledTops(sessions []store.AgentEditSession) map[string]string {
+	builtOn := map[string]bool{}
+	for _, session := range sessions {
+		for _, file := range session.Files {
+			if file.Result == "" && file.BaseSession != "" {
+				builtOn[file.BaseSession+"\x00"+file.Rel] = true
+			}
+		}
+	}
+	tops := map[string]string{}
+	for _, session := range sessions { // oldest first: a newer top wins
+		for _, file := range session.Files {
+			if file.Result == "" && !builtOn[session.Session+"\x00"+file.Rel] {
+				tops[file.Rel] = session.Session
+			}
+		}
+	}
+	return tops
+}
+
+// StagedTops is UnsettledTops checked against the disk, the way Latest
+// picks a file's top layer: a file whose stacks are all stale keeps its
+// newest top, marked stale. A file it cannot read stays live. It reads every
+// staged file: run it off the UI goroutine.
+func (r *Registry) StagedTops() map[string]StagedTop {
+	sessions := r.Pending()
+	unsettled := UnsettledTops(sessions)
+	tops := make(map[string]StagedTop, len(unsettled))
+	for rel, newest := range unsettled {
+		disk, diskExists, err := r.readDisk(rel)
+		if err != nil {
+			tops[rel] = StagedTop{Session: newest}
+			continue
+		}
+		if top, ok := topLayer(sessions, rel, disk, diskExists); ok {
+			tops[rel] = StagedTop{Session: top.session}
+			continue
+		}
+		tops[rel] = StagedTop{Session: newest, Stale: true, Reason: r.staleReason(sessions, newest, rel)}
+	}
+	return tops
+}
+
+// staleReason says why the stack under session's copy of rel is stale, from
+// its bottom layer: built on discarded edits, or the disk changed.
+func (r *Registry) staleReason(sessions []store.AgentEditSession, session, rel string) string {
+	bottom, _ := fileIn(sessions, session, rel)
+	for range len(sessions) {
+		lower, isPending := fileIn(sessions, bottom.BaseSession, rel)
+		if bottom.BaseSession == "" || !isPending {
+			break
+		}
+		bottom = lower
+	}
+	if bottom.BaseSession != "" {
+		if finished, known := r.Finished(bottom.BaseSession); known && finished.Status == store.AgentEditDiscarded {
+			return "built on edit session " + bottom.BaseSession + "'s edits, which were discarded"
+		}
+	}
+	return "changed on disk since it was staged"
+}
+
 // hasUnsettledLayer reports whether any pending session stages rel and has
 // not settled it.
 func hasUnsettledLayer(sessions []store.AgentEditSession, rel string) bool {

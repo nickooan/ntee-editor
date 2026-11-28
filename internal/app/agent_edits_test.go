@@ -39,7 +39,7 @@ func settleAgentEdits(m Model, cmd tea.Cmd) Model {
 		msg := queue[0]
 		queue = queue[1:]
 		switch msg.(type) {
-		case agentEditsFinishedMsg, agentEditsForceEndedMsg, agentEditsFinishedListMsg, agentEditReviewPreparedMsg, agentEditReviewRefreshedMsg, agentEditsChangesRequestedMsg, reviewPreparedMsg, reviewLoadedMsg, externalSettingsMsg, externalHistoryLoadedMsg:
+		case agentEditsFinishedMsg, agentEditsForceEndedMsg, agentEditsFinishedListMsg, agentEditDetailLoadedMsg, agentEditReviewPreparedMsg, agentEditReviewRefreshedMsg, agentEditsChangesRequestedMsg, reviewPreparedMsg, reviewLoadedMsg, externalSettingsMsg, externalHistoryLoadedMsg:
 			var next tea.Cmd
 			m, next = deliver(m, msg)
 			queue = append(queue, execCmds(next)...)
@@ -227,7 +227,7 @@ func TestAgentEditReviewThenApply(t *testing.T) {
 		t.Fatalf("diff before → staged with the edit log: +%d −%d notes=%+v", file.document.adds, file.document.dels, file.notes)
 	}
 	plain := ansi.Strip(m.View().Content)
-	if !strings.Contains(plain, "edit session e1 · staged, not written") || !strings.Contains(plain, "╭─ ⏳ agent waiting for you") || !strings.Contains(plain, "discard all") ||
+	if !strings.Contains(plain, "edit session e1 · staged, not written") || !strings.Contains(plain, "╭─ 💤 agent waiting for you") || !strings.Contains(plain, "discard all") ||
 		strings.Contains(ansi.Strip(m.renderStatusLine()), "a apply all to disk") {
 		t.Fatalf("the decision floats over the code, not in the status bar:\n%s", plain)
 	}
@@ -306,6 +306,11 @@ func TestAgentEditsPanelPolicyAndTrace(t *testing.T) {
 	m = key(m, keyPress(tea.KeyDown))
 	m = key(m, keyPress(tea.KeyDown))
 	next, cmd = m.Update(keyPress(tea.KeyEnter))
+	m = settleAgentEdits(next.(Model), cmd)
+	if m.mode != modeInspect || m.agentEditsPicker.detail == nil || m.agentEditsPicker.detail.session != "done1" {
+		t.Fatalf("a session opens its details first: mode=%v %+v", m.mode, m.agentEditsPicker.detail)
+	}
+	next, cmd = m.Update(keyPress(tea.KeyEnter)) // the details' review row
 	m = settleAgentEdits(next.(Model), cmd)
 	if m.mode != modeReview || m.review.agentEdits != "done1" || !m.review.agentEditsTrace {
 		t.Fatalf("a finished session opens as a trace: mode=%v %q trace=%v", m.mode, m.review.agentEdits, m.review.agentEditsTrace)
@@ -716,23 +721,30 @@ func TestAnAgentBlockedInWaitShowsAsWaitingForReview(t *testing.T) {
 	if got := m.sessionsAwaitingReview(); len(got) != 1 || got[0] != "e1" {
 		t.Fatalf("the waited-on session is awaiting review: %v", got)
 	}
-	if !m.agentsAnimating() || !m.agentEdits.ticking {
-		t.Fatal("a waiting agent animates the label")
+	if m.agentsAnimating() {
+		t.Fatal("a waiting agent shows a still icon: an hours-long wait must not redraw the editor 7 times a second")
 	}
-	if label := m.headerAgentEditingLabel(); !strings.HasSuffix(label, " ⏳ agent waiting for your review") || strings.HasPrefix(label, "·") {
+	m.agentEdits.ticking = true
+	if next, cmd := m.handleAgentEditsTick(); cmd != nil || next.(Model).agentEdits.ticking {
+		t.Fatal("a tick chain left from the agent's work stops once it only waits")
+	}
+	if label := m.headerAgentEditingLabel(); label != "💤 agent waiting for your review" {
 		t.Fatalf("header = %q", label)
 	}
 	m.mode, m.review.agentEdits = modeReview, "e1"
-	if hint := m.agentEditReviewHint(); !strings.Contains(hint, "⏳ agent waiting for you") || !strings.Contains(hint, "a apply all to disk") {
+	if hint := m.agentEditReviewHint(); !strings.Contains(hint, "💤 agent waiting for you") || !strings.Contains(hint, "a apply all to disk") {
 		t.Fatalf("the review hint says the agent waits and keeps the decision keys: %q", hint)
 	}
 
-	m, _ = deliver(m, sessionWaitExpiredMsg{reply: wait})
+	m, redraw := deliver(m, sessionWaitExpiredMsg{reply: wait})
+	if redraw == nil {
+		t.Fatal("a wait giving up schedules the redraw that clears the still label once the grace passes")
+	}
 	if len(m.sessionsAwaitingReview()) != 1 {
 		t.Fatal("between one wait giving up and the next, the session still shows as awaited")
 	}
 	m.agentEdits.waitExpiredAt = map[string]time.Time{"e1": time.Now().Add(-agentEditWaitGrace)}
-	if len(m.sessionsAwaitingReview()) != 0 || m.agentsAnimating() {
+	if len(m.sessionsAwaitingReview()) != 0 {
 		t.Fatal("once the grace passes with no new wait, the agent is no longer counted as waiting")
 	}
 }

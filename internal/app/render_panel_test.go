@@ -43,16 +43,19 @@ func inspectPanelModel(t *testing.T, menu int) Model {
 func TestInspectPanelsAreTables(t *testing.T) {
 	cases := []struct {
 		menu    int
+		height  int
 		headers [2]string
 		legend  []string
 	}{
-		{inspectMenuDB, [2]string{"METRIC", "VALUE"}, []string{"db compact", "db relieve"}},
-		{inspectMenuLSP, [2]string{"LANGUAGE", "STATUS"}, []string{"lsp enable <lang|all>", "lsp disable <lang|all>"}},
-		{inspectMenuSystem, [2]string{"SETTING", "VALUE"}, []string{"syscolor <name>"}},
+		// The ntee-db pane carries its connections table too: it sheds its
+		// legend below about 35 rows (TestInspectPanelsFitTheirHeight).
+		{inspectMenuDB, 40, [2]string{"METRIC", "VALUE"}, []string{"db compact", "db relieve"}},
+		{inspectMenuLSP, 20, [2]string{"LANGUAGE", "STATUS"}, []string{"lsp enable <lang|all>", "lsp disable <lang|all>"}},
+		{inspectMenuSystem, 20, [2]string{"SETTING", "VALUE"}, []string{"syscolor <name>"}},
 	}
 	for _, tc := range cases {
 		m := inspectPanelModel(t, tc.menu)
-		out := ansi.Strip(m.renderInspectMain(80, 20))
+		out := ansi.Strip(m.renderInspectMain(80, tc.height))
 		for _, want := range append([]string{"╭", "├", "╰", "Commands"}, tc.legend...) {
 			if !strings.Contains(out, want) {
 				t.Fatalf("panel %d missing %q:\n%s", tc.menu, want, out)

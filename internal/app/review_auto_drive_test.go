@@ -138,3 +138,25 @@ func TestRowMotionCarriesACursorPastAddedAndRemovedRows(t *testing.T) {
 		t.Fatalf("a cursor on a vanished row moves to the next kept row: %v", motion.previousToNext)
 	}
 }
+
+func TestAFinderPickThatPausesAutoDriveRunsTheFlashToItsEnd(t *testing.T) {
+	m, _ := liveAutoDriveReview(t)
+	m = settleReviewMotion(m)
+	m.review.motion.ticking = false
+	m = key(m, ctrlKey('p'))
+	m = runes(m, "main.go")
+	next, cmd := m.Update(keyPress(tea.KeyEnter))
+	m = next.(Model)
+	if m.review.follow || !m.review.motion.switching {
+		t.Fatalf("the pick pauses auto-drive with a flash: follow=%v switching=%v", m.review.follow, m.review.motion.switching)
+	}
+	ticks := 0
+	for _, msg := range execCmds(cmd) {
+		if _, ok := msg.(reviewMotionTickMsg); ok {
+			ticks++
+		}
+	}
+	if ticks != 1 || !m.review.motion.ticking {
+		t.Fatalf("the flash starts its tick chain, else the chip stays lit: ticks=%d ticking=%v", ticks, m.review.motion.ticking)
+	}
+}

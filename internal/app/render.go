@@ -34,7 +34,11 @@ func (m Model) render() string {
 	if m.splash {
 		return m.renderSplash()
 	}
+	return composeFrame(m.renderFramePieces())
+}
 
+// renderFramePieces renders the frame's parts; composeFrame lays them out.
+func (m Model) renderFramePieces() framePieces {
 	header := m.renderHeader()
 	status := m.padStatusRows(m.renderStatusLine())
 	bodyHeight := m.bodyHeight()
@@ -44,10 +48,7 @@ func (m Model) render() string {
 	// terminal-default background against the themed panes.
 	mainWidth := max(3, m.width-sidebarWidth)
 
-	sidebarBody := fitPaneLines(renderSidebarList(m.sidebarListForMode(sidebarWidth-4), sidebarWidth-4, bodyHeight-2), sidebarWidth-4)
-	// lipgloss v2: Width/Height include the border, so the panes take the
-	// full slot (v1 set the inner size and the border grew them by 2).
-	sidebar := paneStyle.Width(sidebarWidth).Height(bodyHeight).Render(sidebarBody)
+	sidebarBody := renderSidebarList(m.sidebarListForMode(sidebarWidth-4), sidebarWidth-4, bodyHeight-2)
 
 	// Overlays own the whole pane; otherwise the tab strip steals the top row.
 	showTabs := m.tabStripVisible()
@@ -98,27 +99,12 @@ func (m Model) render() string {
 		divider := tabDividerStyle.Render(strings.Repeat("─", max(0, mainWidth-4)))
 		mainBody = m.renderTabStrip(mainWidth-4) + "\n" + divider + "\n" + mainBody
 	}
-	mainPane := paneStyle.Width(mainWidth).Height(bodyHeight).Render(fitPaneLines(mainBody, mainWidth-4))
-
-	body := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, mainPane)
-	return lipgloss.JoinVertical(lipgloss.Left, header, body, status)
-}
-
-// fitPaneLines cuts every line of a pane body to width terminal cells. Row
-// renderers window text by runes, but a tab (drawn as 4 spaces) or a wide
-// rune takes more than one cell; an over-wide line would wrap inside the pane
-// and spill its tail into the next row's gutter.
-func fitPaneLines(body string, width int) string {
-	if width < 1 {
-		return body
+	// lipgloss v2 semantics: a pane's width and height include its border.
+	return framePieces{
+		header: header, status: status,
+		sidebarBody: sidebarBody, mainBody: mainBody,
+		sidebarWidth: sidebarWidth, mainWidth: mainWidth, bodyHeight: bodyHeight,
 	}
-	lines := strings.Split(body, "\n")
-	for i, line := range lines {
-		if ansi.StringWidth(line) > width {
-			lines[i] = ansi.Truncate(line, width, "")
-		}
-	}
-	return strings.Join(lines, "\n")
 }
 
 // padStatusRows extends each status row to the full terminal width so the
@@ -561,11 +547,11 @@ func (m Model) renderFile(width, height int) string {
 		var number string
 		switch lineSev[i] {
 		case 1:
-			number = gutterErrStyle.Render(numText+"●") + gutterStyle.Render("│ ")
+			number = renderStyledRun(gutterErrStyle, numText+"●") + renderStyledRun(gutterStyle, "│ ")
 		case 2, 3, 4:
-			number = gutterWarnStyle.Render(numText+"●") + gutterStyle.Render("│ ")
+			number = renderStyledRun(gutterWarnStyle, numText+"●") + renderStyledRun(gutterStyle, "│ ")
 		default:
-			number = gutterStyle.Render(numText + " │ ")
+			number = renderStyledRun(gutterStyle, numText+" │ ")
 		}
 		var content string
 		switch {
@@ -806,7 +792,7 @@ func renderSegmentsBg(segs []view.HighlightSegment, off, width int, bg string, p
 		rendered += take
 	}
 	if pad := width - rendered; pad > 0 {
-		b.WriteString(padStyle.Render(strings.Repeat(" ", pad)))
+		b.WriteString(renderStyledRun(padStyle, strings.Repeat(" ", pad)))
 	}
 	return b.String()
 }
@@ -1111,7 +1097,7 @@ func renderRun(style lipgloss.Style, text string, tabWidth int) string {
 	if tabWidth != config.DefaultTabWidth && strings.IndexByte(text, '\t') >= 0 {
 		style = style.TabWidth(tabWidth)
 	}
-	return style.Render(text)
+	return renderStyledRun(style, text)
 }
 
 // tabWidthFor is the tab size of a file: its language's, else the
@@ -1285,9 +1271,9 @@ func (m Model) headerAgentEditingLabel() string {
 	case checking > 1:
 		return fmt.Sprintf("%s ⚙ agents checking (%d)…%s", spinner, checking, idle)
 	case awaiting == 1:
-		return m.agentEditsSpinner(true) + " ⏳ agent waiting for your review"
+		return agentWaitingIcon + " agent waiting for your review"
 	case awaiting > 1:
-		return fmt.Sprintf("%s ⏳ agents waiting for your review (%d)", m.agentEditsSpinner(true), awaiting)
+		return fmt.Sprintf("%s agents waiting for your review (%d)", agentWaitingIcon, awaiting)
 	}
 	return ""
 }
@@ -1368,13 +1354,7 @@ func runEndsOf(style lipgloss.Style, key segStyleKey) runEnds {
 	if key.underline || key.strike {
 		return runEnds{}
 	}
-	const sentinel = "X"
-	rendered := style.Render(sentinel)
-	if strings.Count(rendered, sentinel) != 1 {
-		return runEnds{}
-	}
-	open, close, _ := strings.Cut(rendered, sentinel)
-	return runEnds{open: open, close: close, ok: true}
+	return runEndsOfStyle(style)
 }
 
 func segmentStyleKey(segment view.HighlightSegment, bg string) segStyleKey {
@@ -1559,6 +1539,8 @@ var (
 	uncommittedDirStyle  = lipgloss.NewStyle().Foreground(colYellow).Bold(true).Background(colBg)
 	// The tree's mark on a file with agent edits staged but not written.
 	stagedFileMarkStyle = lipgloss.NewStyle().Foreground(colOrange).Bold(true).Background(colBg)
+	// A stale stack's mark: still there to find and discard, but quiet.
+	staleStagedFileMarkStyle = lipgloss.NewStyle().Foreground(colComment).Background(colBg)
 
 	// Autocomplete dropdown rows.
 	completionItemStyle      = lipgloss.NewStyle().Foreground(colFg).Background(colBgChrome)

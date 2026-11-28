@@ -212,7 +212,7 @@ func (m Model) agentEditDecisionPanel() (floatPanel, bool) {
 		return floatPanel{
 			title:      " " + spinner + " agents working ",
 			titleStyle: lineNoteSessionTitleStyle,
-			rows:       []floatPanelRow{{label: who}, {label: "a x r unlock when done"}, {key: "Esc", label: "back to editor"}},
+			rows:       []floatPanelRow{{label: who}, {label: "a x r unlock when done"}, {key: "Esc", label: "back to " + strings.TrimPrefix(m.reviewLeaveTarget(), "the ")}},
 		}
 	}
 	switch {
@@ -221,9 +221,18 @@ func (m Model) agentEditDecisionPanel() (floatPanel, bool) {
 	case m.agentEdits.checking[id]:
 		return working("checking", record.CheckingAgents()), true
 	case slices.Contains(m.sessionsAwaitingReview(), id):
-		panel.title, panel.titleStyle = " ⏳ agent waiting for you ", lineNoteSessionTitleStyle
+		panel.title, panel.titleStyle = " "+agentWaitingIcon+" agent waiting for you ", lineNoteSessionTitleStyle
 	}
 	return panel, true
+}
+
+// reviewLeaveTarget names where Esc leaves a review for: the session
+// details page it was opened from, or the editor.
+func (m Model) reviewLeaveTarget() string {
+	if m.review.previousMode == modeInspect {
+		return "the session"
+	}
+	return "the editor"
 }
 
 // reviewFloatPanel is the review's floating panel: a live review's
@@ -433,11 +442,11 @@ func (m Model) agentEditReviewHint() string {
 	case !ok:
 		return agentEditDecisionHint
 	case m.agentEdits.stillEditing[id]:
-		return " " + spinner + " agents are working… (editing · " + staging.AgentNames(record.WithAgents().EditingAgents()) + idle + ") · Esc back to the editor "
+		return " " + spinner + " agents are working… (editing · " + staging.AgentNames(record.WithAgents().EditingAgents()) + idle + ") · Esc back to " + m.reviewLeaveTarget() + " "
 	case m.agentEdits.checking[id]:
-		return " " + spinner + " agents are working… (checking · " + staging.AgentNames(record.CheckingAgents()) + idle + ") · Esc back to the editor "
+		return " " + spinner + " agents are working… (checking · " + staging.AgentNames(record.CheckingAgents()) + idle + ") · Esc back to " + m.reviewLeaveTarget() + " "
 	case slices.Contains(m.sessionsAwaitingReview(), id):
-		return " " + m.agentEditsSpinner(true) + " ⏳ agent waiting for you ·" + agentEditDecisionHint
+		return " " + agentWaitingIcon + " agent waiting for you ·" + agentEditDecisionHint
 	}
 	return agentEditDecisionHint
 }

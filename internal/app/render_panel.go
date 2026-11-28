@@ -158,12 +158,24 @@ func panelCellFill(styled string, width int, fill lipgloss.Style) string {
 // panelRow is one info-table row: a label and pre-styled value pieces. The
 // pieces flow onto continuation lines (empty key cell) when the value column
 // is too narrow for them side by side; stacked puts each on its own line.
-// selectedPiece (1-based, 0 = none) pads that line in the selection color.
+// selectedPiece (1-based, 0 = none) pads that line in the selection color;
+// selected puts the whole row on the selection bar, its label and every
+// line, and the caller renders the pieces in panelPicked styles to match.
 type panelRow struct {
 	label         string
 	pieces        []string
 	stacked       bool
 	selectedPiece int
+	selected      bool
+}
+
+// panelPicked is style on the selection bar when picked: a selected row's
+// text keeps its color but not the panel background.
+func panelPicked(style lipgloss.Style, picked bool) lipgloss.Style {
+	if picked {
+		return style.Background(colSelection)
+	}
+	return style
 }
 
 // lines lays the row's pieces out for a value column of width.
@@ -187,17 +199,32 @@ type infoPanel struct {
 	titleHint              string // focus hint after the title ("press → to …")
 	keyHeader, valueHeader string
 	rows                   []panelRow
-	message                []string // plain text lines spanning the table (loading, unavailable)
-	after                  []string // pre-styled lines under the table
+	message                []string       // plain text lines spanning the table (loading, unavailable)
+	sections               []panelSection // more tables under the first, columns aligned with it
+	after                  []string       // pre-styled lines under the tables
 	legend                 []panelLegendEntry
+	keyLegend              bool // the legend lists keys, not bar commands
 }
 
-// table sizes the panel's table: the key column fits the longest label,
-// capped at a third of the width.
+// panelSection is a titled table drawn under the panel's own.
+type panelSection struct {
+	title, note            string
+	keyHeader, valueHeader string
+	rows                   []panelRow
+}
+
+// table sizes the panel's tables: the key column fits the longest label of
+// any of them, capped at a third of the width.
 func (panel infoPanel) table(width int) panelTable {
 	keyWidth := len(panel.keyHeader)
 	for _, row := range panel.rows {
 		keyWidth = max(keyWidth, len([]rune(row.label)))
+	}
+	for _, section := range panel.sections {
+		keyWidth = max(keyWidth, len(section.keyHeader))
+		for _, row := range section.rows {
+			keyWidth = max(keyWidth, len([]rune(row.label)))
+		}
 	}
 	return newPanelTable(width, min(keyWidth, max(6, width/3)), 0, false)
 }
@@ -215,38 +242,20 @@ func (panel infoPanel) render(width, height int) string {
 	if panel.titleHint != "" {
 		heading[0] += panelSubtitleStyle.Render("  ·  ") + opFocusHintStyle.Render(panel.titleHint)
 	}
-	body := []string{table.border("╭", "┬", "╮"), table.header(panel.keyHeader, panel.valueHeader)}
-	if len(panel.rows) == 0 {
-		body = append(body, table.border("├", "┴", "┤"))
-		for _, text := range panel.message {
-			for _, line := range wrapWords(text, table.contentWidth()) {
-				body = append(body, table.spanning(panelSubtitleStyle.Render(padTo(line, table.contentWidth()))))
-			}
+	body := table.lines(panel.keyHeader, panel.valueHeader, panel.rows, panel.message)
+	for _, section := range panel.sections {
+		title := panelHeaderStyle.Render(truncateRunes(section.title, width))
+		if section.note != "" {
+			title += panelSubtitleStyle.Render(truncateRunes("  ·  "+section.note, max(0, width-len([]rune(section.title)))))
 		}
-		body = append(body, table.border("╰", "", "╯"))
-	} else {
-		body = append(body, table.border("├", "┼", "┤"))
-		for index, row := range panel.rows {
-			if index > 0 {
-				body = append(body, table.rowRule())
-			}
-			for valueIndex, value := range row.lines(table.valueWidth) {
-				label := ""
-				if valueIndex == 0 {
-					label = row.label
-				}
-				fill := baseStyle
-				if valueIndex+1 == row.selectedPiece {
-					fill = selectedEntryStyle
-				}
-				body = append(body, table.row("", []string{panelCell(panelLabelStyle.Render(label), table.keyWidth),
-					panelCellFill(value, table.valueWidth, fill)}, baseStyle, baseStyle))
-			}
-		}
-		body = append(body, table.border("╰", "┴", "╯"))
+		body = append(body, "", title)
+		body = append(body, table.lines(section.keyHeader, section.valueHeader, section.rows, nil)...)
 	}
 	var legend []string
-	if len(panel.legend) > 0 {
+	switch {
+	case len(panel.legend) > 0 && panel.keyLegend:
+		legend = panelLegend("Keys", "", panel.legend, width)
+	case len(panel.legend) > 0:
 		legend = panelLegend("Commands", "type them in the @inspection > bar", panel.legend, width)
 	}
 
@@ -282,6 +291,43 @@ func (panel infoPanel) render(width, height int) string {
 		lines = lines[:height]
 	}
 	return panelIndent(lines)
+}
+
+// lines draws one table: the header, then the rows, or the message spanning
+// the table when there are none.
+func (table panelTable) lines(keyHeader, valueHeader string, rows []panelRow, message []string) []string {
+	body := []string{table.border("╭", "┬", "╮"), table.header(keyHeader, valueHeader)}
+	if len(rows) == 0 {
+		body = append(body, table.border("├", "┴", "┤"))
+		for _, text := range message {
+			for _, line := range wrapWords(text, table.contentWidth()) {
+				body = append(body, table.spanning(panelSubtitleStyle.Render(padTo(line, table.contentWidth()))))
+			}
+		}
+		return append(body, table.border("╰", "", "╯"))
+	}
+	body = append(body, table.border("├", "┼", "┤"))
+	for index, row := range rows {
+		if index > 0 {
+			body = append(body, table.rowRule())
+		}
+		for valueIndex, value := range row.lines(table.valueWidth) {
+			label := ""
+			if valueIndex == 0 {
+				label = row.label
+			}
+			fill, labelStyle, labelFill, gap := baseStyle, panelLabelStyle, baseStyle, baseStyle
+			if row.selected {
+				fill, labelStyle, labelFill, gap = selectedEntryStyle, panelPickedStyle, selectedEntryStyle, selectedEntryStyle
+			}
+			if valueIndex+1 == row.selectedPiece {
+				fill = selectedEntryStyle
+			}
+			body = append(body, table.row("", []string{panelCellFill(labelStyle.Render(label), table.keyWidth, labelFill),
+				panelCellFill(value, table.valueWidth, fill)}, gap, baseStyle))
+		}
+	}
+	return append(body, table.border("╰", "┴", "╯"))
 }
 
 // appendSection adds a blank-line-separated block when it has any lines.

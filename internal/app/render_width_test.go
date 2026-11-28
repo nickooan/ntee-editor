@@ -46,9 +46,11 @@ func TestPaneLinesNeverWrapIntoTheGutter(t *testing.T) {
 
 func TestFitPaneLines(t *testing.T) {
 	styled := lipgloss.NewStyle().Bold(true).Render("中文中文") + "tail"
-	got := fitPaneLines("short\n"+styled, 6)
-	parts := strings.Split(got, "\n")
+	parts, widths := fitPaneLines("short\n"+styled+"\na\tb", 6)
 	if parts[0] != "short" || lipgloss.Width(parts[1]) > 6 || !strings.HasPrefix(ansi.Strip(parts[1]), "中文中") {
-		t.Fatalf("fitPaneLines = %q", got)
+		t.Fatalf("fitPaneLines = %q", parts)
+	}
+	if parts[2] != "a    b" || widths[0] != 5 || widths[1] != lipgloss.Width(parts[1]) || widths[2] != 6 {
+		t.Fatalf("a tab is measured as the 4 spaces the pane draws, and each width is the cut line's: %q %v", parts, widths)
 	}
 }

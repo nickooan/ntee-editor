@@ -941,6 +941,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if resumeGitPoll {
 		cmd = tea.Batch(cmd, gitStatusTick())
 	}
+	model, cmd = withStagedTopsCheck(model, cmd)
 	return withInspectConnectionsTick(model, cmd)
 }
 
@@ -974,6 +975,12 @@ func (m Model) updateMessage(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case lsp.NoticeMsg:
 		m.notice = msg.Text
 		return m, nil
+
+	case agentEditDetailLoadedMsg:
+		return m.handleAgentEditDetailLoaded(msg)
+
+	case stagedTopsCheckedMsg:
+		return m.handleStagedTopsChecked(msg)
 
 	case inspectStatsMsg:
 		m.inspectLoading = false
@@ -1068,6 +1075,7 @@ func (m Model) updateMessage(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.termFocused = true
 		m.lastInputAt = time.Now()
 		m.invalidateTreeEntries()
+		m = m.checkStagedTopsSoon() // a staged file may have changed on disk
 		var gitCmd, corpusCmd tea.Cmd
 		m, gitCmd = m.maybeGitRefresh()
 		m, corpusCmd = m.ensureCorpus()
@@ -1091,6 +1099,7 @@ func (m Model) updateMessage(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.gitStatusFailed = false
 			if changed {
 				m.invalidateTreeEntries() // the rows' uncommitted colours
+				m = m.checkStagedTopsSoon()
 				// The porcelain key-set changing is the "files appeared,
 				// vanished, or changed state" signal: re-derive an open Ctrl+U
 				// list and nudge the search index (TTL-gated, so 3s-poll

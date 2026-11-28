@@ -158,12 +158,24 @@ func panelCellFill(styled string, width int, fill lipgloss.Style) string {
 // panelRow is one info-table row: a label and pre-styled value pieces. The
 // pieces flow onto continuation lines (empty key cell) when the value column
 // is too narrow for them side by side; stacked puts each on its own line.
-// selectedPiece (1-based, 0 = none) pads that line in the selection color.
+// selectedPiece (1-based, 0 = none) pads that line in the selection color;
+// selected puts the whole row on the selection bar, its label and every
+// line, and the caller renders the pieces in panelPicked styles to match.
 type panelRow struct {
 	label         string
 	pieces        []string
 	stacked       bool
 	selectedPiece int
+	selected      bool
+}
+
+// panelPicked is style on the selection bar when picked: a selected row's
+// text keeps its color but not the panel background.
+func panelPicked(style lipgloss.Style, picked bool) lipgloss.Style {
+	if picked {
+		return style.Background(colSelection)
+	}
+	return style
 }
 
 // lines lays the row's pieces out for a value column of width.
@@ -191,6 +203,7 @@ type infoPanel struct {
 	sections               []panelSection // more tables under the first, columns aligned with it
 	after                  []string       // pre-styled lines under the tables
 	legend                 []panelLegendEntry
+	keyLegend              bool // the legend lists keys, not bar commands
 }
 
 // panelSection is a titled table drawn under the panel's own.
@@ -239,7 +252,10 @@ func (panel infoPanel) render(width, height int) string {
 		body = append(body, table.lines(section.keyHeader, section.valueHeader, section.rows, nil)...)
 	}
 	var legend []string
-	if len(panel.legend) > 0 {
+	switch {
+	case len(panel.legend) > 0 && panel.keyLegend:
+		legend = panelLegend("Keys", "", panel.legend, width)
+	case len(panel.legend) > 0:
 		legend = panelLegend("Commands", "type them in the @inspection > bar", panel.legend, width)
 	}
 
@@ -300,12 +316,15 @@ func (table panelTable) lines(keyHeader, valueHeader string, rows []panelRow, me
 			if valueIndex == 0 {
 				label = row.label
 			}
-			fill := baseStyle
+			fill, labelStyle, labelFill, gap := baseStyle, panelLabelStyle, baseStyle, baseStyle
+			if row.selected {
+				fill, labelStyle, labelFill, gap = selectedEntryStyle, panelPickedStyle, selectedEntryStyle, selectedEntryStyle
+			}
 			if valueIndex+1 == row.selectedPiece {
 				fill = selectedEntryStyle
 			}
-			body = append(body, table.row("", []string{panelCell(panelLabelStyle.Render(label), table.keyWidth),
-				panelCellFill(value, table.valueWidth, fill)}, baseStyle, baseStyle))
+			body = append(body, table.row("", []string{panelCellFill(labelStyle.Render(label), table.keyWidth, labelFill),
+				panelCellFill(value, table.valueWidth, fill)}, gap, baseStyle))
 		}
 	}
 	return append(body, table.border("╰", "┴", "╯"))

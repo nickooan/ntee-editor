@@ -140,3 +140,80 @@ func TestAWaitingAgentHearsItsBaseChanged(t *testing.T) {
 		t.Fatalf("B's read of its own copy says it is stale: %q", line)
 	}
 }
+
+func TestAStaleStagedFileKeepsItsMarkButNotTheLock(t *testing.T) {
+	m, root, receiver, registry, _ := agentEditsModel(t, store.AgentEditPolicyReview)
+	receiver.Handle(replaceRequest("A", "main.go", extmsg.ReplacePayload{Old: "func main() {\n}", New: "func main() {\n\tprintln(1)\n}"}))
+	next, _ := m.Update(agentEditsChangedMsg{session: "A"})
+	m = next.(Model).openFileAt("main.go")
+	if _, locked := m.stagedReadOnly(); !locked || !m.agentEdits.stagedTopsDue && !m.agentEdits.stagedTopsRunning {
+		t.Fatalf("a live staged file locks, and a check is on its way: %+v", m.agentEdits.stagedFiles)
+	}
+
+	must(t, os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\n// someone else\n"), 0o644))
+	next, _ = m.Update(stagedTopsCheckedMsg{rootGen: m.rootGen, tops: registry.StagedTops()})
+	m = next.(Model)
+	if _, locked := m.stagedReadOnly(); locked {
+		t.Fatal("a stale copy can never be applied: the file is the user's again")
+	}
+	if notice := m.stagedFileNotice(); !strings.Contains(notice, "edit session A's staged copy is stale (changed on disk since it was staged)") {
+		t.Fatalf("the notice says why: %q", notice)
+	}
+	if plain := ansi.Strip(m.View().Content); !strings.Contains(plain, "✎ main.go") {
+		t.Fatalf("the tree still marks it, to find and discard it:\n%s", plain)
+	}
+
+	// A refresh keeps the verdict until the next check lands: no flicker.
+	next, _ = m.Update(agentEditsChangedMsg{session: "A"})
+	if file := next.(Model).agentEdits.stagedFiles["main.go"]; !file.stale {
+		t.Fatalf("the verdict survives the refresh: %+v", file)
+	}
+}
+
+func TestAStagedTopsCheckOnlyUpdatesFilesItStillDescribes(t *testing.T) {
+	m, _, _, _, _ := agentEditsModel(t, store.AgentEditPolicyReview)
+	m.agentEdits.stagedFiles = map[string]stagedFile{"main.go": {session: "B"}}
+	m.agentEdits.stagedTopsRunning, m.agentEdits.stagedTopsDue = true, false
+	next, _ := m.Update(stagedTopsCheckedMsg{rootGen: m.rootGen, tops: map[string]staging.StagedTop{
+		"main.go":     {Session: "A", Stale: true, Reason: "changed on disk since it was staged"},
+		"lib/util.ts": {Session: "A", Stale: true},
+	}})
+	m = next.(Model)
+	if file := m.agentEdits.stagedFiles["main.go"]; file.stale || len(m.agentEdits.stagedFiles) != 1 {
+		t.Fatalf("a check about another top, or a file no longer staged, changes nothing: %+v", m.agentEdits.stagedFiles)
+	}
+	if m.agentEdits.stagedTopsRunning {
+		t.Fatal("the check is over")
+	}
+	next, cmd := m.Update(stagedTopsCheckedMsg{rootGen: m.rootGen - 1})
+	if !next.(Model).agentEdits.stagedTopsRunning || cmd == nil {
+		t.Fatal("a check for another root is dropped, and another starts")
+	}
+}
+
+func TestTheStaleCheckRunsOneAtATime(t *testing.T) {
+	m, _, receiver, _, _ := agentEditsModel(t, store.AgentEditPolicyReview)
+	receiver.Handle(replaceRequest("A", "main.go", extmsg.ReplacePayload{Old: "func main() {\n}", New: "func main() {\n\tprintln(1)\n}"}))
+	m = m.refreshAgentEditsPending()
+	model, cmd := withStagedTopsCheck(m, nil)
+	m = model.(Model)
+	if !m.agentEdits.stagedTopsRunning || m.agentEdits.stagedTopsDue || cmd == nil {
+		t.Fatal("a due check starts")
+	}
+	checked, ok := cmd().(stagedTopsCheckedMsg)
+	if !ok || checked.tops["main.go"] != (staging.StagedTop{Session: "A"}) {
+		t.Fatalf("it reports the tops: %+v", checked)
+	}
+	m = m.checkStagedTopsSoon()
+	if _, again := withStagedTopsCheck(m, nil); again != nil {
+		t.Fatal("one due while one runs waits for it")
+	}
+	next, _ := m.Update(checked)
+	if m = next.(Model); m.agentEdits.stagedTopsDue || !m.agentEdits.stagedTopsRunning {
+		t.Fatal("it starts as the running one lands")
+	}
+	m.agentEdits.stagedFiles, m.agentEdits.stagedTopsRunning, m.agentEdits.stagedTopsDue = nil, false, true
+	if _, none := withStagedTopsCheck(m, nil); none != nil {
+		t.Fatal("nothing staged: nothing to check")
+	}
+}

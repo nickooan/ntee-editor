@@ -39,7 +39,7 @@ func settleAgentEdits(m Model, cmd tea.Cmd) Model {
 		msg := queue[0]
 		queue = queue[1:]
 		switch msg.(type) {
-		case agentEditsFinishedMsg, agentEditsForceEndedMsg, agentEditsFinishedListMsg, agentEditReviewPreparedMsg, agentEditReviewRefreshedMsg, agentEditsChangesRequestedMsg, reviewPreparedMsg, reviewLoadedMsg, externalSettingsMsg, externalHistoryLoadedMsg:
+		case agentEditsFinishedMsg, agentEditsForceEndedMsg, agentEditsFinishedListMsg, agentEditDetailLoadedMsg, agentEditReviewPreparedMsg, agentEditReviewRefreshedMsg, agentEditsChangesRequestedMsg, reviewPreparedMsg, reviewLoadedMsg, externalSettingsMsg, externalHistoryLoadedMsg:
 			var next tea.Cmd
 			m, next = deliver(m, msg)
 			queue = append(queue, execCmds(next)...)
@@ -306,6 +306,11 @@ func TestAgentEditsPanelPolicyAndTrace(t *testing.T) {
 	m = key(m, keyPress(tea.KeyDown))
 	m = key(m, keyPress(tea.KeyDown))
 	next, cmd = m.Update(keyPress(tea.KeyEnter))
+	m = settleAgentEdits(next.(Model), cmd)
+	if m.mode != modeInspect || m.agentEditsPicker.detail == nil || m.agentEditsPicker.detail.session != "done1" {
+		t.Fatalf("a session opens its details first: mode=%v %+v", m.mode, m.agentEditsPicker.detail)
+	}
+	next, cmd = m.Update(keyPress(tea.KeyEnter)) // the details' review row
 	m = settleAgentEdits(next.(Model), cmd)
 	if m.mode != modeReview || m.review.agentEdits != "done1" || !m.review.agentEditsTrace {
 		t.Fatalf("a finished session opens as a trace: mode=%v %q trace=%v", m.mode, m.review.agentEdits, m.review.agentEditsTrace)

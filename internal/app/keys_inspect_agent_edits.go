@@ -14,12 +14,14 @@ import (
 // agentEditsPickerState is the Ctrl+T agent edits panel once → focuses it.
 // index runs over the policy row, the keep row, then the sessions: pending
 // first, then finished, newest first. editingKeep makes the keep row a
-// number input holding keepInput.
+// number input holding keepInput. detail is the session details page open
+// over the list (nil: the list); replaced, never mutated.
 type agentEditsPickerState struct {
 	focused     bool
 	index       int
 	editingKeep bool
 	keepInput   string
+	detail      *agentEditDetailState
 }
 
 const (
@@ -52,6 +54,9 @@ func (m Model) handleAgentEditsPickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cm
 	if picker.editingKeep {
 		return m.handleAgentEditsKeepKey(msg)
 	}
+	if picker.detail != nil {
+		return m.handleAgentEditDetailKey(msg)
+	}
 	switch msg.String() {
 	case "up":
 		picker.index = input.Clamp(picker.index-1, 0, m.agentEditsPickerRowCount()-1)
@@ -76,27 +81,13 @@ func (m Model) handleAgentEditsPickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cm
 		if !ok {
 			return m, nil
 		}
-		if pending {
-			// The live copy: edits may have arrived since the list was read.
-			if live, ok := m.agentEdits.registry.Snapshot(record.Session); ok {
-				record = live
-			}
-		}
-		return m.enterAgentEditReview(record, !pending)
+		return m.openAgentEditDetail(record, pending)
 	case "a", "x", "f", "r":
 		record, pending, ok := m.agentEditsSessionAt(picker.index)
 		if !ok || !pending {
 			return m, nil
 		}
-		switch msg.String() {
-		case "a":
-			return m.askApplyAgentEdits(record.Session), nil
-		case "f":
-			return m.askForceEndAgentEdits(record.Session), nil
-		case "r":
-			return m.startAgentEditRequestChanges(record.Session)
-		}
-		return m.askDiscardAgentEdits(record.Session), nil
+		return m.agentEditSessionAction(msg.String(), record.Session)
 	}
 	return m, nil
 }

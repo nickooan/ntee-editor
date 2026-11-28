@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"fmt"
 	"maps"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -28,9 +27,13 @@ type agentEditsState struct {
 	// sessions, loaded off the UI goroutine for the panel.
 	pending []store.AgentEditSession
 	// stagedFiles maps each root-relative file with unsettled staged edits
-	// to the session on top, rebuilt with pending — the tree's mark and the
-	// open notice read it per frame.
-	stagedFiles map[string]string
+	// to the session on top, rebuilt with pending — the tree's mark, the
+	// open notice and the read-only lock read it per frame. Whether a top is
+	// stale needs the disk: a check (staging's StagedTops) runs off the UI
+	// goroutine whenever stagedTopsDue is set, and fills it in.
+	stagedFiles       map[string]stagedFile
+	stagedTopsDue     bool
+	stagedTopsRunning bool
 	// openNotice is the staged-file notice shown on the last open, so the
 	// next open of an unstaged file clears it rather than leave it stale.
 	openNotice string
@@ -42,6 +45,7 @@ type agentEditsState struct {
 	finished       []store.AgentEditSession // summaries (store.SummarizeAgentEdit)
 	finishedLoaded bool
 	finishedGen    int // the newest finished-list load; older answers are dropped
+	detailGen      int // the newest details-page load (agentEditDetailState)
 	// choiceSession is the session an open apply/discard/ready overlay is
 	// about.
 	choiceSession string
@@ -263,6 +267,7 @@ func (m Model) refreshAgentEditsPending() Model {
 	if m.agentEdits.registry != nil {
 		m.agentEdits.pending = m.agentEdits.registry.Pending()
 		m.agentEdits.stagedFiles = m.stagedFilesOf(m.agentEdits.pending)
+		m.agentEdits.stagedTopsDue = true
 		m.agentEdits.stillEditing, m.agentEdits.checking = map[string]bool{}, map[string]bool{}
 		m.agentEdits.lastActivityAt = time.Time{}
 		for _, session := range m.agentEdits.pending {
@@ -282,6 +287,7 @@ func (m Model) refreshAgentEditsPending() Model {
 				m.agentEdits.lastActivityAt = activity
 			}
 		}
+		m = m.syncAgentEditDetailWithPending()
 	}
 	return m
 }
@@ -294,8 +300,8 @@ func (m Model) stagedReadOnly() (session string, locked bool) {
 	if m.openFile == nil || m.edit.dirty {
 		return "", false
 	}
-	session, locked = m.agentEdits.stagedFiles[m.openRel]
-	return session, locked
+	file, staged := m.agentEdits.stagedFiles[m.openRel]
+	return file.session, staged && !file.stale
 }
 
 // refuseStagedEdit refuses changing a read-only staged file, with why.
@@ -315,40 +321,107 @@ func (m Model) agentEditsPendingRecord(id string) (store.AgentEditSession, bool)
 	return store.AgentEditSession{}, false
 }
 
+// stagedFile is a file's top staged session as the editor shows it. A
+// stale one (its stack can no longer be written: reason) keeps its mark but
+// does not lock the file.
+type stagedFile struct {
+	session string
+	stale   bool
+	reason  string
+}
+
+// stagedTopsCheckedMsg lands a StagedTops check.
+type stagedTopsCheckedMsg struct {
+	rootGen int
+	tops    map[string]staging.StagedTop // by workspace path
+}
+
 // stagedFilesOf maps each file with unsettled staged edits, by root path,
-// to its top session: the newest one no other session builds on. Unlike
-// staging's Latest it reads no disk, so a stale layer still marks its file.
-func (m Model) stagedFilesOf(sessions []store.AgentEditSession) map[string]string {
-	builtOn := map[string]bool{}
-	for _, session := range sessions {
-		for _, file := range session.Files {
-			if file.Result == "" && file.BaseSession != "" {
-				builtOn[file.BaseSession+"\x00"+file.Rel] = true
-			}
+// to its top session (staging's UnsettledTops, read from the mirror without
+// the disk). A file whose top is unchanged keeps the last check's stale
+// verdict, so its mark and lock don't flicker until the next check lands.
+func (m Model) stagedFilesOf(sessions []store.AgentEditSession) map[string]stagedFile {
+	staged := map[string]stagedFile{}
+	for rel, session := range staging.UnsettledTops(sessions) {
+		rootRel, ok := m.rootRelOf(rel)
+		if !ok {
+			continue
 		}
-	}
-	staged := map[string]string{}
-	for _, session := range sessions { // oldest first: a newer top wins
-		for _, file := range session.Files {
-			if file.Result != "" || builtOn[session.Session+"\x00"+file.Rel] {
-				continue
-			}
-			if rootRel, ok := m.rootRelOf(file.Rel); ok {
-				staged[filepath.ToSlash(rootRel)] = session.Session
-			}
+		file := stagedFile{session: session}
+		if previous := m.agentEdits.stagedFiles[rootRel]; previous.session == session {
+			file = previous
 		}
+		staged[rootRel] = file
 	}
 	return staged
+}
+
+// withStagedTopsCheck starts the stale check once one is due and none runs.
+// A check due while one runs starts when that one lands.
+func withStagedTopsCheck(model tea.Model, cmd tea.Cmd) (tea.Model, tea.Cmd) {
+	m, ok := model.(Model)
+	if !ok || !m.agentEdits.stagedTopsDue || m.agentEdits.stagedTopsRunning || m.agentEdits.registry == nil {
+		return model, cmd
+	}
+	m.agentEdits.stagedTopsDue = false
+	if len(m.agentEdits.stagedFiles) == 0 {
+		return m, cmd
+	}
+	m.agentEdits.stagedTopsRunning = true
+	registry, rootGen := m.agentEdits.registry, m.rootGen
+	return m, tea.Batch(cmd, func() tea.Msg {
+		return stagedTopsCheckedMsg{rootGen: rootGen, tops: registry.StagedTops()}
+	})
+}
+
+// checkStagedTopsSoon asks for a stale check after this update: the
+// pending sessions or the disk may have changed.
+func (m Model) checkStagedTopsSoon() Model {
+	m.agentEdits.stagedTopsDue = true
+	return m
+}
+
+// handleStagedTopsChecked fills the stale verdicts in. It only updates
+// files still staged by the same session: one that came or went since the
+// check started waits for the next check (a newer change set it due).
+func (m Model) handleStagedTopsChecked(msg stagedTopsCheckedMsg) (tea.Model, tea.Cmd) {
+	m.agentEdits.stagedTopsRunning = false
+	if msg.rootGen != m.rootGen {
+		return m.checkStagedTopsSoon(), nil
+	}
+	staged := make(map[string]stagedFile, len(m.agentEdits.stagedFiles))
+	for rootRel, file := range m.agentEdits.stagedFiles {
+		staged[rootRel] = file
+	}
+	changed := false
+	for rel, top := range msg.tops {
+		rootRel, ok := m.rootRelOf(rel)
+		if current, isStaged := m.agentEdits.stagedFiles[rootRel]; !ok || !isStaged || current.session != top.Session {
+			continue
+		}
+		file := stagedFile{session: top.Session, stale: top.Stale, reason: top.Reason}
+		if staged[rootRel] != file {
+			staged[rootRel], changed = file, true
+		}
+	}
+	if changed {
+		m.agentEdits.stagedFiles = staged
+		m.invalidateTreeEntries()
+	}
+	return m, nil
 }
 
 // stagedFileNotice tells the user the open file has staged edits that are
 // not on disk; "" when it has none.
 func (m Model) stagedFileNotice() string {
-	session, ok := m.agentEdits.stagedFiles[m.openRel]
-	if !ok || m.openRel == "" {
+	file, ok := m.agentEdits.stagedFiles[m.openRel]
+	switch {
+	case !ok || m.openRel == "":
 		return ""
+	case file.stale:
+		return "✎ " + m.openRel + ": edit session " + file.session + "'s staged copy is stale (" + file.reason + ") and cannot be applied · Ctrl+T › agent edits"
 	}
-	return "✎ " + m.openRel + " has staged edits (edit session " + session + ") — not on disk yet · Ctrl+T › agent edits"
+	return "✎ " + m.openRel + " has staged edits (edit session " + file.session + ") — not on disk yet · Ctrl+T › agent edits"
 }
 
 func (m Model) loadAgentEditsFinishedCmd() (Model, tea.Cmd) {
@@ -388,7 +461,7 @@ func (m Model) handleAgentEditsFinishedList(msg agentEditsFinishedListMsg) (tea.
 	}
 	m.agentEdits.finished, m.agentEdits.finishedLoaded = msg.sessions, true
 	m.agentEditsPicker.index = input.Clamp(m.agentEditsPicker.index, 0, m.agentEditsPickerRowCount()-1)
-	return m, nil
+	return m.syncAgentEditDetailWithFinished()
 }
 
 // handleAgentEditsChanged follows the socket side: a staged edit updates the
@@ -452,7 +525,7 @@ func (m Model) handleAgentEditsChangedRefreshed(msg agentEditsChangedMsg) (tea.M
 	}
 	if m.mode != modeReview {
 		m.notice = "✎ agent edit session " + msg.session + " · " + countText(len(record.Files), "file") + " staged"
-		if notice := m.stagedFileNotice(); notice != "" && m.agentEdits.stagedFiles[m.openRel] == msg.session {
+		if notice := m.stagedFileNotice(); notice != "" && m.agentEdits.stagedFiles[m.openRel].session == msg.session {
 			m.notice = notice
 		}
 	}

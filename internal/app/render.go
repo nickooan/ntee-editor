@@ -1539,6 +1539,8 @@ var (
 	uncommittedDirStyle  = lipgloss.NewStyle().Foreground(colYellow).Bold(true).Background(colBg)
 	// The tree's mark on a file with agent edits staged but not written.
 	stagedFileMarkStyle = lipgloss.NewStyle().Foreground(colOrange).Bold(true).Background(colBg)
+	// A stale stack's mark: still there to find and discard, but quiet.
+	staleStagedFileMarkStyle = lipgloss.NewStyle().Foreground(colComment).Background(colBg)
 
 	// Autocomplete dropdown rows.
 	completionItemStyle      = lipgloss.NewStyle().Foreground(colFg).Background(colBgChrome)

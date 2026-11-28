@@ -52,15 +52,34 @@ const maxAgentEditNoteEdits = 12
 // (r); trace is a finished session's read-only look back. Checking the disk
 // for conflicts runs off the UI goroutine.
 func (m Model) enterAgentEditReview(record store.AgentEditSession, trace bool) (Model, tea.Cmd) {
+	if !m.canEnterAgentEditReview(record) {
+		return m, nil
+	}
+	return m.leaveToEditOrQuery().startAgentEditReview(record, trace)
+}
+
+// enterAgentEditReviewOver is enterAgentEditReview from the session details
+// page: the review opens over it, so leaving the review comes back to it.
+func (m Model) enterAgentEditReviewOver(record store.AgentEditSession, trace bool) (Model, tea.Cmd) {
+	if !m.canEnterAgentEditReview(record) {
+		return m, nil
+	}
+	return m.startAgentEditReview(record, trace)
+}
+
+func (m *Model) canEnterAgentEditReview(record store.AgentEditSession) bool {
 	switch {
 	case m.reviewSessionRunning():
 		m.errText = "a review session (" + m.session.id + ") is running — quit it first"
-		return m, nil
+		return false
 	case len(record.Files) == 0:
 		m.errText = "edit session " + record.Session + " has no files"
-		return m, nil
+		return false
 	}
-	m = m.leaveToEditOrQuery()
+	return true
+}
+
+func (m Model) startAgentEditReview(record store.AgentEditSession, trace bool) (Model, tea.Cmd) {
 	m.review = reviewState{
 		gen:             m.review.gen + 1,
 		preparing:       true,

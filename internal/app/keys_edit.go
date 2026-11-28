@@ -331,6 +331,9 @@ func (m Model) saveEdit() Model {
 	if client, ok := m.lsp.ClientFor(m.openFile.Path); ok {
 		client.DidSave(m.openFile.Path)
 	}
+	if _, staged := m.agentEdits.stagedFiles[m.openRel]; staged {
+		m = m.checkStagedTopsSoon() // the save moved the disk under its stack
+	}
 	m.notice = "saved"
 	return m.refreshFileHighlights()
 }

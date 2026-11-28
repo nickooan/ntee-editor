@@ -226,8 +226,12 @@ func (m Model) inspectHint() string {
 		return "→ change settings · ext on|off · ext limit <n> · ext history · Shift+↑/↓ pane · Esc back"
 	case m.agentEditsPicker.editingKeep:
 		return "type a number · Enter save · Esc cancel"
+	case m.agentEditsPicker.detail != nil && m.agentEditsPicker.detail.pending:
+		return "Enter review · a apply · x discard · f stop waiting · r request changes · Esc back to the sessions"
+	case m.agentEditsPicker.detail != nil:
+		return "Enter trace the changes · Esc back to the sessions"
 	case m.agentEditsPicker.focused:
-		return "↑/↓ row · Enter change / open · a apply · x discard · ← back"
+		return "↑/↓ row · Enter change / details · a apply · x discard · ← back"
 	case m.inspectMenu == inspectMenuAgentEdits:
 		return "→ settings and sessions · edits review|apply · edits keep <n> · edits discard <session> · Shift+↑/↓ pane · Esc back"
 	}

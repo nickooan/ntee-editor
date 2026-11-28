@@ -177,7 +177,7 @@ func TestASharedSessionRowNamesEachAgentsPart(t *testing.T) {
 	record := store.AgentEditSession{Session: "S", Files: []store.AgentEditFile{{Rel: "a.go"}}, Agents: []store.AgentEditParticipant{
 		{Agent: "agent-a", EndedAt: time.Now()}, {Agent: "agent-b"}, {Agent: "", EndedAt: time.Now(), Stopped: true},
 	}}
-	row := ansi.Strip(strings.Join(agentEditSessionRow(record, true).pieces, ""))
+	row := ansi.Strip(strings.Join(agentEditSessionRow(record, true, false).pieces, ""))
 	if !strings.Contains(row, "● 1 of 3 agents editing  1 file · agent-a done, agent-b editing, unnamed stopped by the user · started") {
 		t.Fatalf("row = %q", row)
 	}

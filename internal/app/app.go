@@ -125,9 +125,13 @@ type Model struct {
 	workspaceReposScanned bool
 	activeRepo            string
 	gitPollArmed          bool
-	gitDirty              map[string]bool
-	gitStatusRunning      bool
-	gitStatusFailed       bool // latch: notice fires once per healthy→failed transition
+	// gitPollPaused: the poll loop stopped re-arming while the editor was
+	// idle or blurred, so an idle editor does not wake (and redraw) every
+	// 3s; the next key, mouse or focus event restarts it (see Update).
+	gitPollPaused    bool
+	gitDirty         map[string]bool
+	gitStatusRunning bool
+	gitStatusFailed  bool // latch: notice fires once per healthy→failed transition
 
 	// Idle/focus tracking for the status poll: no input for gitIdleThreshold
 	// (or a blurred terminal) pauses the 3s git status loop.
@@ -924,6 +928,18 @@ func truncatedNotice(cap int) string {
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.gitPollPaused {
+		switch msg.(type) {
+		case tea.KeyPressMsg, tea.MouseMsg, tea.FocusMsg:
+			m.gitPollPaused = false
+			model, cmd := m.updateMessage(msg)
+			return model, tea.Batch(cmd, gitStatusTick())
+		}
+	}
+	return m.updateMessage(msg)
+}
+
+func (m Model) updateMessage(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		wasReady := m.ready
@@ -1031,11 +1047,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, splashTick()
 
 	case gitStatusTickMsg:
-		// Poll heartbeat: refresh unless one is already in flight or the
-		// editor is idle/unfocused; always re-arm the next tick so the loop
-		// survives every skipped round.
+		// Poll heartbeat: refresh unless one is already in flight. Idle or
+		// unfocused, the loop pauses instead of re-arming; input resumes it.
 		if !m.termFocused || time.Since(m.lastInputAt) > gitIdleThreshold {
-			return m, gitStatusTick()
+			m.gitPollPaused = true
+			return m, nil
 		}
 		m, cmd := m.maybeGitRefresh()
 		return m, tea.Batch(cmd, gitStatusTick())
@@ -1146,7 +1162,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return withAgentEditsTick(m.handleAgentEditsLayerChanged(msg))
 
 	case sessionWaitExpiredMsg:
-		return m.dropExpiredWait(msg.reply), nil
+		// The waiting icon is still, so no tick redraws the label once the
+		// grace passes without a new wait: redraw it then.
+		return m.dropExpiredWait(msg.reply), tea.Tick(agentEditWaitGrace, func(time.Time) tea.Msg { return agentEditsWaitGraceMsg{} })
+
+	case agentEditsWaitGraceMsg:
+		return m, nil // redraw only
 
 	case agentEditsSeenMsg:
 		return withAgentEditsTick(m.handleAgentEditsSeen(msg))
@@ -1208,7 +1229,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notice = "session step is read-only — Enter next · Esc end session"
 			return m, nil
 		}
-		return m.handlePaste(msg.Content)
+		return withReviewMotionTick(m.handlePaste(msg.Content)) // a paste may land a review search
 
 	case tea.KeyPressMsg:
 		m.lastInputAt = time.Now()
@@ -1233,22 +1254,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.notice = ""
 		m.errText = ""
 
+		// Overlays over a review can land in it (a Ctrl+P or grep pick
+		// pauses auto-drive), which starts the switch's flash animation.
 		switch m.topOverlay() {
 		case overlayChoice:
-			return m.handleChoiceKey(k)
+			return withReviewMotionTick(m.handleChoiceKey(k))
 		case overlayMessage:
 			if k == "enter" || k == "esc" {
 				m.messageOverlay = ""
 			}
 			return m, nil
 		case overlayFuzzy:
-			return m.handleFuzzyKey(msg)
+			return withReviewMotionTick(m.handleFuzzyKey(msg))
 		case overlayDefinitionPicker:
-			return m.handleDefPickKey(msg)
+			return withReviewMotionTick(m.handleDefPickKey(msg))
 		case overlayGrep:
-			return m.handleGrepKey(msg)
+			return withReviewMotionTick(m.handleGrepKey(msg))
 		case overlayOpCommands:
-			return m.handleOpKey(msg)
+			return withReviewMotionTick(m.handleOpKey(msg))
 		}
 		// The list + detail views own every key: the project-wide chords would
 		// open files or switch repos underneath them (review scopes its own

@@ -725,8 +725,10 @@ func (m Model) reviewFileRepo(file reviewFile) string {
 // folders.
 func (m Model) reviewRepos() []string {
 	var repos []string
+	seen := make(map[string]bool)
 	for _, file := range m.review.files {
-		if repo := m.reviewFileRepo(file); !slices.Contains(repos, repo) {
+		if repo := m.reviewFileRepo(file); !seen[repo] {
+			seen[repo] = true
 			repos = append(repos, repo)
 		}
 	}

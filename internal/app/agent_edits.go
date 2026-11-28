@@ -134,10 +134,19 @@ const agentEditsAnimationIdle = 10 * time.Minute
 // its waiter gave up: the agent's next edit_wait is on its way.
 const agentEditWaitGrace = 5 * time.Second
 
-// agentsAnimating reports whether the header label should animate.
+// agentsAnimating reports whether the header label should animate. An agent
+// parked in edit_wait shows the still agentWaitingIcon instead: the wait can
+// last hours, and every tick redraws the whole editor.
 func (m Model) agentsAnimating() bool {
-	return m.agentsWorkingRecently() || len(m.sessionsAwaitingReview()) > 0
+	return m.agentsWorkingRecently()
 }
+
+// agentWaitingIcon marks an agent blocked in edit_wait on the user's review.
+const agentWaitingIcon = "💤"
+
+// agentEditsWaitGraceMsg redraws the waiting label once agentEditWaitGrace
+// passed after a wait gave up.
+type agentEditsWaitGraceMsg struct{}
 
 func (m Model) agentsWorkingRecently() bool {
 	return m.agentsWorking() && m.agentsQuietFor() < agentEditsAnimationIdle

@@ -93,20 +93,27 @@ func TestGitStatusPollPausesWhenIdleOrBlurred(t *testing.T) {
 	m, _ := newTestModel(t, nil)
 	m.gitRepo = true
 
-	// Idle for longer than the threshold: the tick re-arms without spawning.
+	// Idle for longer than the threshold: the tick neither spawns nor
+	// re-arms, so an idle editor stops waking every 3s.
 	m.lastInputAt = time.Now().Add(-gitIdleThreshold - time.Second)
 	next, cmd := m.Update(gitStatusTickMsg{})
 	m = next.(Model)
 	if m.gitStatusRunning {
 		t.Fatal("idle tick must not spawn a refresh")
 	}
-	if cmd == nil {
-		t.Fatal("idle tick must still re-arm the loop")
+	if cmd != nil || !m.gitPollPaused {
+		t.Fatal("idle tick pauses the loop instead of re-arming it")
+	}
+	if next, cmd = m.Update(agentEditsWaitGraceMsg{}); cmd != nil || !next.(Model).gitPollPaused {
+		t.Fatal("a message that is not input leaves the loop paused")
 	}
 
-	// Input wakes the loop up: the next tick refreshes again.
-	next, _ = m.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	// Input wakes the loop up: it re-arms, and the next tick refreshes again.
+	next, cmd = m.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
 	m = next.(Model)
+	if m.gitPollPaused || cmd == nil { // the re-armed tick (running it would wait out the interval)
+		t.Fatal("input resumes the paused loop")
+	}
 	next, _ = m.Update(gitStatusTickMsg{})
 	m = next.(Model)
 	if !m.gitStatusRunning {
@@ -120,8 +127,8 @@ func TestGitStatusPollPausesWhenIdleOrBlurred(t *testing.T) {
 	m = next.(Model)
 	next, _ = m.Update(gitStatusTickMsg{})
 	m = next.(Model)
-	if m.gitStatusRunning {
-		t.Fatal("blurred tick must not spawn a refresh")
+	if m.gitStatusRunning || !m.gitPollPaused {
+		t.Fatal("blurred tick must not spawn a refresh, and pauses the loop")
 	}
 
 	// Refocus refreshes immediately (external changes may have landed).

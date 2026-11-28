@@ -221,7 +221,7 @@ func (m Model) agentEditDecisionPanel() (floatPanel, bool) {
 	case m.agentEdits.checking[id]:
 		return working("checking", record.CheckingAgents()), true
 	case slices.Contains(m.sessionsAwaitingReview(), id):
-		panel.title, panel.titleStyle = " ⏳ agent waiting for you ", lineNoteSessionTitleStyle
+		panel.title, panel.titleStyle = " "+agentWaitingIcon+" agent waiting for you ", lineNoteSessionTitleStyle
 	}
 	return panel, true
 }
@@ -437,7 +437,7 @@ func (m Model) agentEditReviewHint() string {
 	case m.agentEdits.checking[id]:
 		return " " + spinner + " agents are working… (checking · " + staging.AgentNames(record.CheckingAgents()) + idle + ") · Esc back to the editor "
 	case slices.Contains(m.sessionsAwaitingReview(), id):
-		return " " + m.agentEditsSpinner(true) + " ⏳ agent waiting for you ·" + agentEditDecisionHint
+		return " " + agentWaitingIcon + " agent waiting for you ·" + agentEditDecisionHint
 	}
 	return agentEditDecisionHint
 }

@@ -343,7 +343,8 @@ func agentEditDoneKey(session AgentEditSession) string {
 }
 
 // AgentEditLog is the ntee-db-backed AgentEditLogStore, next to the external
-// history. Like it, it opens the db per call.
+// history. Its connection is a session lease: open while sessions are being
+// staged, closed when the last one finishes or it sat idle.
 type AgentEditLog struct {
 	dir string
 
@@ -365,7 +366,16 @@ func NewAgentEditLog(projectRoot string) (*AgentEditLog, error) {
 }
 
 func (log *AgentEditLog) withDB(run func(db *nteedb.DB) error) error {
-	return withDBAt(nteedb.Options{Dir: log.dir}, run)
+	return log.withDBUse(connectionUse{}, run)
+}
+
+func (log *AgentEditLog) withDBUse(use connectionUse, run func(db *nteedb.DB) error) error {
+	return leaseDBAt(nteedb.Options{Dir: log.dir}, use, run)
+}
+
+// Connections reports the edit log's connection.
+func (log *AgentEditLog) Connections() []ConnectionStatus {
+	return []ConnectionStatus{connectionStatusAt(log.dir, "agent edits", ConnectionSessionLease)}
 }
 
 func (log *AgentEditLog) SavePendingAgentEdit(session AgentEditSession) error {
@@ -399,7 +409,7 @@ func (log *AgentEditLog) SavePendingAgentEditFiles(session AgentEditSession, cha
 	if err != nil {
 		return err
 	}
-	err = log.withDB(func(db *nteedb.DB) error {
+	err = log.withDBUse(connectionUse{begin: pendingKey}, func(db *nteedb.DB) error {
 		// Files first: a header never names a file it cannot find.
 		for key, data := range files {
 			if err := db.Put(key, data); err != nil {
@@ -436,7 +446,7 @@ func (log *AgentEditLog) FinishAgentEdit(session AgentEditSession, keep int) err
 	if err != nil {
 		return err
 	}
-	return log.withDB(func(db *nteedb.DB) error {
+	return log.withDBUse(connectionUse{end: agentEditPendingKey(session)}, func(db *nteedb.DB) error {
 		if err := db.Put(agentEditDoneKey(session), data); err != nil {
 			return err
 		}

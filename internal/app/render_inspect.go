@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"charm.land/lipgloss/v2"
 
@@ -108,6 +109,7 @@ func (m Model) renderInspectDB(width, height int) string {
 		subtitle:    "This project's store: recent files, undo history, drafts and session.",
 		keyHeader:   "METRIC",
 		valueHeader: "VALUE",
+		sections:    []panelSection{connectionsSection(m.dbConnections(), time.Now())},
 		legend: []panelLegendEntry{
 			{"db compact", panelCommandStyle, "drop dead records from the main log"},
 			{"db relieve", panelCommandStyle, "also rewrite blobs, releasing orphaned ones"},

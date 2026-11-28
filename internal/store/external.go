@@ -2,7 +2,10 @@ package store
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -98,6 +101,30 @@ type GlobalExternalSettings struct {
 
 func NewGlobalExternalSettings(dir string) *GlobalExternalSettings {
 	return &GlobalExternalSettings{dir: dir}
+}
+
+// Connections reports the global db's connection, opened per call: every
+// window of every project shares the db, and ntee-db lets one process at a
+// time hold it.
+func (g *GlobalExternalSettings) Connections() []ConnectionStatus {
+	return []ConnectionStatus{connectionStatusAt(g.dir, "global", ConnectionPerCall)}
+}
+
+// nteeDBMainLog is ntee-db's main log file: every write appends to it.
+const nteeDBMainLog = "main.jsonl"
+
+// changeStamp is the global db's main log size and modification time. ok is
+// false when it can't be read; a missing log (nothing written yet) is a
+// valid, empty stamp.
+func (g *GlobalExternalSettings) changeStamp() (stamp fileStamp, ok bool) {
+	info, err := os.Stat(filepath.Join(g.dir, nteeDBMainLog))
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return fileStamp{}, true
+	case err != nil:
+		return fileStamp{}, false
+	}
+	return fileStamp{size: info.Size(), modified: info.ModTime()}, true
 }
 
 func (g *GlobalExternalSettings) LoadExternalSettings() (ExternalSettings, error) {
@@ -239,12 +266,17 @@ func ExternalSocketPath(projectRoot string) (string, error) {
 	return filepath.Join(dir, "ntee.sock"), nil
 }
 
-// ExternalHistory is the ntee-db-backed ExternalHistoryStore. It opens the db
-// per call: writes come from the socket goroutine and the UI alike, and the
-// history cap is the index's MaxPerValue, which can only be set at open — so
-// a changed limit takes effect on the very next write.
+// ExternalHistory is the ntee-db-backed ExternalHistoryStore. Its connection
+// is a lease that stays open through a burst of requests and closes once
+// they stop. The history cap is the index's MaxPerValue, which can only be
+// set at open: the connection reopens when a write brings a new limit, so it
+// takes effect on that write. Reads and status updates pass the limit last
+// given, so they never reopen it.
 type ExternalHistory struct {
 	dir string
+
+	limitMu sync.Mutex
+	limit   int // the limit last given; 0 is none yet
 }
 
 // NewExternalHistory is the history store of the project at projectRoot.
@@ -256,8 +288,31 @@ func NewExternalHistory(projectRoot string) (*ExternalHistory, error) {
 	return &ExternalHistory{dir: filepath.Join(dir, "history")}, nil
 }
 
+// Connections reports the history's connection.
+func (h *ExternalHistory) Connections() []ConnectionStatus {
+	return []ConnectionStatus{connectionStatusAt(h.dir, "message history", ConnectionSessionLease)}
+}
+
+// rememberLimit keeps limit as the cap later reads open with.
+func (h *ExternalHistory) rememberLimit(limit int) int {
+	limit = ClampExternalHistoryLimit(limit)
+	h.limitMu.Lock()
+	h.limit = limit
+	h.limitMu.Unlock()
+	return limit
+}
+
+func (h *ExternalHistory) lastLimit() int {
+	h.limitMu.Lock()
+	defer h.limitMu.Unlock()
+	if h.limit == 0 {
+		return MaxExternalHistoryLimit
+	}
+	return h.limit
+}
+
 func (h *ExternalHistory) withDB(limit int, run func(db *nteedb.DB) error) error {
-	return withDBAt(nteedb.Options{
+	return leaseDBAt(nteedb.Options{
 		Dir: h.dir,
 		// Every record shares one index value, so MaxPerValue caps the whole
 		// history and evicts the lowest (oldest) key on overflow.
@@ -266,7 +321,7 @@ func (h *ExternalHistory) withDB(limit int, run func(db *nteedb.DB) error) error
 			Kind:        nteedb.KindString,
 			MaxPerValue: ClampExternalHistoryLimit(limit),
 		}},
-	}, run)
+	}, connectionUse{}, run)
 }
 
 func (h *ExternalHistory) AppendExternal(record ExternalRecord, limit int) error {
@@ -274,14 +329,14 @@ func (h *ExternalHistory) AppendExternal(record ExternalRecord, limit int) error
 	if err != nil {
 		return err
 	}
-	return h.withDB(limit, func(db *nteedb.DB) error {
+	return h.withDB(h.rememberLimit(limit), func(db *nteedb.DB) error {
 		return db.PutIndexed(record.Key, data, nteedb.IndexValues{externalHistoryIndex: externalHistoryValue})
 	})
 }
 
 func (h *ExternalHistory) LoadExternal() ([]ExternalRecord, error) {
 	var records []ExternalRecord
-	err := h.withDB(MaxExternalHistoryLimit, func(db *nteedb.DB) error {
+	err := h.withDB(h.lastLimit(), func(db *nteedb.DB) error {
 		var err error
 		records, err = decodePrefix[ExternalRecord](db, externalRecordPrefix)
 		for index := range records {
@@ -294,7 +349,7 @@ func (h *ExternalHistory) LoadExternal() ([]ExternalRecord, error) {
 }
 
 func (h *ExternalHistory) UpdateExternalStatus(key string, status ExternalStatus, note string) error {
-	return h.withDB(MaxExternalHistoryLimit, func(db *nteedb.DB) error {
+	return h.withDB(h.lastLimit(), func(db *nteedb.DB) error {
 		data, found, err := db.Get(key)
 		if err != nil || !found {
 			return err
@@ -315,7 +370,7 @@ func (h *ExternalHistory) UpdateExternalStatus(key string, status ExternalStatus
 }
 
 func (h *ExternalHistory) TrimExternal(limit int) error {
-	limit = ClampExternalHistoryLimit(limit)
+	limit = h.rememberLimit(limit)
 	return h.withDB(limit, func(db *nteedb.DB) error {
 		keys, err := db.PrefixScan(externalRecordPrefix)
 		if err != nil {
@@ -392,30 +447,54 @@ func sortExternalNewestFirst(records []ExternalRecord) {
 	sort.Slice(records, func(a, b int) bool { return strings.Compare(records[a].Key, records[b].Key) > 0 })
 }
 
-// externalSettingsCacheAge is how long CachedExternalSettings answers from
-// memory. The settings are global, so another window's toggle shows here
-// within it.
-const externalSettingsCacheAge = 2 * time.Second
+const (
+	// externalSettingsCacheAge is how long CachedExternalSettings answers
+	// from memory when it can't tell whether the db changed.
+	externalSettingsCacheAge = 2 * time.Second
+	// externalSettingsStampedAge bounds a cache the db's change stamp vouches
+	// for — a safety net for a change the stamp could miss.
+	externalSettingsStampedAge = 60 * time.Second
+)
 
-// CachedExternalSettings answers loads from memory for a short while: every
-// socket request reads the settings, and the global db is opened (with its
-// lock retries) per call. Saves go straight through and refresh the cache.
+// fileStamp is a file's size and modification time.
+type fileStamp struct {
+	size     int64
+	modified time.Time
+}
+
+// changeStamper is a settings store that can tell, with one stat, whether
+// its db may have changed.
+type changeStamper interface {
+	changeStamp() (fileStamp, bool)
+}
+
+// CachedExternalSettings answers loads from memory: every socket request
+// reads the settings, and the global db is opened (with its lock retries)
+// per call. Over a db it can stamp, it reloads only once the db's main log
+// changed, so another window's toggle shows on the very next load; otherwise
+// it reloads after maxAge. Saves go straight through and refresh the cache.
 type CachedExternalSettings struct {
-	inner    ExternalSettingsStore
-	maxAge   time.Duration
-	mu       sync.Mutex
-	cached   ExternalSettings
-	loadedAt time.Time
-	valid    bool
+	inner      ExternalSettingsStore
+	maxAge     time.Duration
+	stampedAge time.Duration
+	mu         sync.Mutex
+	cached     ExternalSettings
+	loadedAt   time.Time
+	stamp      fileStamp
+	stamped    bool
+	valid      bool
 }
 
 func NewCachedExternalSettings(inner ExternalSettingsStore) *CachedExternalSettings {
-	return &CachedExternalSettings{inner: inner, maxAge: externalSettingsCacheAge}
+	return &CachedExternalSettings{inner: inner, maxAge: externalSettingsCacheAge, stampedAge: externalSettingsStampedAge}
 }
 
 func (c *CachedExternalSettings) LoadExternalSettings() (ExternalSettings, error) {
+	// Stamped before the load: a write landing in between shows as a changed
+	// stamp next time, never as a stale cache.
+	stamp, stamped := c.currentStamp()
 	c.mu.Lock()
-	if c.valid && time.Since(c.loadedAt) < c.maxAge {
+	if c.fresh(stamp, stamped) {
 		settings := c.cached
 		c.mu.Unlock()
 		return settings, nil
@@ -425,8 +504,49 @@ func (c *CachedExternalSettings) LoadExternalSettings() (ExternalSettings, error
 	if err != nil {
 		return settings, err
 	}
-	c.remember(settings)
+	c.remember(settings, stamp, stamped)
 	return settings, nil
+}
+
+func (c *CachedExternalSettings) currentStamp() (fileStamp, bool) {
+	if stamper, ok := c.inner.(changeStamper); ok {
+		return stamper.changeStamp()
+	}
+	return fileStamp{}, false
+}
+
+func (c *CachedExternalSettings) fresh(stamp fileStamp, stamped bool) bool {
+	age := time.Since(c.loadedAt)
+	switch {
+	case !c.valid:
+		return false
+	case stamped && c.stamped:
+		return stamp.size == c.stamp.size && stamp.modified.Equal(c.stamp.modified) && age < c.stampedAge
+	default:
+		return age < c.maxAge
+	}
+}
+
+// Connections reports the db under the cache, with whether the cache is
+// fresh.
+func (c *CachedExternalSettings) Connections() []ConnectionStatus {
+	reporter, ok := c.inner.(ConnectionReporter)
+	if !ok {
+		return nil
+	}
+	statuses := reporter.Connections()
+	stamp, stamped := c.currentStamp()
+	c.mu.Lock()
+	fresh := c.fresh(stamp, stamped)
+	c.mu.Unlock()
+	note := "settings cache stale — reloads on the next request"
+	if fresh {
+		note = "settings cache fresh"
+	}
+	for index := range statuses {
+		statuses[index].Note = note
+	}
+	return statuses
 }
 
 func (c *CachedExternalSettings) SaveExternalSettings(settings ExternalSettings) error {
@@ -436,12 +556,14 @@ func (c *CachedExternalSettings) SaveExternalSettings(settings ExternalSettings)
 		c.mu.Unlock()
 		return err
 	}
-	c.remember(settings.withDefaults()) // what a load of it would answer
+	stamp, stamped := c.currentStamp()
+	c.remember(settings.withDefaults(), stamp, stamped) // what a load of it would answer
 	return nil
 }
 
-func (c *CachedExternalSettings) remember(settings ExternalSettings) {
+func (c *CachedExternalSettings) remember(settings ExternalSettings, stamp fileStamp, stamped bool) {
 	c.mu.Lock()
 	c.cached, c.loadedAt, c.valid = settings, time.Now(), true
+	c.stamp, c.stamped = stamp, stamped
 	c.mu.Unlock()
 }

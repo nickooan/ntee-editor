@@ -163,6 +163,9 @@ func runEditor(absRoot, startFile string, startLine int) int {
 		db = store.NewAsyncWrites(s) // undo snapshots and the corpus are written off the UI goroutine
 	}
 	defer db.Close()
+	// Registered before the socket's Close, so it runs after it: no request
+	// can reopen a connection once they are closed.
+	defer store.CloseConnections()
 	// Agent edit sessions belong to a folder window; single-file mode never
 	// listens on the socket.
 	var agentEdits *staging.Registry

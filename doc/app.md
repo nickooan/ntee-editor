@@ -32,7 +32,7 @@ Three design rules shape almost every function here:
 | `modeReview` | read-only multi-file change review (an external `review` request) |
 | `modeExternalHistory` | the saved external-message history (Ctrl+T › external › history) |
 
-**The Update/View loop.** `Update` restarts a paused git-status poll on a key, mouse or focus event, then hands every message to `updateMessage`, which handles non-key messages (window size, LSP diagnostics, async results, git status ticks, mouse, paste). For key presses it peels overlays in priority order — Ctrl+C (always quit), a pending keybind capture (so the capture can take any chord, quit included), the bound quit key, splash, the choice overlay (`:rm` confirm, external-request confirm), message overlay, fuzzy finder, definition picker, grep, the Ctrl+R op overlay — then the two list + detail views (review, message history), which own every key so the project-wide chords can't open files underneath them, then the global action chords (Ctrl+W/P/U/G/T/R, Shift+Tab, all suppressed while a text bar has focus via `inBarMode`), and finally dispatches on `m.mode` to the per-mode handler.
+**The Update/View loop.** `Update` restarts a paused git-status poll on a key, mouse or focus event, then hands every message to `updateMessage`, and afterwards arms the ntee-db pane's refresh when it needs one (`withInspectConnectionsTick`). `updateMessage` handles non-key messages (window size, LSP diagnostics, async results, git status ticks, mouse, paste). For key presses it peels overlays in priority order — Ctrl+C (always quit), a pending keybind capture (so the capture can take any chord, quit included), the bound quit key, splash, the choice overlay (`:rm` confirm, external-request confirm), message overlay, fuzzy finder, definition picker, grep, the Ctrl+R op overlay — then the two list + detail views (review, message history), which own every key so the project-wide chords can't open files underneath them, then the global action chords (Ctrl+W/P/U/G/T/R, Shift+Tab, all suppressed while a text bar has focus via `inBarMode`), and finally dispatches on `m.mode` to the per-mode handler.
 
 **Keys are bound, not hardcoded.** Every rebindable chord is matched through `m.keys` (an `internal/keymap.Keymap` resolved in `New` from `cfg.Keybinds`, with any warnings appended to the startup notice): `m.keys.ActionFor(k)` / `m.keys.Matches(action, k)` instead of `k == "ctrl+p"`. Key names in this document are the defaults. Navigation and text primitives (arrows, Enter, Esc, Tab, Backspace) and overlay-local chords (grep's Ctrl+J newline, the op inputs' Ctrl+A/Ctrl+E, the op table's Ctrl+S) stay fixed. Status-bar hints and notices that name a chord read it from the keymap too (`actionHints` in render.go). `View` (render.go) assembles header + sidebar pane + main pane + status rows, choosing the main body by the same overlay-then-mode priority.
 
@@ -737,7 +737,7 @@ The left pane is one list. File tree, inspection menu, and preview outline each 
 #### render_inspect.go
 
 - `renderInspectMain` routes to the selected panel. Each one is an `infoPanel` (render_panel.go) with the same layout as op-commands:
-  - `renderInspectDB`: records; main log and blobs, each as a size, a 10-cell live/dead usage bar, and the live/waste split (`usageSummary`); generations, with a red warning when relieve is needed. Loading and the in-memory fallback replace the rows with one explanatory line.
+  - `renderInspectDB`: records; main log and blobs, each as a size, a 10-cell live/dead usage bar, and the live/waste split (`usageSummary`); generations, with a red warning when relieve is needed. Loading and the in-memory fallback replace the rows with one explanatory line. Under it, a **connections** section (inspect_connections.go) lists every db connection the editor has.
   - `renderInspectLSP`: one row per language from the registry, showing `● running` (green), `○ stopped` (yellow) or `⊘ disabled — reason` (dim). When LSP is off globally, a single line explains why.
   - `renderInspectSystem`: version, the current colour style, and the available styles, one per line. The current style is marked `● … current`. While the picker has focus, the highlighted style is a full-width `▸` selection bar, and a `preview` row shows the sample in that style. Unfocused, the title invites `press → to choose a style`.
 - Each `renderInspect*` gets the pane height and passes it to `infoPanel.render`, so a panel never grows past the terminal.
@@ -745,6 +745,18 @@ The left pane is one list. File tree, inspection menu, and preview outline each 
 - The waste share in `usageSummary` turns yellow at 30% and red at 60%, the point where `db compact` or `db relieve` is worth running.
 
 *Plus small helpers: `humanBytes`, `percent`/`percentValue` — number formatting. The left menu is `inspectSidebarList` in sidebarlist.go.*
+
+#### inspect_connections.go
+
+- `dbConnections` snapshots the connections of the project store, the agent edit log, the message history and the global settings db (`store.ConnectionReporter`). A store that doesn't report, the in-memory fallbacks, gets a `◌ in memory` row. The snapshots never wait on a db call, so the pane can read them on every frame.
+- `connectionsSection`/`connectionPieces` draw one stacked row per connection:
+  - the state, in green `● open`, dim `○ closed`, blue `◌ per call` or dim `◌ in memory`, with the times that matter for it: since start for the session-long project store, open / idle / a yellow `closes in` for an open lease, last used for a closed one;
+  - for a lease, a reuse bar (`reuseLine`): the share of calls served without an open, full only when every call reused it, plus calls on opens and reconnects (yellow when any);
+  - the settings cache note (green fresh, yellow stale) for the global db;
+  - the last error in red.
+- `withInspectConnectionsTick` — called from `Update` after every message. While the ntee-db pane is shown and a lease is open, it arms a 1 s `inspectConnectionsTick`, so idle and closes-in count. Each tick clears `inspectConnectionsTicking` and the next `Update` re-arms it only if both still hold, so leaving the pane, or the last lease closing, stops the chain. An agent's next request lands as a message, and that message re-arms it.
+
+*Plus: `anyLeaseOpen`, `usedAgo`, `plural`, `compactDuration` (a duration in its two largest units: `4s`, `1m12s`, `2h05m`).*
 
 #### render_panel.go
 
@@ -758,6 +770,7 @@ What it provides:
 - `infoPanel.render(width, height)` builds a read-only panel from a description:
   - Title (plus an optional yellow `titleHint`), subtitle and headers.
   - Either `panelRow`s or a spanning `message`.
+  - Optional `sections`: more titled tables under the first (`panelSection`), for example the ntee-db pane's connections. `table` sizes the key column over every section's labels, so the columns line up. `panelTable.lines` draws each table.
   - Notes and a Commands legend.
 - A row's value is a list of pre-styled pieces. `wrapStyled` lays them side by side and moves them onto continuation lines when the value column is narrow. `stacked` puts one piece per line, and `selectedPiece` (1-based) pads that line in the selection colour (`panelCellFill`).
 - When the panel is taller than `height`, it drops the least useful parts in order: the legend first (the status bar shows the keys too), then the spacing, then the subtitle. Anything still over is clipped.

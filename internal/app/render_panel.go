@@ -187,17 +187,31 @@ type infoPanel struct {
 	titleHint              string // focus hint after the title ("press → to …")
 	keyHeader, valueHeader string
 	rows                   []panelRow
-	message                []string // plain text lines spanning the table (loading, unavailable)
-	after                  []string // pre-styled lines under the table
+	message                []string       // plain text lines spanning the table (loading, unavailable)
+	sections               []panelSection // more tables under the first, columns aligned with it
+	after                  []string       // pre-styled lines under the tables
 	legend                 []panelLegendEntry
 }
 
-// table sizes the panel's table: the key column fits the longest label,
-// capped at a third of the width.
+// panelSection is a titled table drawn under the panel's own.
+type panelSection struct {
+	title, note            string
+	keyHeader, valueHeader string
+	rows                   []panelRow
+}
+
+// table sizes the panel's tables: the key column fits the longest label of
+// any of them, capped at a third of the width.
 func (panel infoPanel) table(width int) panelTable {
 	keyWidth := len(panel.keyHeader)
 	for _, row := range panel.rows {
 		keyWidth = max(keyWidth, len([]rune(row.label)))
+	}
+	for _, section := range panel.sections {
+		keyWidth = max(keyWidth, len(section.keyHeader))
+		for _, row := range section.rows {
+			keyWidth = max(keyWidth, len([]rune(row.label)))
+		}
 	}
 	return newPanelTable(width, min(keyWidth, max(6, width/3)), 0, false)
 }
@@ -215,35 +229,14 @@ func (panel infoPanel) render(width, height int) string {
 	if panel.titleHint != "" {
 		heading[0] += panelSubtitleStyle.Render("  ·  ") + opFocusHintStyle.Render(panel.titleHint)
 	}
-	body := []string{table.border("╭", "┬", "╮"), table.header(panel.keyHeader, panel.valueHeader)}
-	if len(panel.rows) == 0 {
-		body = append(body, table.border("├", "┴", "┤"))
-		for _, text := range panel.message {
-			for _, line := range wrapWords(text, table.contentWidth()) {
-				body = append(body, table.spanning(panelSubtitleStyle.Render(padTo(line, table.contentWidth()))))
-			}
+	body := table.lines(panel.keyHeader, panel.valueHeader, panel.rows, panel.message)
+	for _, section := range panel.sections {
+		title := panelHeaderStyle.Render(truncateRunes(section.title, width))
+		if section.note != "" {
+			title += panelSubtitleStyle.Render(truncateRunes("  ·  "+section.note, max(0, width-len([]rune(section.title)))))
 		}
-		body = append(body, table.border("╰", "", "╯"))
-	} else {
-		body = append(body, table.border("├", "┼", "┤"))
-		for index, row := range panel.rows {
-			if index > 0 {
-				body = append(body, table.rowRule())
-			}
-			for valueIndex, value := range row.lines(table.valueWidth) {
-				label := ""
-				if valueIndex == 0 {
-					label = row.label
-				}
-				fill := baseStyle
-				if valueIndex+1 == row.selectedPiece {
-					fill = selectedEntryStyle
-				}
-				body = append(body, table.row("", []string{panelCell(panelLabelStyle.Render(label), table.keyWidth),
-					panelCellFill(value, table.valueWidth, fill)}, baseStyle, baseStyle))
-			}
-		}
-		body = append(body, table.border("╰", "┴", "╯"))
+		body = append(body, "", title)
+		body = append(body, table.lines(section.keyHeader, section.valueHeader, section.rows, nil)...)
 	}
 	var legend []string
 	if len(panel.legend) > 0 {
@@ -282,6 +275,40 @@ func (panel infoPanel) render(width, height int) string {
 		lines = lines[:height]
 	}
 	return panelIndent(lines)
+}
+
+// lines draws one table: the header, then the rows, or the message spanning
+// the table when there are none.
+func (table panelTable) lines(keyHeader, valueHeader string, rows []panelRow, message []string) []string {
+	body := []string{table.border("╭", "┬", "╮"), table.header(keyHeader, valueHeader)}
+	if len(rows) == 0 {
+		body = append(body, table.border("├", "┴", "┤"))
+		for _, text := range message {
+			for _, line := range wrapWords(text, table.contentWidth()) {
+				body = append(body, table.spanning(panelSubtitleStyle.Render(padTo(line, table.contentWidth()))))
+			}
+		}
+		return append(body, table.border("╰", "", "╯"))
+	}
+	body = append(body, table.border("├", "┼", "┤"))
+	for index, row := range rows {
+		if index > 0 {
+			body = append(body, table.rowRule())
+		}
+		for valueIndex, value := range row.lines(table.valueWidth) {
+			label := ""
+			if valueIndex == 0 {
+				label = row.label
+			}
+			fill := baseStyle
+			if valueIndex+1 == row.selectedPiece {
+				fill = selectedEntryStyle
+			}
+			body = append(body, table.row("", []string{panelCell(panelLabelStyle.Render(label), table.keyWidth),
+				panelCellFill(value, table.valueWidth, fill)}, baseStyle, baseStyle))
+		}
+	}
+	return append(body, table.border("╰", "┴", "╯"))
 }
 
 // appendSection adds a blank-line-separated block when it has any lines.

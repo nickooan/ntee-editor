@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	nteedb "github.com/nickooan/ntee-db/nteedb-core"
 )
@@ -195,7 +196,8 @@ func scopedKey(projectKey, repoPrefix, scope string) string {
 
 // Store is the ntee-db-backed Backend.
 type Store struct {
-	db *nteedb.DB
+	db       *nteedb.DB
+	openedAt time.Time
 
 	// recents caches the opened-file records newest first, read from the db
 	// once: this process is the store's only writer, so TouchOpened and
@@ -245,10 +247,16 @@ func Open(projectRoot string, maxSnapshotsPerFile int) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Store{db: db}, nil
+	return &Store{db: db, openedAt: time.Now()}, nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
+
+// Connections reports the project store's connection, held from start to
+// quit: only this window writes it.
+func (s *Store) Connections() []ConnectionStatus {
+	return []ConnectionStatus{{Name: "project store", Mode: ConnectionSessionLong, Open: true, Opens: 1, OpenedAt: s.openedAt}}
+}
 
 // Maintenance gathers disk-usage statistics. BlobUsage does O(records) preads,
 // so this is only ever called from a tea.Cmd goroutine, never during render.

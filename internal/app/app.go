@@ -310,10 +310,12 @@ type Model struct {
 	inspectInfoErr  error  // store.ErrNoStats → in-memory fallback text
 	inspectLoading  bool   // stats fetch in flight
 	inspectBusy     string // "" | "compact" | "relieve" — blocks duplicate runs
-	stylePicker     stylePickerState
-	lspPicker       lspPickerState
-	keybindPicker   keybindPickerState
-	codeStylePicker codeStylePickerState
+	// inspectConnectionsTicking: the ntee-db pane's 1 s refresh is armed.
+	inspectConnectionsTicking bool
+	stylePicker               stylePickerState
+	lspPicker                 lspPickerState
+	keybindPicker             keybindPickerState
+	codeStylePicker           codeStylePickerState
 
 	// Op-commands: user-saved shell command templates in the global store
 	// (opStore), edited in the inspect dashboard's table and run from the
@@ -928,15 +930,18 @@ func truncatedNotice(cap int) string {
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	resumeGitPoll := false
 	if m.gitPollPaused {
 		switch msg.(type) {
 		case tea.KeyPressMsg, tea.MouseMsg, tea.FocusMsg:
-			m.gitPollPaused = false
-			model, cmd := m.updateMessage(msg)
-			return model, tea.Batch(cmd, gitStatusTick())
+			m.gitPollPaused, resumeGitPoll = false, true
 		}
 	}
-	return m.updateMessage(msg)
+	model, cmd := m.updateMessage(msg)
+	if resumeGitPoll {
+		cmd = tea.Batch(cmd, gitStatusTick())
+	}
+	return withInspectConnectionsTick(model, cmd)
 }
 
 func (m Model) updateMessage(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -1167,7 +1172,10 @@ func (m Model) updateMessage(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.dropExpiredWait(msg.reply), tea.Tick(agentEditWaitGrace, func(time.Time) tea.Msg { return agentEditsWaitGraceMsg{} })
 
 	case agentEditsWaitGraceMsg:
-		return m, nil // redraw only
+		return m, nil
+	case inspectConnectionsTickMsg:
+		m.inspectConnectionsTicking = false // Update re-arms it while still needed
+		return m, nil                       // redraw only
 
 	case agentEditsSeenMsg:
 		return withAgentEditsTick(m.handleAgentEditsSeen(msg))
